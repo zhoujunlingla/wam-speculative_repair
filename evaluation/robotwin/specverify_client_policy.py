@@ -559,6 +559,11 @@ class RiskRouterClientPolicy:
         verify_ret["effective_threshold"] = verify_threshold
         accepted_prefix = int(verify_ret.get("accepted_prefix", 0))
         full_prefix = int(draft_action.shape[1] * draft_action.shape[2]) if getattr(draft_action, "ndim", 0) == 3 else 0
+        action_per_frame = int(draft_action.shape[2]) if getattr(draft_action, "ndim", 0) == 3 else 0
+        if self.frame_st_id == 0 and action_per_frame > 0 and 0 < accepted_prefix <= action_per_frame:
+            verify_ret["raw_accepted_prefix"] = accepted_prefix
+            verify_ret["initial_partial_prefix_rejected"] = True
+            accepted_prefix = 0
         if self.teacher_cache_mode in ("stale_reference", "lazy_reference") and 0 < accepted_prefix < full_prefix:
             verify_ret["raw_accepted_prefix"] = accepted_prefix
             verify_ret[f"{self.teacher_cache_mode}_partial_prefix_rejected"] = True

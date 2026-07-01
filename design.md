@@ -55,3 +55,9 @@ If world gate is too strict, next single variable is threshold calibration or lo
 ## V6b Threshold Calibration: P95 World Score
 
 The first V6 calibration run showed the world-latent verifier was functional but too strict when using raw max patch distance: `world_n=16`, `pass=1`, `reject=15`; median `world_distance_max ~= 0.56` but median `world_distance_p95 ~= 0.24`. V6b keeps the same threshold (`0.35`) and changes only the aggregation criterion from max patch distance to p95 patch distance. This follows video-generation caching practice where percentile/top-k scores are more stable than a single worst patch.
+
+## V6c Reset/Initial Prefix Guard
+
+The p95 verifier reached `hanging_mug` trial 3/5 and then crashed after a new trial reset. The first post-reset draft passed action/world verification with `accepted_prefix=16`. In RoboTwin evaluation the first action frame is conditioned and skipped (`start_idx=1`), so accepting only the first frame executes zero real actions and produces an empty `key_frame_list`. The teacher verifier had not run a full `_infer` in that fresh trial, so its `init_latent` was still unset; the following `compute_kv_cache` could not build a valid latent/action cache and failed with `AttributeError: 'NoneType' object has no attribute 'shape'`.
+
+Fix: in `RiskRouterClientPolicy`, when `frame_st_id == 0`, reject verified prefixes that cover only the conditioned first frame (`accepted_prefix <= action_per_frame`) and fall back to teacher. This preserves normal full-prefix draft execution and only blocks the non-executable first-frame prefix.

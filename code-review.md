@@ -52,3 +52,24 @@ Fix: compute `torch.quantile(valid_dist.float().flatten(), 0.95)`.
 Tests: `python3 -m py_compile wan_va/wan_va_server.py`; `python3 -m pytest -q tests/test_specverify.py tests/test_specverify_client_policy.py` -> `9 passed in 1.35s`.
 
 Decision: allowed to rerun the same TN5 sync-cache calibration.
+# Code Review: V6c Initial Partial Prefix Guard
+
+## Scope
+
+- Repository: `/mnt/afs/intern/manlichen/ivan/zhoujunl/Wam_Speed_up/lingbot-va-riskrouter-worldlatent-20260701`
+- Change: reject `RiskRouterClientPolicy` verified prefixes that only include the first conditioned frame at episode start.
+- Motivation: V6c crashed after reset because a 16-step initial prefix executes zero real RobotWin steps, creates an empty cache update, and leaves the teacher verifier without `init_latent`.
+
+## Findings
+
+- No blocking findings.
+- Risk level: low-to-medium. The change is deliberately narrow: it only applies when `frame_st_id == 0` and `0 < accepted_prefix <= action_per_frame`. It does not alter action verifier distances, world-latent verifier scores, or non-initial prefix behavior.
+
+## Tests Run
+
+- `python3 -m pytest -q tests/test_specverify_client_policy.py::test_risk_router_rejects_initial_partial_prefix_before_cache_update tests/test_specverify_client_policy.py tests/test_specverify.py`
+  - Result: `11 passed`
+
+## Proceed Decision
+
+Allowed to rerun the `hanging_mug`/low10 smoke. The next run should confirm no `action_model_input=None` / empty-cache crash after trial reset.

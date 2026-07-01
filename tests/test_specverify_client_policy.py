@@ -111,3 +111,51 @@ def test_risk_router_world_verify_can_reject_action_accepted_chunk(tmp_path):
     records = [json.loads(line) for line in log_path.read_text().splitlines()]
     assert records[-1]["source"] == "teacher_world_verify_reject"
     assert records[-1]["verify"]["world_verify"]["world_pass"] is False
+
+
+def test_risk_router_rejects_initial_partial_prefix_before_cache_update(tmp_path):
+    clients = []
+
+    class _PartialPrefixClient:
+        def __init__(self, role):
+            self.role = role
+            self.calls = []
+
+        def infer(self, obs):
+            self.calls.append(dict(obs))
+            if obs.get("verify_action"):
+                return {"accepted_prefix": 16, "raw_valid_prefix": 16}
+            if obs.get("verify_world_latent"):
+                return {"world_pass": True, "world_distance_max": 0.0}
+            if obs.get("return_action_latent"):
+                action = np.zeros((16, 2, 16), dtype=np.float32)
+                action[:, 1, :] = 1.0
+                return {
+                    "action": action,
+                    "action_latent": np.zeros((1, 30, 2, 16, 1), dtype=np.float32),
+                    "video_latent": np.zeros((1, 48, 2, 24, 20), dtype=np.float32),
+                }
+            return {"action": np.full((16, 2, 16), 3.0, dtype=np.float32)}
+
+    def factory(host, port):
+        client = _PartialPrefixClient("draft" if not clients else "teacher")
+        clients.append(client)
+        return client
+
+    log_path = tmp_path / "metrics.jsonl"
+    policy = RiskRouterClientPolicy(
+        draft_port=1,
+        teacher_port=2,
+        teacher_cache_mode="sync",
+        risk_low=0.0,
+        risk_high=0.5,
+        world_verify_enable=True,
+        log_path=str(log_path),
+        client_factory=factory,
+    )
+    ret = policy.infer({"obs": ["x"], "state": np.zeros((16, 2, 16), dtype=np.float32)})
+
+    assert np.all(ret["action"] == 3.0)
+    records = [json.loads(line) for line in log_path.read_text().splitlines()]
+    assert records[-1]["source"] == "teacher_verify_reject"
+    assert records[-1]["verify"]["initial_partial_prefix_rejected"] is True

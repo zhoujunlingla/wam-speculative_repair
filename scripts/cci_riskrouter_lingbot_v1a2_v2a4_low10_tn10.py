@@ -20,7 +20,7 @@ from pathlib import Path
 
 
 ROOT = Path("/mnt/afs/intern/manlichen/ivan/zhoujunl")
-CODE = ROOT / "Wam_Speed_up" / "lingbot-va-riskrouter-phaseverify-20260701"
+CODE = ROOT / "Wam_Speed_up" / "lingbot-va-riskrouter-highverify-20260701"
 ROBOTWIN_ROOT = ROOT / "Wam_Speed_up" / "RoboTwin"
 EXPERIMENT_ROOT = ROOT / "experiments" / "Wam_Speed_up"
 RESULT_ROOT = ROOT / "result" / "Wam_Speed_up"
@@ -210,6 +210,9 @@ def specverify_metrics(log_path: Path) -> dict[str, object]:
         "draft_verify_accept": 0,
         "teacher_router_high": 0,
         "teacher_verify_reject": 0,
+        "high_verify": 0,
+        "high_verify_accept": 0,
+        "high_verify_reject": 0,
     }
     source_latencies: dict[str, list[float]] = {}
     action_latencies: list[float] = []
@@ -256,6 +259,10 @@ def specverify_metrics(log_path: Path) -> dict[str, object]:
             elif source in ("draft_low_risk", "draft_medium_noverify", "draft_verify_accept"):
                 counts["draft_accept"] += 1
                 counts[source] += 1
+                verify = row.get("verify") if isinstance(row.get("verify"), dict) else {}
+                if verify.get("risk_zone") == "high":
+                    counts["high_verify"] += 1
+                    counts["high_verify_accept"] += 1
             elif source == "teacher_full":
                 counts["teacher_full"] += 1
             elif source == "teacher_fallback":
@@ -280,6 +287,9 @@ def specverify_metrics(log_path: Path) -> dict[str, object]:
                 if verify.get("phase_switch") and verify.get("phase_mode") == "tighten":
                     counts["phase_tighten"] += 1
                     counts["phase_tighten_reject"] += 1
+                if verify.get("risk_zone") == "high":
+                    counts["high_verify"] += 1
+                    counts["high_verify_reject"] += 1
     action_rounds = counts["draft_accept"] + counts["teacher_full"] + counts["teacher_fallback"]
 
     def rate(value: int) -> float | None:
@@ -524,7 +534,7 @@ def launch(args: argparse.Namespace) -> None:
         f"phase_threshold_scale={args.phase_threshold_scale}, "
         f"low10 clean TN{args.test_num}. "
         f"Teacher cache mode={args.teacher_cache_mode}; "
-        "No periodic full refresh; phase switch tightens verify instead of forcing teacher."
+        "No periodic full refresh; high-risk chunks verify before teacher fallback; phase switch tightens verify."
     )
     (run_root / "command.sh").write_text(" ".join(sys.argv) + "\n", encoding="utf-8")
     (result_root / "command.sh").write_text(" ".join(sys.argv) + "\n", encoding="utf-8")

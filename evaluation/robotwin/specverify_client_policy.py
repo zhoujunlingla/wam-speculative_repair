@@ -518,15 +518,7 @@ class RiskRouterClientPolicy:
         risk_score = float(risk["risk_score"])
         elapsed = time.perf_counter() - start
 
-        if risk_score >= self.risk_high:
-            self.round_id += 1
-            return self._teacher_action(obs, "teacher_router_high", {
-                "risk": risk,
-                "elapsed_sec": elapsed,
-                "pending_teacher_cache_updates": len(self.pending_teacher_cache_obs),
-                "pending_teacher_cache_frames": self.pending_teacher_cache_frames,
-            })
-
+        high_risk = risk_score >= self.risk_high
         phase_switch = bool(risk.get("phase_switch"))
         if (risk_score < self.risk_low and not phase_switch) or self.risk_verify_mode == "off":
             source = "draft_low_risk" if risk_score < self.risk_low else "draft_medium_noverify"
@@ -555,6 +547,7 @@ class RiskRouterClientPolicy:
         })
         verify_ret["phase_switch"] = phase_switch
         verify_ret["phase_mode"] = "tighten" if phase_switch else "normal"
+        verify_ret["risk_zone"] = "high" if high_risk else "medium"
         verify_ret["base_threshold"] = self.threshold
         verify_ret["effective_threshold"] = verify_threshold
         accepted_prefix = int(verify_ret.get("accepted_prefix", 0))

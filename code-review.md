@@ -1,4 +1,4 @@
-# V2 Code Review
+# V3 Code Review
 
 ## Diff Reviewed
 
@@ -7,39 +7,37 @@ Command: `git diff`
 Changed files:
 
 1. `evaluation/robotwin/specverify_client_policy.py`
-2. `evaluation/robotwin/eval_polict_client_openpi.py`
-3. `scripts/cci_riskrouter_lingbot_v1a2_v2a4_low10_tn10.py`
+2. `scripts/cci_riskrouter_lingbot_v1a2_v2a4_low10_tn10.py`
+3. `design.md`
+4. `code-review.md`
 
 ## Changes
 
 ### `RiskRouterClientPolicy`
 
-- Added `phase_threshold_scale` to the constructor.
-- If `phase_switch=True`, low-risk bypass is disabled; the chunk must go through verifier.
-- During verifier call, `threshold` becomes `base_threshold * phase_threshold_scale` when phase switch is present.
-- Verifier metadata now records `phase_switch`, `phase_mode`, `base_threshold`, and `effective_threshold`.
+- Removed the direct `risk_score >= risk_high -> teacher_router_high` execution branch.
+- Added `high_risk = risk_score >= risk_high` and lets high-risk chunks continue to the verifier path.
+- Verifier metadata now records `risk_zone = high|medium`.
+- Low-risk bypass still applies only when `risk_score < risk_low` and no phase switch.
+- Phase switch behavior from V2 is unchanged: it tightens the verification threshold.
 
-### `eval_polict_client_openpi.py`
+### Launcher summary
 
-- Passes `--specverify_phase_threshold_scale` into `RiskRouterClientPolicy`.
-
-### Launcher script
-
-- Points `CODE` to the V2 repo root.
-- Default `--risk-phase-weight` changed from `0.25` to `0.0`, so phase no longer directly increases `risk_score`.
-- Summary text now says phase switch tightens verify rather than contributing to risk.
-- Metrics aggregation now counts phase-tightened teacher verify rejections.
+- `CODE` points to the V3 repo.
+- Metrics now count `high_verify`, `high_verify_accept`, and `high_verify_reject`.
 
 ## Review Findings
 
-No blocking issues found in the intended single-variable diff.
+No blocking issues in the intended single-variable diff.
 
-Residual risk:
+Residual risks:
 
-- A phase-switch chunk with very low motion now pays verifier cost instead of free draft. This is intended because gripper switch is a contact-phase boundary.
-- If phase-tightened verify rejects too often, teacher rate may remain high through `teacher_verify_reject` rather than `teacher_router_high`. That will be visible in `specverify_counts`.
+- High-risk accepted drafts may harm success if verifier threshold is too loose for contact tasks.
+- High-risk rejected drafts still pay verifier + teacher, so latency could worsen if rejection is common.
+
+Both risks are measurable via `high_verify_accept/reject`, source latencies, and low10 success.
 
 ## Required Smoke Tests
 
-- Python compile of modified files.
-- Fake-client test where phase switch action has low continuous risk: V2 should call verifier with tightened threshold and should not call teacher action when verifier accepts.
+- Python compile modified files.
+- Fake-client high-risk action should call verifier first and avoid teacher action when accepted.

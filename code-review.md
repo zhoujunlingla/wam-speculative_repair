@@ -41,3 +41,18 @@ Both risks are measurable via `high_verify_accept/reject`, source latencies, and
 
 - Python compile modified files.
 - Fake-client high-risk action should call verifier first and avoid teacher action when accepted.
+
+## Bugfix After First Launch
+
+The first V3 launch crashed before completing a trial. Root cause:
+
+- The verifier accepted a partial prefix (`accepted_prefix=16`).
+- With `teacher_cache_mode=stale_reference`, the teacher later synced only the latest real cache update.
+- The teacher VAE streaming cache then saw an incompatible frame chunk and raised a tensor size mismatch.
+
+Fix:
+
+- In `stale_reference` mode, reject partial prefixes: `0 < accepted_prefix < full_chunk` is treated as verify reject and falls back to teacher.
+- Full-chunk accepted draft remains allowed.
+
+This is a correctness guard for stale-cache alignment, not a new routing feature.

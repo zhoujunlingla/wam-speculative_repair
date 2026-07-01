@@ -27,3 +27,13 @@ This patch prevents that incompatible path by forcing partial verifier accept to
 ## Decision
 
 Allowed to proceed to V5 low10 TN=10 relaunch on allowed GPUs. Continue to monitor whether teacher rate increases too much from rejecting partial prefixes; if so, the next single-variable iteration should target a cache-safe partial execution mechanism rather than re-enabling partial prefixes blindly.
+
+## Additional Launcher Path Review
+
+Finding: the copied launcher still pointed `CODE` at the older `lingbot-va-riskrouter-highverify-20260701` root. This would silently run the wrong code and invalidate V5 results.
+
+Fix: update the launcher `CODE` constant to `/mnt/afs/intern/manlichen/ivan/zhoujunl/Wam_Speed_up/lingbot-va-riskrouter-lazyprefix-20260701`.
+
+Verification: reran `python3 -m pytest -q tests/test_specverify.py tests/test_specverify_client_policy.py`; result `8 passed in 1.56s`.
+
+Decision: allowed to proceed.

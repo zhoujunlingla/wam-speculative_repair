@@ -20,7 +20,7 @@ from pathlib import Path
 
 
 ROOT = Path("/mnt/afs/intern/manlichen/ivan/zhoujunl")
-CODE = ROOT / "Wam_Speed_up" / "lingbot-va-riskrouter-highverify-20260701"
+CODE = ROOT / "Wam_Speed_up" / "lingbot-va-riskrouter-lazyprefix-20260701"
 ROBOTWIN_ROOT = ROOT / "Wam_Speed_up" / "RoboTwin"
 EXPERIMENT_ROOT = ROOT / "experiments" / "Wam_Speed_up"
 RESULT_ROOT = ROOT / "result" / "Wam_Speed_up"

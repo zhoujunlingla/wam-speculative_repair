@@ -64,3 +64,7 @@ Source evidence from V4 lazy-reference run `20260701_051809`: both shards accept
 Single new variable for V5: apply the same partial-prefix rejection used by `stale_reference` to `lazy_reference`. Under non-sync teacher cache modes, verified draft execution is now limited to either `0` or the full action chunk. This preserves ordered teacher cache compatibility while still allowing full-chunk draft execution and high-risk verification.
 
 No verifier thresholds, risk weights, teacher model, draft model, tau set, or task split are changed.
+
+## V5 Launcher Path Guard
+
+The copied launcher must point `CODE` at this V5 repository, otherwise the experiment would silently run the older highverify code. This is an experiment-validity fix only; it does not change model configs, router thresholds, or runtime policy.

@@ -1,58 +1,29 @@
-# V3 Code Review
+# Code Review: V5 Lazy Partial-Prefix Guard
 
-## Diff Reviewed
+## Change Reviewed
 
-Command: `git diff`
+Repository: `/mnt/afs/intern/manlichen/ivan/zhoujunl/Wam_Speed_up/lingbot-va-riskrouter-lazyprefix-20260701`
 
-Changed files:
+Single change: extend the existing partial-prefix rejection guard from `stale_reference` to both `stale_reference` and `lazy_reference` teacher cache modes.
 
-1. `evaluation/robotwin/specverify_client_policy.py`
-2. `scripts/cci_riskrouter_lingbot_v1a2_v2a4_low10_tn10.py`
-3. `design.md`
-4. `code-review.md`
+## Findings
 
-## Changes
+No blocking findings.
 
-### `RiskRouterClientPolicy`
+Risk level: low. This is a narrow correctness guard. It intentionally reduces some speculative acceptance opportunities, but only for partial chunks under non-sync teacher cache modes. Full-chunk draft execution and verifier accept/reject behavior are unchanged.
 
-- Removed the direct `risk_score >= risk_high -> teacher_router_high` execution branch.
-- Added `high_risk = risk_score >= risk_high` and lets high-risk chunks continue to the verifier path.
-- Verifier metadata now records `risk_zone = high|medium`.
-- Low-risk bypass still applies only when `risk_score < risk_low` and no phase switch.
-- Phase switch behavior from V2 is unchanged: it tightens the verification threshold.
+## Evidence
 
-### Launcher summary
+V4 lazy-reference crash evidence showed both shards accepted a 16-step partial prefix, then queued a 1-frame pending teacher cache update. When teacher fallback later attempted lazy catch-up, LingBot teacher KV-cache update received `action_model_input=None` and crashed before any valid trial.
 
-- `CODE` points to the V3 repo.
-- Metrics now count `high_verify`, `high_verify_accept`, and `high_verify_reject`.
+This patch prevents that incompatible path by forcing partial verifier accept to become a teacher fallback. That keeps teacher cache updates aligned with complete chunk/frame boundaries.
 
-## Review Findings
+## Tests Run
 
-No blocking issues in the intended single-variable diff.
+- `lazy partial-prefix smoke passed`: fake draft + fake verifier confirmed `accepted_prefix=16` in `lazy_reference` becomes `teacher_verify_reject`, while `accepted_prefix=32` remains `draft_verify_accept`.
+- `python3 -m pytest -q tests/test_specverify.py tests/test_specverify_client_policy.py`
+  - Result: `8 passed in 1.91s`
 
-Residual risks:
+## Decision
 
-- High-risk accepted drafts may harm success if verifier threshold is too loose for contact tasks.
-- High-risk rejected drafts still pay verifier + teacher, so latency could worsen if rejection is common.
-
-Both risks are measurable via `high_verify_accept/reject`, source latencies, and low10 success.
-
-## Required Smoke Tests
-
-- Python compile modified files.
-- Fake-client high-risk action should call verifier first and avoid teacher action when accepted.
-
-## Bugfix After First Launch
-
-The first V3 launch crashed before completing a trial. Root cause:
-
-- The verifier accepted a partial prefix (`accepted_prefix=16`).
-- With `teacher_cache_mode=stale_reference`, the teacher later synced only the latest real cache update.
-- The teacher VAE streaming cache then saw an incompatible frame chunk and raised a tensor size mismatch.
-
-Fix:
-
-- In `stale_reference` mode, reject partial prefixes: `0 < accepted_prefix < full_chunk` is treated as verify reject and falls back to teacher.
-- Full-chunk accepted draft remains allowed.
-
-This is a correctness guard for stale-cache alignment, not a new routing feature.
+Allowed to proceed to V5 low10 TN=10 relaunch on allowed GPUs. Continue to monitor whether teacher rate increases too much from rejecting partial prefixes; if so, the next single-variable iteration should target a cache-safe partial execution mechanism rather than re-enabling partial prefixes blindly.

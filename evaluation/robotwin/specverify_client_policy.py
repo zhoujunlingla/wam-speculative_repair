@@ -339,6 +339,9 @@ class RiskRouterClientPolicy:
         risk_jerk_ref: float = 0.18,
         risk_phase_weight: float = 0.25,
         phase_threshold_scale: float = 0.5,
+        world_verify_enable: bool = False,
+        world_verify_threshold: float = 0.35,
+        world_verify_tau_timesteps=(150.0, 300.0),
         log_path: Optional[str] = None,
         client_factory=None,
     ) -> None:
@@ -362,6 +365,9 @@ class RiskRouterClientPolicy:
         self.risk_jerk_ref = float(risk_jerk_ref)
         self.risk_phase_weight = float(risk_phase_weight)
         self.phase_threshold_scale = float(phase_threshold_scale)
+        self.world_verify_enable = bool(world_verify_enable)
+        self.world_verify_threshold = float(world_verify_threshold)
+        self.world_verify_tau_timesteps = tuple(float(x) for x in world_verify_tau_timesteps)
         self.round_id = 0
         self.frame_st_id = 0
         self.pending_teacher_cache_obs = []
@@ -506,6 +512,7 @@ class RiskRouterClientPolicy:
 
         draft_obs = dict(obs)
         draft_obs["return_action_latent"] = self.risk_verify_mode == "medium"
+        draft_obs["return_video_latent"] = self.world_verify_enable
         draft_ret = self.draft.infer(draft_obs)
         draft_action = draft_ret["action"]
         risk = action_risk_score(
@@ -568,16 +575,42 @@ class RiskRouterClientPolicy:
                 "pending_teacher_cache_frames": self.pending_teacher_cache_frames,
             })
 
+        world_verify_ret = None
+        if self.world_verify_enable:
+            video_latent = draft_ret.get("video_latent")
+            if video_latent is None:
+                raise RuntimeError("world verifier requires draft server return_video_latent support")
+            world_verify_ret = self.teacher.infer({
+                "verify_world_latent": True,
+                "video_latent": video_latent,
+                "threshold": self.world_verify_threshold,
+                "tau_timesteps": self.world_verify_tau_timesteps,
+                "frame_st_id": self.frame_st_id,
+            })
+            verify_ret["world_verify"] = world_verify_ret
+            if not bool(world_verify_ret.get("world_pass", False)):
+                elapsed = time.perf_counter() - start
+                self.round_id += 1
+                return self._teacher_action(obs, "teacher_world_verify_reject", {
+                    "risk": risk,
+                    "verify": verify_ret,
+                    "accepted_prefix": 0,
+                    "elapsed_sec": elapsed,
+                    "pending_teacher_cache_updates": len(self.pending_teacher_cache_obs),
+                    "pending_teacher_cache_frames": self.pending_teacher_cache_frames,
+                })
+
         action = slice_action_prefix(draft_action, accepted_prefix)
         self._log({
             "source": "draft_verify_accept",
             "accepted_prefix": accepted_prefix,
             "risk": risk,
             "verify": verify_ret,
+            "world_verify": world_verify_ret,
             "pending_teacher_cache_updates": len(self.pending_teacher_cache_obs),
             "pending_teacher_cache_frames": self.pending_teacher_cache_frames,
-            "elapsed_sec": elapsed,
+            "elapsed_sec": time.perf_counter() - start,
         })
-        self._log_latency(obs, elapsed, "draft_verify_accept")
+        self._log_latency(obs, time.perf_counter() - start, "draft_verify_accept")
         self.round_id += 1
         return {"action": action}

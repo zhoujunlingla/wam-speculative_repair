@@ -65,6 +65,10 @@ class VA_Server:
             extra_one_step=True)
         self.verify_scheduler = make_verify_scheduler(
             self.job_config.action_snr_shift)
+        self.video_verify_scheduler = FlowMatchScheduler(shift=self.job_config.snr_shift,
+                                                         sigma_min=0.0,
+                                                         extra_one_step=True)
+        self.video_verify_scheduler.set_timesteps(1000, training=True)
         self.scheduler.set_timesteps(1000, training=True)
         self.action_scheduler.set_timesteps(1000, training=True)
 
@@ -383,6 +387,116 @@ class VA_Server:
         return rearrange(action_noise_pred,
                          'b (f n) c -> b c f n 1',
                          f=frame_chunk_size)
+
+    def forward_video_only_verify(self,
+                                  noisy_latents,
+                                  video_timesteps,
+                                  frame_st_id=0,
+                                  cache_name=None):
+        """Run the video branch for one verifier timestep at a time."""
+        if self.prompt_embeds is None:
+            raise RuntimeError("forward_video_only_verify requires a prompt cache")
+        if noisy_latents.ndim != 5:
+            raise ValueError("noisy_latents must have shape [K, C, F, H, W]")
+
+        cache_name = cache_name or self.cache_name
+        timesteps = torch.as_tensor(video_timesteps,
+                                    dtype=torch.float32,
+                                    device=self.device).flatten()
+        if timesteps.numel() != noisy_latents.shape[0]:
+            raise ValueError("video_timesteps must contain one value per verifier batch")
+
+        outputs = []
+        frame_chunk_size = noisy_latents.shape[2]
+        for row, timestep in enumerate(timesteps):
+            latent_cond = noisy_latents[row:row + 1, :, 0:1].clone() if frame_st_id == 0 else None
+            input_dict = self._prepare_latent_input(
+                noisy_latents[row:row + 1].to(device=self.device, dtype=self.dtype),
+                None,
+                timestep,
+                timestep,
+                latent_cond,
+                None,
+                frame_st_id=frame_st_id,
+            )
+            video_noise_pred = self.transformer(
+                self._repeat_input_for_cfg(input_dict['latent_res_lst']),
+                update_cache=0,
+                cache_name=cache_name,
+                action_mode=False,
+            )
+            video_noise_pred = data_seq_to_patch(
+                self.job_config.patch_size,
+                video_noise_pred,
+                frame_chunk_size,
+                self.latent_height,
+                self.latent_width,
+                batch_size=2 if self.use_cfg else 1,
+            )
+            if self.job_config.guidance_scale > 1:
+                video_noise_pred = video_noise_pred[1:] + self.job_config.guidance_scale * (video_noise_pred[:1] - video_noise_pred[1:])
+            else:
+                video_noise_pred = video_noise_pred[:1]
+            outputs.append(video_noise_pred)
+        return torch.cat(outputs, dim=0)
+
+    def verify_world_latent_chunk(self,
+                                  draft_latents,
+                                  frame_st_id=0,
+                                  tau_timesteps=(150.0, 300.0),
+                                  threshold=0.35,
+                                  cache_name=None):
+        """Verify a draft video/world latent against the teacher video flow."""
+        if draft_latents.ndim != 5 or draft_latents.shape[0] != 1:
+            raise ValueError("draft_latents must have shape [1, C, F, H, W]")
+
+        tau_timesteps = torch.as_tensor(tau_timesteps,
+                                        dtype=torch.float32,
+                                        device=self.device).flatten()
+        if tau_timesteps.numel() < 1:
+            raise ValueError("tau_timesteps must be non-empty")
+
+        draft = draft_latents.to(device=self.device, dtype=self.dtype).clone()
+        batch_size = tau_timesteps.numel()
+        draft_batch = draft.repeat(batch_size, 1, 1, 1, 1)
+        noise = torch.randn_like(draft).repeat(batch_size, 1, 1, 1, 1)
+
+        conditioned_frame_count = 1 if frame_st_id == 0 else 0
+        if conditioned_frame_count:
+            noise[:, :, :conditioned_frame_count] = 0
+
+        z_tau = scheduler_add_noise_batched(
+            scheduler=self.video_verify_scheduler,
+            clean=draft_batch,
+            noise=noise,
+            timesteps=tau_timesteps,
+        )
+        if conditioned_frame_count:
+            z_tau[:, :, :conditioned_frame_count] = draft_batch[:, :, :conditioned_frame_count]
+
+        velocity = self.forward_video_only_verify(z_tau,
+                                                  tau_timesteps,
+                                                  frame_st_id=frame_st_id,
+                                                  cache_name=cache_name)
+        recon = scheduler_step_to_final_batched(
+            scheduler=self.video_verify_scheduler,
+            model_output=velocity,
+            timesteps=tau_timesteps,
+            sample=z_tau,
+        )
+
+        dist = (recon - draft_batch).abs().mean(dim=1)
+        valid_dist = dist[:, conditioned_frame_count:]
+        if valid_dist.numel() == 0:
+            valid_dist = dist
+        pass_world = bool(valid_dist.max().item() <= threshold)
+        return {
+            "world_pass": pass_world,
+            "world_distances": valid_dist.detach().float().cpu(),
+            "world_tau_timesteps": tau_timesteps.detach().float().cpu(),
+            "world_threshold": float(threshold),
+            "world_conditioned_frame_count": conditioned_frame_count,
+        }
 
     def verify_action_chunk(self,
                             draft_actions,
@@ -704,6 +818,7 @@ class VA_Server:
 
         actions[:, ~self.action_mask] *= 0
         self.last_action_latent = actions.detach().float().cpu().numpy()
+        self.last_video_latent = latents.detach().float().cpu().numpy()
         self.last_teacher_self_verify = teacher_self_verify_result
 
         save_async(latents, os.path.join(self.exp_save_root, f'latents_{frame_st_id}.pt'))
@@ -753,6 +868,7 @@ class VA_Server:
         prompt = obs.get('prompt', None)
         compute_kv_cache = obs.get('compute_kv_cache', False)
         verify_action = obs.get('verify_action', False)
+        verify_world_latent = obs.get('verify_world_latent', False)
 
         if reset:
             logger.info(f"******************* Reset server ******************")
@@ -785,6 +901,33 @@ class VA_Server:
                 "distance_p95": float(torch.quantile(distances.flatten(), 0.95).item()),
                 "distance_by_tau_mean": distances.mean(dim=(1, 2)).numpy().tolist(),
             }
+        elif verify_world_latent:
+            logger.info(f"################# Verify World Latent Chunk #################")
+            draft_latent = obs.get("video_latent")
+            if draft_latent is None:
+                raise ValueError("verify_world_latent requires video_latent")
+            if not isinstance(draft_latent, torch.Tensor):
+                draft_latent = torch.as_tensor(draft_latent)
+            if draft_latent.ndim == 4:
+                draft_latent = draft_latent.unsqueeze(0)
+            draft_latent = draft_latent.to(device=self.device, dtype=self.dtype)
+            frame_st_id = int(obs.get("frame_st_id", self.frame_st_id))
+            verify_result = self.verify_world_latent_chunk(
+                draft_latent,
+                frame_st_id=frame_st_id,
+                tau_timesteps=obs.get("tau_timesteps", (150.0, 300.0)),
+                threshold=float(obs.get("threshold", 0.35)),
+            )
+            distances = verify_result.pop("world_distances")
+            tau_timesteps = verify_result.pop("world_tau_timesteps")
+            return {
+                **verify_result,
+                "world_tau_timesteps": tau_timesteps.numpy().tolist(),
+                "world_distance_mean": float(distances.mean().item()),
+                "world_distance_max": float(distances.max().item()),
+                "world_distance_p95": float(torch.quantile(distances.flatten(), 0.95).item()),
+                "world_distance_by_tau_mean": distances.mean(dim=tuple(range(1, distances.ndim))).numpy().tolist(),
+            }
         elif compute_kv_cache:
             logger.info(
                 f"################# Compute KV Cache #################")
@@ -796,6 +939,8 @@ class VA_Server:
             ret = dict(action=action)
             if obs.get("return_action_latent", False):
                 ret["action_latent"] = self.last_action_latent
+            if obs.get("return_video_latent", False):
+                ret["video_latent"] = self.last_video_latent
             return ret
     
     def decode_one_video(self, latents, output_type):

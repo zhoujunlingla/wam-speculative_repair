@@ -20,7 +20,7 @@ from pathlib import Path
 
 
 ROOT = Path("/mnt/afs/intern/manlichen/ivan/zhoujunl")
-CODE = ROOT / "Wam_Speed_up" / "lingbot-va-riskrouter-lazyprefix-20260701"
+CODE = ROOT / "Wam_Speed_up" / "lingbot-va-riskrouter-worldlatent-20260701"
 ROBOTWIN_ROOT = ROOT / "Wam_Speed_up" / "RoboTwin"
 EXPERIMENT_ROOT = ROOT / "experiments" / "Wam_Speed_up"
 RESULT_ROOT = ROOT / "result" / "Wam_Speed_up"
@@ -174,6 +174,7 @@ ACTION_SOURCES = {
     "teacher_fallback",
     "teacher_router_high",
     "teacher_verify_reject",
+    "teacher_world_verify_reject",
 }
 CACHE_SOURCES = {"compute_kv_cache", "compute_kv_cache_lazy_reference", "compute_kv_cache_stale_reference", "teacher_cache_sync", "teacher_cache_latest_sync", "reset"}
 
@@ -210,6 +211,10 @@ def specverify_metrics(log_path: Path) -> dict[str, object]:
         "draft_verify_accept": 0,
         "teacher_router_high": 0,
         "teacher_verify_reject": 0,
+        "teacher_world_verify_reject": 0,
+        "world_verify": 0,
+        "world_verify_accept": 0,
+        "world_verify_reject": 0,
         "high_verify": 0,
         "high_verify_accept": 0,
         "high_verify_reject": 0,
@@ -263,6 +268,9 @@ def specverify_metrics(log_path: Path) -> dict[str, object]:
                 if verify.get("risk_zone") == "high":
                     counts["high_verify"] += 1
                     counts["high_verify_accept"] += 1
+                if isinstance(row.get("world_verify"), dict) or isinstance(verify.get("world_verify"), dict):
+                    counts["world_verify"] += 1
+                    counts["world_verify_accept"] += 1
             elif source == "teacher_full":
                 counts["teacher_full"] += 1
             elif source == "teacher_fallback":
@@ -279,6 +287,12 @@ def specverify_metrics(log_path: Path) -> dict[str, object]:
             elif source == "teacher_router_high":
                 counts["teacher_fallback"] += 1
                 counts["teacher_router_high"] += 1
+            elif source == "teacher_world_verify_reject":
+                counts["teacher_fallback"] += 1
+                counts["teacher_world_verify_reject"] += 1
+                counts["world_verify"] += 1
+                counts["world_verify_reject"] += 1
+                verify = row.get("verify") if isinstance(row.get("verify"), dict) else {}
             elif source == "teacher_verify_reject":
                 counts["teacher_fallback"] += 1
                 counts["teacher_verify_reject"] += 1
@@ -432,6 +446,9 @@ def run_task(
     risk_mean_delta_ref: float,
     risk_jerk_ref: float,
     risk_phase_weight: float,
+    world_verify_enable: bool,
+    world_verify_threshold: float,
+    world_verify_tau: list[float],
 ) -> tuple[int, str]:
     log_path = run_root / "logs" / f"client_{task}.log"
     result_task_log = result_root / "logs" / f"client_{task}.log"
@@ -483,6 +500,10 @@ def run_task(
         str(risk_jerk_ref),
         "--risk_router_phase_weight",
         str(risk_phase_weight),
+        "--world_verify_threshold",
+        str(world_verify_threshold),
+        "--world_verify_tau",
+        *[str(x) for x in world_verify_tau],
         "--overrides",
         "--task_name",
         task,
@@ -507,6 +528,8 @@ def run_task(
         "--test_num",
         str(test_num),
     ]
+    if world_verify_enable:
+        cmd.insert(cmd.index("--overrides"), "--world_verify_enable")
     if disable_prime_draft_on_teacher_full:
         cmd.insert(cmd.index("--overrides"), "--specverify_disable_prime_draft_on_teacher_full")
     with log_path.open("a", buffering=1) as log:
@@ -599,6 +622,9 @@ def launch(args: argparse.Namespace) -> None:
                     risk_mean_delta_ref=args.risk_mean_delta_ref,
                     risk_jerk_ref=args.risk_jerk_ref,
                     risk_phase_weight=args.risk_phase_weight,
+                    world_verify_enable=args.world_verify_enable,
+                    world_verify_threshold=args.world_verify_threshold,
+                    world_verify_tau=args.world_verify_tau,
                 )
             print(f"[launcher] task {task} status={status}", flush=True)
             summarize(
@@ -688,6 +714,9 @@ def main() -> None:
     parser.add_argument("--risk-mean-delta-ref", type=float, default=0.12)
     parser.add_argument("--risk-jerk-ref", type=float, default=0.18)
     parser.add_argument("--risk-phase-weight", type=float, default=0.0)
+    parser.add_argument("--world-verify-enable", action="store_true")
+    parser.add_argument("--world-verify-threshold", type=float, default=0.35)
+    parser.add_argument("--world-verify-tau", nargs="+", type=float, default=[150.0, 300.0])
     parser.add_argument("--wait-screen", default="lingbotva_top10_chunks_20260617")
     parser.add_argument("--wait-timeout-sec", type=int, default=21600)
     parser.add_argument(

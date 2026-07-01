@@ -418,6 +418,9 @@ def main(usr_args):
                 risk_jerk_ref=float(usr_args.get("risk_router_jerk_ref", 0.18)),
                 risk_phase_weight=float(usr_args.get("risk_router_phase_weight", 0.25)),
                 phase_threshold_scale=float(usr_args.get("specverify_phase_threshold_scale", 0.5)),
+                world_verify_enable=bool(usr_args.get("world_verify_enable", False)),
+                world_verify_threshold=float(usr_args.get("world_verify_threshold", 0.35)),
+                world_verify_tau_timesteps=usr_args.get("world_verify_tau", [150.0, 300.0]),
                 log_path=usr_args.get("specverify_log"),
             )
         else:
@@ -747,6 +750,9 @@ def parse_args_and_config():
     parser.add_argument("--risk_router_mean_delta_ref", type=float, default=0.12)
     parser.add_argument("--risk_router_jerk_ref", type=float, default=0.18)
     parser.add_argument("--risk_router_phase_weight", type=float, default=0.25)
+    parser.add_argument("--world_verify_enable", action="store_true")
+    parser.add_argument("--world_verify_threshold", type=float, default=0.35)
+    parser.add_argument("--world_verify_tau", nargs="+", type=float, default=[150.0, 300.0])
     args = parser.parse_args()
 
     with open(args.config, "r", encoding="utf-8") as f:
@@ -795,6 +801,9 @@ def parse_args_and_config():
         "risk_router_mean_delta_ref": args.risk_router_mean_delta_ref,
         "risk_router_jerk_ref": args.risk_router_jerk_ref,
         "risk_router_phase_weight": args.risk_router_phase_weight,
+        "world_verify_enable": args.world_verify_enable,
+        "world_verify_threshold": args.world_verify_threshold,
+        "world_verify_tau": args.world_verify_tau,
     }
     argv_before_overrides = sys.argv[1:]
     if "--overrides" in argv_before_overrides:
@@ -826,6 +835,9 @@ def parse_args_and_config():
         "risk_router_mean_delta_ref": "--risk_router_mean_delta_ref",
         "risk_router_jerk_ref": "--risk_router_jerk_ref",
         "risk_router_phase_weight": "--risk_router_phase_weight",
+        "world_verify_enable": "--world_verify_enable",
+        "world_verify_threshold": "--world_verify_threshold",
+        "world_verify_tau": "--world_verify_tau",
     }
     for key, value in parser_updates.items():
         if flag_for_key[key] in explicit_flags or key not in config:

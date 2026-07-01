@@ -342,6 +342,8 @@ class RiskRouterClientPolicy:
         world_verify_enable: bool = False,
         world_verify_threshold: float = 0.35,
         world_verify_tau_timesteps=(150.0, 300.0),
+        repair_enable: bool = False,
+        repair_lambda: float = 0.75,
         log_path: Optional[str] = None,
         client_factory=None,
     ) -> None:
@@ -368,6 +370,8 @@ class RiskRouterClientPolicy:
         self.world_verify_enable = bool(world_verify_enable)
         self.world_verify_threshold = float(world_verify_threshold)
         self.world_verify_tau_timesteps = tuple(float(x) for x in world_verify_tau_timesteps)
+        self.repair_enable = bool(repair_enable)
+        self.repair_lambda = float(repair_lambda)
         self.round_id = 0
         self.frame_st_id = 0
         self.pending_teacher_cache_obs = []
@@ -561,12 +565,17 @@ class RiskRouterClientPolicy:
             "threshold": verify_threshold,
             "tau_timesteps": self.tau_timesteps,
             "frame_st_id": self.frame_st_id,
+            "return_repair": self.repair_enable,
+            "repair_lambda": self.repair_lambda,
         })
         verify_ret["phase_switch"] = phase_switch
         verify_ret["phase_mode"] = "tighten" if phase_switch else "normal"
         verify_ret["risk_zone"] = "high" if high_risk else "medium"
         verify_ret["base_threshold"] = self.threshold
         verify_ret["effective_threshold"] = verify_threshold
+        verify_log = dict(verify_ret)
+        verify_log.pop("repair_action", None)
+        verify_log.pop("repair_action_latent", None)
         accepted_prefix = int(verify_ret.get("accepted_prefix", 0))
         full_prefix = int(draft_action.shape[1] * draft_action.shape[2]) if getattr(draft_action, "ndim", 0) == 3 else 0
         action_per_frame = int(draft_action.shape[2]) if getattr(draft_action, "ndim", 0) == 3 else 0
@@ -580,10 +589,75 @@ class RiskRouterClientPolicy:
             accepted_prefix = 0
         elapsed = time.perf_counter() - start
         if accepted_prefix <= 0:
+            repair_action = verify_ret.get("repair_action")
+            repair_action_latent = verify_ret.get("repair_action_latent")
+            if self.repair_enable and repair_action is not None and repair_action_latent is not None:
+                repair_verify_ret = self.teacher.infer({
+                    "verify_action": True,
+                    "action_latent": repair_action_latent,
+                    "threshold": verify_threshold,
+                    "tau_timesteps": self.tau_timesteps,
+                    "frame_st_id": self.frame_st_id,
+                })
+                repair_verify_ret["phase_switch"] = phase_switch
+                repair_verify_ret["phase_mode"] = "repair_tighten" if phase_switch else "repair"
+                repair_verify_ret["risk_zone"] = "high" if high_risk else "medium"
+                repair_verify_ret["base_threshold"] = self.threshold
+                repair_verify_ret["effective_threshold"] = verify_threshold
+                repair_accepted_prefix = int(repair_verify_ret.get("accepted_prefix", 0))
+                if self.frame_st_id == 0 and action_per_frame > 0 and 0 < repair_accepted_prefix <= action_per_frame:
+                    repair_verify_ret["raw_accepted_prefix"] = repair_accepted_prefix
+                    repair_verify_ret["initial_partial_prefix_rejected"] = True
+                    repair_accepted_prefix = 0
+                if self.teacher_cache_mode in ("stale_reference", "lazy_reference") and 0 < repair_accepted_prefix < full_prefix:
+                    repair_verify_ret["raw_accepted_prefix"] = repair_accepted_prefix
+                    repair_verify_ret[f"{self.teacher_cache_mode}_partial_prefix_rejected"] = True
+                    repair_accepted_prefix = 0
+                if repair_accepted_prefix > 0:
+                    world_verify_ret = None
+                    if self.world_verify_enable:
+                        video_latent = draft_ret.get("video_latent")
+                        if video_latent is None:
+                            raise RuntimeError("world verifier requires draft server return_video_latent support")
+                        world_verify_ret = self.teacher.infer({
+                            "verify_world_latent": True,
+                            "video_latent": video_latent,
+                            "threshold": self.world_verify_threshold,
+                            "tau_timesteps": self.world_verify_tau_timesteps,
+                            "frame_st_id": self.frame_st_id,
+                        })
+                        repair_verify_ret["world_verify"] = world_verify_ret
+                        if not bool(world_verify_ret.get("world_pass", False)):
+                            self.round_id += 1
+                            return self._teacher_action(obs, "teacher_repair_world_reject", {
+                                "risk": risk,
+                                "verify": verify_log,
+                                "repair_verify": repair_verify_ret,
+                                "accepted_prefix": 0,
+                                "elapsed_sec": time.perf_counter() - start,
+                                "pending_teacher_cache_updates": len(self.pending_teacher_cache_obs),
+                                "pending_teacher_cache_frames": self.pending_teacher_cache_frames,
+                            })
+                    action = slice_action_prefix(np.asarray(repair_action), repair_accepted_prefix)
+                    self._log({
+                        "source": "draft_repair_accept",
+                        "accepted_prefix": repair_accepted_prefix,
+                        "risk": risk,
+                        "verify": verify_log,
+                        "repair_verify": repair_verify_ret,
+                        "world_verify": world_verify_ret,
+                        "pending_teacher_cache_updates": len(self.pending_teacher_cache_obs),
+                        "pending_teacher_cache_frames": self.pending_teacher_cache_frames,
+                        "elapsed_sec": time.perf_counter() - start,
+                    })
+                    self._log_latency(obs, time.perf_counter() - start, "draft_repair_accept")
+                    self.round_id += 1
+                    return {"action": action}
             self.round_id += 1
-            return self._teacher_action(obs, "teacher_verify_reject", {
+            fallback_source = "teacher_repair_reject" if self.repair_enable and repair_action is not None else "teacher_verify_reject"
+            return self._teacher_action(obs, fallback_source, {
                 "risk": risk,
-                "verify": verify_ret,
+                "verify": verify_log,
                 "accepted_prefix": accepted_prefix,
                 "elapsed_sec": elapsed,
                 "pending_teacher_cache_updates": len(self.pending_teacher_cache_obs),
@@ -602,13 +676,13 @@ class RiskRouterClientPolicy:
                 "tau_timesteps": self.world_verify_tau_timesteps,
                 "frame_st_id": self.frame_st_id,
             })
-            verify_ret["world_verify"] = world_verify_ret
+            verify_log["world_verify"] = world_verify_ret
             if not bool(world_verify_ret.get("world_pass", False)):
                 elapsed = time.perf_counter() - start
                 self.round_id += 1
                 return self._teacher_action(obs, "teacher_world_verify_reject", {
                     "risk": risk,
-                    "verify": verify_ret,
+                    "verify": verify_log,
                     "accepted_prefix": 0,
                     "elapsed_sec": elapsed,
                     "pending_teacher_cache_updates": len(self.pending_teacher_cache_obs),
@@ -620,7 +694,7 @@ class RiskRouterClientPolicy:
             "source": "draft_verify_accept",
             "accepted_prefix": accepted_prefix,
             "risk": risk,
-            "verify": verify_ret,
+            "verify": verify_log,
             "world_verify": world_verify_ret,
             "pending_teacher_cache_updates": len(self.pending_teacher_cache_obs),
             "pending_teacher_cache_frames": self.pending_teacher_cache_frames,

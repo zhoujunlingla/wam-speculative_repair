@@ -509,7 +509,9 @@ class VA_Server:
                             frame_st_id=0,
                             tau_timesteps=(150.0, 300.0),
                             threshold=0.15,
-                            cache_name=None):
+                            cache_name=None,
+                            return_repair=False,
+                            repair_lambda=0.75):
         """Verify a normalized draft action chunk against the teacher flow."""
         if draft_actions.ndim != 5 or draft_actions.shape[0] != 1:
             raise ValueError("draft_actions must have shape [1, C, F, N, 1]")
@@ -566,7 +568,7 @@ class VA_Server:
             action_per_frame=self.action_per_frame,
             frame_chunk_size=self.job_config.frame_chunk_size,
         )
-        return {
+        result = {
             "accepted_prefix": accepted_prefix,
             "raw_valid_prefix": raw_valid_prefix,
             "conditioned_frame_count": conditioned_frame_count,
@@ -574,6 +576,21 @@ class VA_Server:
             "tau_timesteps": tau_timesteps.detach().float().cpu(),
             "threshold": float(threshold),
         }
+        if return_repair:
+            repair_lambda = max(0.0, min(1.0, float(repair_lambda)))
+            teacher_endpoint = recon.mean(dim=0, keepdim=True)
+            repair_latent = draft + repair_lambda * (teacher_endpoint - draft)
+            if conditioned_frame_count:
+                repair_latent[:, :, :conditioned_frame_count] = draft[:, :, :conditioned_frame_count]
+            repair_delta = (repair_latent - draft).detach().float().abs()
+            result.update({
+                "repair_action_latent": repair_latent.detach().float().cpu().numpy(),
+                "repair_action": self.postprocess_action(repair_latent.detach()).astype(np.float32),
+                "repair_lambda": repair_lambda,
+                "repair_delta_mean": float(repair_delta.mean().item()),
+                "repair_delta_max": float(repair_delta.max().item()),
+            })
+        return result
 
     def _encode_obs(self, obs):
         images = obs['obs']
@@ -896,6 +913,8 @@ class VA_Server:
                 frame_st_id=frame_st_id,
                 tau_timesteps=obs.get("tau_timesteps", (150.0, 300.0)),
                 threshold=float(obs.get("threshold", 0.15)),
+                return_repair=bool(obs.get("return_repair", False)),
+                repair_lambda=float(obs.get("repair_lambda", 0.75)),
             )
             distances = verify_result.pop("distances")
             tau_timesteps = verify_result.pop("tau_timesteps")

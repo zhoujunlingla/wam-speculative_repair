@@ -69,3 +69,41 @@ The V6c guard fixed the empty first-frame prefix, but the next run showed a deep
 `RuntimeError: The size of tensor a (4) must match the size of tensor b (2) at non-singleton dimension 2`
 
 Fix: after draft produces the initial action candidate, `RiskRouterClientPolicy` now forces the first executable chunk of every trial through the teacher as `teacher_initial_prime`, before low-risk acceptance or action/world verification. This is intentionally conservative and only affects `frame_st_id == 0`; later chunks still use the RiskRouter/world-latent verifier path. The draft server still receives the initial inference request, so draft-side state remains aligned for later cache updates.
+
+## V7 Action Local Repair Before Teacher Fallback
+
+### Goal
+
+Reduce unnecessary teacher fallbacks while preserving or improving V6 world-latent success on RoboTwin low10.
+
+### Hypothesis
+
+The action verifier already computes teacher flow reconstructions of the draft action endpoint at several tau values. If a draft is mildly rejected, the mean teacher reconstruction can be used as a cheap local correction before falling back to full teacher generation. This keeps the verifier decoupled from generation step count and uses no new model or training.
+
+### Single New Feature
+
+Optional action repair in RiskRouter:
+
+1. Draft produces action/action latent and optional video latent as in V6.
+2. Teacher action verifier can return a repaired normalized action latent and executable action from its endpoint reconstructions.
+3. If the original action verify rejects, RiskRouter reverifies the repaired action once.
+4. If repaired action passes action verify and the existing world-latent verify, execute the repaired draft prefix.
+5. If repair still fails, fall back to teacher exactly as before.
+
+### Fixed Controls
+
+- Draft/teacher configs stay `v1/a2` and `v2/a4`.
+- Teacher cache mode stays `sync` for the first V7 validation.
+- Existing action threshold, tau set, risk thresholds, world verifier threshold, and world tau set are unchanged.
+- No video-risk, repair-network, new training, cache strategy, or PF change is introduced.
+
+### New Controls
+
+- `--repair_enable`: request teacher endpoint repair and allow one reverify attempt.
+- `--repair_lambda`: blend factor from draft endpoint toward teacher reconstructed endpoint.
+
+### Gate
+
+Compare against V6 `20260701_0758_worldlatent_initialprime_sync_low10_tn10_g012`:
+
+- success must improve beyond `72/100`,

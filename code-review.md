@@ -1,100 +1,35 @@
-# Code Review: V6 World-Latent Flow Consistency Verifier
+# Code Review: V7 Action Local Repair
 
-## Change Reviewed
+## Scope
 
-Repository: `/mnt/afs/intern/manlichen/ivan/zhoujunl/Wam_Speed_up/lingbot-va-riskrouter-worldlatent-20260701`
+Reviewed the V7 diff after adding optional action local repair before teacher fallback.
 
-Single new feature: optional world-latent flow verification after an action-flow verifier accepts a draft chunk.
+Changed files reviewed:
+
+- design.md
+- evaluation/robotwin/specverify_client_policy.py
+- wan_va/wan_va_server.py
+- evaluation/robotwin/eval_polict_client_openpi.py
+- scripts/cci_riskrouter_lingbot_v1a2_v2a4_low10_tn10.py
+- tests/test_specverify_client_policy.py
 
 ## Findings
 
-No blocking findings.
+No blocking correctness issues found in the current diff.
 
-Risk level: medium. The server-side video verifier reuses the teacher video branch and full-resolution flow scheduler, so it should be semantically aligned with LingBot-VA. However, it adds extra teacher forwards after action verification and the initial `world_verify_threshold=0.35` is uncalibrated. First run should be interpreted as signal calibration, not final speed result.
+## Risks / Notes
 
-## Notes
-
-- Default behavior is preserved: `world_verify_enable=False` unless explicitly set.
-- The first validation should use `teacher_cache_mode=sync` to isolate verifier quality from the previously observed lazy/stale VAE cache synchronization failures.
-- The verifier checks draft video latent consistency under teacher video flow; it does not yet condition video rollout on draft action. This is the minimal inference-only version of the world-latent idea.
+- Experiment-validity risk: draft_repair_accept converts chunks that would previously fall back to teacher into repaired draft actions. This should reduce teacher usage and may improve speed, but task success can drop if repair accepts action chunks that full teacher would have solved. The low10 gate must compare success, teacher source rate, and latency against V6 worldlatent.
+- Repair payload arrays are stripped from JSONL logs via verify_log; logs retain scalar repair metrics such as repair_delta_mean/max from the server response.
+- The server repair candidate reuses the same action verify forward by averaging reconstructed endpoints across tau. A repair attempt adds one extra action verify forward only when original verify rejects.
+- Launcher path was checked and updated so the experiment script uses this V7 code root, not the older worldlatent copy.
 
 ## Tests Run
 
-- `python3 -m py_compile wan_va/wan_va_server.py`
-- `python3 -m py_compile evaluation/robotwin/specverify_client_policy.py`
-- `python3 -m py_compile evaluation/robotwin/eval_polict_client_openpi.py`
-- `python3 -m py_compile scripts/cci_riskrouter_lingbot_v1a2_v2a4_low10_tn10.py`
-- `python3 -m pytest -q tests/test_specverify.py tests/test_specverify_client_policy.py`
-  - Result: `9 passed in 1.14s`
+- python3 -m pytest -q tests/test_specverify_client_policy.py::test_risk_router_repairs_action_reject_before_teacher_fallback tests/test_specverify_client_policy.py::test_risk_router_falls_back_when_repaired_action_still_rejects
+- python3 -m pytest -q tests/test_specverify_client_policy.py tests/test_specverify.py
+- python3 -m py_compile evaluation/robotwin/specverify_client_policy.py evaluation/robotwin/eval_polict_client_openpi.py wan_va/wan_va_server.py scripts/cci_riskrouter_lingbot_v1a2_v2a4_low10_tn10.py
 
 ## Decision
 
-Allowed to proceed to small RoboTwin clean validation on GPUs 0/1/2. Use sync teacher cache for the first validation. Stop early if the world verifier is constant reject/pass or if any server-side shape/cache error recurs.
-
-## V6b Review: P95 World Score Calibration
-
-Change: world verifier pass criterion changed from raw max latent-patch distance to p95 latent-patch distance. The threshold remains `0.35`.
-
-Reason: first calibration run showed the interface works but max distance is dominated by single-patch outliers (`world_n=16`, `pass=1`, `reject=15`; median max about `0.56`, median p95 about `0.24`). P95 keeps a high-region criterion while avoiding a single noisy patch deciding the whole chunk.
-
-Risk: medium-low. This makes the world gate less strict; it may accept chunks that max-distance would reject. The action verifier still runs first, and world max/p95 remain logged for later analysis.
-
-Tests: `python3 -m py_compile wan_va/wan_va_server.py`; `python3 -m pytest -q tests/test_specverify.py tests/test_specverify_client_policy.py` -> `9 passed in 1.25s`.
-
-Decision: allowed to rerun the same TN5 sync-cache calibration.
-
-## V6c Review: Quantile Dtype Fix
-
-Finding: V6b failed immediately because `torch.quantile` does not accept half/bfloat16 tensors. The world verifier distance tensor follows model dtype, so the p95 score must cast to float before quantile.
-
-Fix: compute `torch.quantile(valid_dist.float().flatten(), 0.95)`.
-
-Tests: `python3 -m py_compile wan_va/wan_va_server.py`; `python3 -m pytest -q tests/test_specverify.py tests/test_specverify_client_policy.py` -> `9 passed in 1.35s`.
-
-Decision: allowed to rerun the same TN5 sync-cache calibration.
-# Code Review: V6c Initial Partial Prefix Guard
-
-## Scope
-
-- Repository: `/mnt/afs/intern/manlichen/ivan/zhoujunl/Wam_Speed_up/lingbot-va-riskrouter-worldlatent-20260701`
-- Change: reject `RiskRouterClientPolicy` verified prefixes that only include the first conditioned frame at episode start.
-- Motivation: V6c crashed after reset because a 16-step initial prefix executes zero real RobotWin steps, creates an empty cache update, and leaves the teacher verifier without `init_latent`.
-
-## Findings
-
-- No blocking findings.
-- Risk level: low-to-medium. The change is deliberately narrow: it only applies when `frame_st_id == 0` and `0 < accepted_prefix <= action_per_frame`. It does not alter action verifier distances, world-latent verifier scores, or non-initial prefix behavior.
-
-## Tests Run
-
-- `python3 -m pytest -q tests/test_specverify_client_policy.py::test_risk_router_rejects_initial_partial_prefix_before_cache_update tests/test_specverify_client_policy.py tests/test_specverify.py`
-  - Result: `11 passed`
-
-## Proceed Decision
-
-Allowed to rerun the `hanging_mug`/low10 smoke. The next run should confirm no `action_model_input=None` / empty-cache crash after trial reset.
-
-# Code Review: V6d Teacher Initial Prime
-
-## Scope
-
-- Repository: `/mnt/afs/intern/manlichen/ivan/zhoujunl/Wam_Speed_up/lingbot-va-riskrouter-worldlatent-20260701`
-- Change: force `RiskRouterClientPolicy` to use the teacher for the first action chunk after every reset (`frame_st_id == 0`), logging source `teacher_initial_prime`.
-- Motivation: V6c still allowed a full-prefix draft at frame 0. That bypassed teacher `_infer(frame_st_id=0)`, leaving the teacher streaming VAE/init latent unprimed before the first sync `compute_kv_cache`.
-
-## Findings
-
-- No blocking findings.
-- Risk level: low. The change is intentionally narrow and affects only the first action chunk of each trial. It costs one teacher call per episode, but prevents invalid teacher cache state before speculative routing begins.
-- The older initial partial-prefix guard is now effectively redundant for normal control flow, but leaving it in place is harmless and avoids widening this fix.
-
-## Tests Run
-
-- `python3 -m pytest -q tests/test_specverify_client_policy.py::test_risk_router_world_verify_can_reject_action_accepted_chunk tests/test_specverify_client_policy.py::test_risk_router_primes_teacher_instead_of_initial_partial_prefix tests/test_specverify_client_policy.py::test_risk_router_uses_teacher_for_initial_full_prefix_to_prime_cache tests/test_specverify_client_policy.py::test_risk_router_uses_teacher_for_initial_low_risk_to_prime_cache tests/test_specverify_client_policy.py tests/test_specverify.py`
-  - Result: `16 passed`
-- `python3 -m py_compile evaluation/robotwin/specverify_client_policy.py wan_va/wan_va_server.py`
-  - Result: passed
-
-## Proceed Decision
-
-Allowed to rerun low10 TN=5/TN=10. The next validation criterion is no reset-time VAE shortcut mismatch and a completed summary, not final success/latency yet.
+Allowed to proceed to a low10 experiment with repair enabled as the only new capability relative to V6 worldlatent.

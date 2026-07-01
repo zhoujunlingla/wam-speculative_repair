@@ -753,6 +753,8 @@ def parse_args_and_config():
     parser.add_argument("--world_verify_enable", action="store_true")
     parser.add_argument("--world_verify_threshold", type=float, default=0.35)
     parser.add_argument("--world_verify_tau", nargs="+", type=float, default=[150.0, 300.0])
+    parser.add_argument("--repair_enable", action="store_true")
+    parser.add_argument("--repair_lambda", type=float, default=0.75)
     args = parser.parse_args()
 
     with open(args.config, "r", encoding="utf-8") as f:
@@ -804,6 +806,8 @@ def parse_args_and_config():
         "world_verify_enable": args.world_verify_enable,
         "world_verify_threshold": args.world_verify_threshold,
         "world_verify_tau": args.world_verify_tau,
+        "repair_enable": args.repair_enable,
+        "repair_lambda": args.repair_lambda,
     }
     argv_before_overrides = sys.argv[1:]
     if "--overrides" in argv_before_overrides:
@@ -838,6 +842,8 @@ def parse_args_and_config():
         "world_verify_enable": "--world_verify_enable",
         "world_verify_threshold": "--world_verify_threshold",
         "world_verify_tau": "--world_verify_tau",
+        "repair_enable": "--repair_enable",
+        "repair_lambda": "--repair_lambda",
     }
     for key, value in parser_updates.items():
         if flag_for_key[key] in explicit_flags or key not in config:

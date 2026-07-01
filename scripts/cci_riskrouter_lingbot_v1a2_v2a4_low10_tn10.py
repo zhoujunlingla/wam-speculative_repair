@@ -20,7 +20,7 @@ from pathlib import Path
 
 
 ROOT = Path("/mnt/afs/intern/manlichen/ivan/zhoujunl")
-CODE = ROOT / "Wam_Speed_up" / "lingbot-va-riskrouter-worldlatent-20260701"
+CODE = ROOT / "Wam_Speed_up" / "lingbot-va-riskrouter-actionrepair-20260702"
 ROBOTWIN_ROOT = ROOT / "Wam_Speed_up" / "RoboTwin"
 EXPERIMENT_ROOT = ROOT / "experiments" / "Wam_Speed_up"
 RESULT_ROOT = ROOT / "result" / "Wam_Speed_up"
@@ -170,11 +170,14 @@ ACTION_SOURCES = {
     "draft_low_risk",
     "draft_medium_noverify",
     "draft_verify_accept",
+    "draft_repair_accept",
     "teacher_full",
     "teacher_fallback",
     "teacher_router_high",
     "teacher_verify_reject",
     "teacher_world_verify_reject",
+    "teacher_repair_reject",
+    "teacher_repair_world_reject",
 }
 CACHE_SOURCES = {"compute_kv_cache", "compute_kv_cache_lazy_reference", "compute_kv_cache_stale_reference", "teacher_cache_sync", "teacher_cache_latest_sync", "reset"}
 
@@ -209,6 +212,9 @@ def specverify_metrics(log_path: Path) -> dict[str, object]:
         "draft_low_risk": 0,
         "draft_medium_noverify": 0,
         "draft_verify_accept": 0,
+        "draft_repair_accept": 0,
+        "teacher_repair_reject": 0,
+        "teacher_repair_world_reject": 0,
         "teacher_router_high": 0,
         "teacher_verify_reject": 0,
         "teacher_world_verify_reject": 0,
@@ -261,7 +267,7 @@ def specverify_metrics(log_path: Path) -> dict[str, object]:
                 if verify.get("phase_switch") and verify.get("phase_mode") == "tighten":
                     counts["phase_tighten"] += 1
                     counts["phase_tighten_accept"] += 1
-            elif source in ("draft_low_risk", "draft_medium_noverify", "draft_verify_accept"):
+            elif source in ("draft_low_risk", "draft_medium_noverify", "draft_verify_accept", "draft_repair_accept"):
                 counts["draft_accept"] += 1
                 counts[source] += 1
                 verify = row.get("verify") if isinstance(row.get("verify"), dict) else {}
@@ -293,6 +299,17 @@ def specverify_metrics(log_path: Path) -> dict[str, object]:
                 counts["world_verify"] += 1
                 counts["world_verify_reject"] += 1
                 verify = row.get("verify") if isinstance(row.get("verify"), dict) else {}
+            elif source == "teacher_repair_world_reject":
+                counts["teacher_fallback"] += 1
+                counts["teacher_repair_world_reject"] += 1
+                counts["world_verify"] += 1
+                counts["world_verify_reject"] += 1
+                verify = row.get("repair_verify") if isinstance(row.get("repair_verify"), dict) else {}
+            elif source == "teacher_repair_reject":
+                counts["teacher_fallback"] += 1
+                counts["teacher_repair_reject"] += 1
+                counts["verify_reject"] += 1
+                verify = row.get("repair_verify") if isinstance(row.get("repair_verify"), dict) else {}
             elif source == "teacher_verify_reject":
                 counts["teacher_fallback"] += 1
                 counts["teacher_verify_reject"] += 1
@@ -449,6 +466,8 @@ def run_task(
     world_verify_enable: bool,
     world_verify_threshold: float,
     world_verify_tau: list[float],
+    repair_enable: bool,
+    repair_lambda: float,
 ) -> tuple[int, str]:
     log_path = run_root / "logs" / f"client_{task}.log"
     result_task_log = result_root / "logs" / f"client_{task}.log"
@@ -504,6 +523,8 @@ def run_task(
         str(world_verify_threshold),
         "--world_verify_tau",
         *[str(x) for x in world_verify_tau],
+        "--repair_lambda",
+        str(repair_lambda),
         "--overrides",
         "--task_name",
         task,
@@ -530,6 +551,8 @@ def run_task(
     ]
     if world_verify_enable:
         cmd.insert(cmd.index("--overrides"), "--world_verify_enable")
+    if repair_enable:
+        cmd.insert(cmd.index("--overrides"), "--repair_enable")
     if disable_prime_draft_on_teacher_full:
         cmd.insert(cmd.index("--overrides"), "--specverify_disable_prime_draft_on_teacher_full")
     with log_path.open("a", buffering=1) as log:
@@ -557,7 +580,7 @@ def launch(args: argparse.Namespace) -> None:
         f"phase_threshold_scale={args.phase_threshold_scale}, "
         f"low10 clean TN{args.test_num}. "
         f"Teacher cache mode={args.teacher_cache_mode}; "
-        "No periodic full refresh; high-risk chunks verify before teacher fallback; phase switch tightens verify."
+        "No periodic full refresh; high-risk chunks verify before teacher fallback; phase switch tightens verify; optional action repair tries one teacher-flow local correction before teacher fallback."
     )
     (run_root / "command.sh").write_text(" ".join(sys.argv) + "\n", encoding="utf-8")
     (result_root / "command.sh").write_text(" ".join(sys.argv) + "\n", encoding="utf-8")
@@ -625,6 +648,8 @@ def launch(args: argparse.Namespace) -> None:
                     world_verify_enable=args.world_verify_enable,
                     world_verify_threshold=args.world_verify_threshold,
                     world_verify_tau=args.world_verify_tau,
+                    repair_enable=args.repair_enable,
+                    repair_lambda=args.repair_lambda,
                 )
             print(f"[launcher] task {task} status={status}", flush=True)
             summarize(
@@ -717,6 +742,8 @@ def main() -> None:
     parser.add_argument("--world-verify-enable", action="store_true")
     parser.add_argument("--world-verify-threshold", type=float, default=0.35)
     parser.add_argument("--world-verify-tau", nargs="+", type=float, default=[150.0, 300.0])
+    parser.add_argument("--repair-enable", action="store_true")
+    parser.add_argument("--repair-lambda", type=float, default=0.75)
     parser.add_argument("--wait-screen", default="lingbotva_top10_chunks_20260617")
     parser.add_argument("--wait-timeout-sec", type=int, default=21600)
     parser.add_argument(

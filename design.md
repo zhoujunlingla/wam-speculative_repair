@@ -1,70 +1,53 @@
-# V3 RiskRouter High-Risk Verify Design
+# V6 World-Latent Flow Consistency Verifier
+
+## Goal
+
+Validate whether LingBot-VA's video/world latent flow can improve speculative action acceptance beyond action-only verification.
 
 ## Source
 
-This repo was copied from the V2 phase-verify baseline:
+Copied from V5 `lingbot-va-riskrouter-lazyprefix-20260701` commit `209a180`.
 
-- Source: `/mnt/afs/intern/manlichen/ivan/zhoujunl/Wam_Speed_up/lingbot-va-riskrouter-phaseverify-20260701`
-- Source commit: `acfaf1f`
-- New repo: `/mnt/afs/intern/manlichen/ivan/zhoujunl/Wam_Speed_up/lingbot-va-riskrouter-highverify-20260701`
+## Problem Evidence
 
-## Evidence From V2
-
-V2 changed phase handling from hard teacher routing to tightened verification. Early evidence:
-
-- easier shard improved speed structure: put_object_cabinet shard had teacher rate `23.8%` and first trial `1/1` success.
-- hard shard still failed speed gate: hanging_mug shard had teacher rate `76.2%` before any completed trial.
-
-This shows phase handling was not the only source of teacher overuse. The remaining culprit is the hard branch:
-
-`risk_score >= risk_high -> teacher_router_high`
+Action-only RiskRouter variants either overused teacher fallback or crashed when trying to make non-sync teacher cache modes too aggressive. More importantly, action-space agreement can miss world-state errors in contact-rich tasks: two action chunks may be numerically close while inducing different object/contact outcomes.
 
 ## Hypothesis
 
-High action risk should trigger stronger verification, not immediate teacher execution. This is closer to speculative sampling: draft proposes, teacher verifies, teacher executes only when verification rejects.
+If a draft chunk is trustworthy, its one-step/few-step predicted video latent should also be consistent with the teacher's video flow field. Adding a teacher video-latent flow consistency gate after action verification should reject action chunks whose imagined world transition is not teacher-consistent.
 
-## Single New Variable
+## Single New Feature
 
-Only high-risk handling changes:
+Add optional `world_verify` gate:
 
-- V2: high-risk chunks execute teacher directly.
-- V3: high-risk chunks call the action-flow verifier first. If accepted, execute draft prefix; if rejected, fallback to teacher.
+1. Draft server returns both normalized action latent and predicted video latent.
+2. Teacher first runs the existing action-flow verifier.
+3. If action verifier accepts the full chunk, teacher runs a sparse video latent flow verifier on the draft video latent.
+4. The draft action is accepted only if both action and world-latent flow checks pass.
 
-No new threshold is introduced for high-risk chunks. They use the same base verifier threshold. Phase switches still tighten the threshold.
+The first validation uses `teacher_cache_mode=sync` to isolate verifier quality from lazy/stale cache correctness issues.
 
 ## Fixed Controls
 
-- Draft: LingBot v1/a2 direct
-- Teacher/verifier: LingBot v2/a4 direct
-- Teacher cache: `stale_reference`
-- `risk_low=0.25`, `risk_high=0.55`
-- `risk_verify_mode=medium`
-- `specverify_threshold=0.18`
-- `phase_threshold_scale=0.5`
-- `risk_phase_weight=0.0`
+- Draft: LingBot v1/a2 direct.
+- Teacher/verifier: LingBot v2/a4 direct.
+- Action verify tau: `[150, 300]`.
+- Action threshold: `0.18`.
+- Risk thresholds: `risk_low=0.25`, `risk_high=0.55`.
+- Phase switch tightens action threshold by `0.5`.
+
+## New Controls
+
+- `--world-verify-enable`.
+- `--world-verify-threshold`: default `0.35` normalized L1 latent residual.
+- `--world-verify-tau`: default `[150, 300]`.
 
 ## Gate
 
-Run low10 TN=10. V3 is useful if:
+Small validation should show no runtime crash and produce world verifier metrics. Continue only if:
 
-- teacher action-source rate drops below V2/V1 and toward `<25%-30%`,
-- success stays on track toward `>=67/100`,
-- high_verify_accept is meaningfully larger than high_verify_reject,
-- cache latency remains around V1/V2 `~0.52s`.
+- world verifier rejects some action-passing chunks instead of being constant pass/fail,
+- low10 success does not collapse relative to action-only variants,
+- teacher source rate remains interpretable.
 
-## Next Decision
-
-If high-risk verifier accepts often but success drops, the verifier is too permissive. Next single variable: high-risk-specific tighter threshold.
-If high-risk verifier rejects often, verifier cost rises but teacher rate remains high. Next single variable: repair/correction before teacher fallback.
-
-## V5 Cache-Correctness Guard: Lazy Partial Prefix Rejection
-
-Source evidence from V4 lazy-reference run `20260701_051809`: both shards accepted a 16-step partial draft prefix, then queued a 1-frame pending teacher cache update. When a later teacher action needed cache catch-up, LingBot's teacher KV update path received `action_model_input=None` and crashed before any valid trial.
-
-Single new variable for V5: apply the same partial-prefix rejection used by `stale_reference` to `lazy_reference`. Under non-sync teacher cache modes, verified draft execution is now limited to either `0` or the full action chunk. This preserves ordered teacher cache compatibility while still allowing full-chunk draft execution and high-risk verification.
-
-No verifier thresholds, risk weights, teacher model, draft model, tau set, or task split are changed.
-
-## V5 Launcher Path Guard
-
-The copied launcher must point `CODE` at this V5 repository, otherwise the experiment would silently run the older highverify code. This is an experiment-validity fix only; it does not change model configs, router thresholds, or runtime policy.
+If world gate is too strict, next single variable is threshold calibration or logging-only mode. If it is useful but slow, next variable is running world verify only for high-risk chunks.

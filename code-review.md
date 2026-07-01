@@ -42,3 +42,13 @@ Risk: medium-low. This makes the world gate less strict; it may accept chunks th
 Tests: `python3 -m py_compile wan_va/wan_va_server.py`; `python3 -m pytest -q tests/test_specverify.py tests/test_specverify_client_policy.py` -> `9 passed in 1.25s`.
 
 Decision: allowed to rerun the same TN5 sync-cache calibration.
+
+## V6c Review: Quantile Dtype Fix
+
+Finding: V6b failed immediately because `torch.quantile` does not accept half/bfloat16 tensors. The world verifier distance tensor follows model dtype, so the p95 score must cast to float before quantile.
+
+Fix: compute `torch.quantile(valid_dist.float().flatten(), 0.95)`.
+
+Tests: `python3 -m py_compile wan_va/wan_va_server.py`; `python3 -m pytest -q tests/test_specverify.py tests/test_specverify_client_policy.py` -> `9 passed in 1.35s`.
+
+Decision: allowed to rerun the same TN5 sync-cache calibration.

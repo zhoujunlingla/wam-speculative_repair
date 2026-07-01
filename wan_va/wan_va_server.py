@@ -492,7 +492,7 @@ class VA_Server:
         # A single hot latent patch can be noisy in one-step video drafts.
         # Use a top-percentile score rather than raw max for the first WAM
         # verifier; max/p95 are both still logged by the caller.
-        world_score = torch.quantile(valid_dist.flatten(), 0.95)
+        world_score = torch.quantile(valid_dist.float().flatten(), 0.95)
         pass_world = bool(world_score.item() <= threshold)
         return {
             "world_pass": pass_world,

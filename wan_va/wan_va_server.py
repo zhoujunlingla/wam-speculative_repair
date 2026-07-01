@@ -489,9 +489,15 @@ class VA_Server:
         valid_dist = dist[:, conditioned_frame_count:]
         if valid_dist.numel() == 0:
             valid_dist = dist
-        pass_world = bool(valid_dist.max().item() <= threshold)
+        # A single hot latent patch can be noisy in one-step video drafts.
+        # Use a top-percentile score rather than raw max for the first WAM
+        # verifier; max/p95 are both still logged by the caller.
+        world_score = torch.quantile(valid_dist.flatten(), 0.95)
+        pass_world = bool(world_score.item() <= threshold)
         return {
             "world_pass": pass_world,
+            "world_score": float(world_score.item()),
+            "world_score_type": "p95",
             "world_distances": valid_dist.detach().float().cpu(),
             "world_tau_timesteps": tau_timesteps.detach().float().cpu(),
             "world_threshold": float(threshold),

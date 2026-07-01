@@ -30,3 +30,15 @@ Risk level: medium. The server-side video verifier reuses the teacher video bran
 ## Decision
 
 Allowed to proceed to small RoboTwin clean validation on GPUs 0/1/2. Use sync teacher cache for the first validation. Stop early if the world verifier is constant reject/pass or if any server-side shape/cache error recurs.
+
+## V6b Review: P95 World Score Calibration
+
+Change: world verifier pass criterion changed from raw max latent-patch distance to p95 latent-patch distance. The threshold remains `0.35`.
+
+Reason: first calibration run showed the interface works but max distance is dominated by single-patch outliers (`world_n=16`, `pass=1`, `reject=15`; median max about `0.56`, median p95 about `0.24`). P95 keeps a high-region criterion while avoiding a single noisy patch deciding the whole chunk.
+
+Risk: medium-low. This makes the world gate less strict; it may accept chunks that max-distance would reject. The action verifier still runs first, and world max/p95 remain logged for later analysis.
+
+Tests: `python3 -m py_compile wan_va/wan_va_server.py`; `python3 -m pytest -q tests/test_specverify.py tests/test_specverify_client_policy.py` -> `9 passed in 1.25s`.
+
+Decision: allowed to rerun the same TN5 sync-cache calibration.

@@ -51,3 +51,7 @@ Small validation should show no runtime crash and produce world verifier metrics
 - teacher source rate remains interpretable.
 
 If world gate is too strict, next single variable is threshold calibration or logging-only mode. If it is useful but slow, next variable is running world verify only for high-risk chunks.
+
+## V6b Threshold Calibration: P95 World Score
+
+The first V6 calibration run showed the world-latent verifier was functional but too strict when using raw max patch distance: `world_n=16`, `pass=1`, `reject=15`; median `world_distance_max ~= 0.56` but median `world_distance_p95 ~= 0.24`. V6b keeps the same threshold (`0.35`) and changes only the aggregation criterion from max patch distance to p95 patch distance. This follows video-generation caching practice where percentile/top-k scores are more stable than a single worst patch.

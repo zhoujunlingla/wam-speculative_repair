@@ -525,6 +525,16 @@ class RiskRouterClientPolicy:
         risk_score = float(risk["risk_score"])
         elapsed = time.perf_counter() - start
 
+        if self.frame_st_id == 0:
+            self.round_id += 1
+            return self._teacher_action(obs, "teacher_initial_prime", {
+                "risk": risk,
+                "accepted_prefix": 0,
+                "elapsed_sec": elapsed,
+                "pending_teacher_cache_updates": len(self.pending_teacher_cache_obs),
+                "pending_teacher_cache_frames": self.pending_teacher_cache_frames,
+            })
+
         high_risk = risk_score >= self.risk_high
         phase_switch = bool(risk.get("phase_switch"))
         if (risk_score < self.risk_low and not phase_switch) or self.risk_verify_mode == "off":

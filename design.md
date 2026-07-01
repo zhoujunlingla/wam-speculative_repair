@@ -61,3 +61,11 @@ The first V6 calibration run showed the world-latent verifier was functional but
 The p95 verifier reached `hanging_mug` trial 3/5 and then crashed after a new trial reset. The first post-reset draft passed action/world verification with `accepted_prefix=16`. In RoboTwin evaluation the first action frame is conditioned and skipped (`start_idx=1`), so accepting only the first frame executes zero real actions and produces an empty `key_frame_list`. The teacher verifier had not run a full `_infer` in that fresh trial, so its `init_latent` was still unset; the following `compute_kv_cache` could not build a valid latent/action cache and failed with `AttributeError: 'NoneType' object has no attribute 'shape'`.
 
 Fix: in `RiskRouterClientPolicy`, when `frame_st_id == 0`, reject verified prefixes that cover only the conditioned first frame (`accepted_prefix <= action_per_frame`) and fall back to teacher. This preserves normal full-prefix draft execution and only blocks the non-executable first-frame prefix.
+
+## V6d Teacher Initial Prime
+
+The V6c guard fixed the empty first-frame prefix, but the next run showed a deeper reset-state issue. If the first post-reset action chunk is accepted from draft, the teacher never runs a full `_infer(frame_st_id=0)`. Action/world verifier calls use the transformer flow fields but do not initialize `self.init_latent` or the streaming VAE causal cache in the same way as normal teacher generation. The next sync `compute_kv_cache` can then call `streaming_vae.encode_chunk` on post-action key frames with an unprimed temporal cache, causing a Wan VAE shortcut mismatch:
+
+`RuntimeError: The size of tensor a (4) must match the size of tensor b (2) at non-singleton dimension 2`
+
+Fix: after draft produces the initial action candidate, `RiskRouterClientPolicy` now forces the first executable chunk of every trial through the teacher as `teacher_initial_prime`, before low-risk acceptance or action/world verification. This is intentionally conservative and only affects `frame_st_id == 0`; later chunks still use the RiskRouter/world-latent verifier path. The draft server still receives the initial inference request, so draft-side state remains aligned for later cache updates.

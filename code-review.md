@@ -73,3 +73,28 @@ Decision: allowed to rerun the same TN5 sync-cache calibration.
 ## Proceed Decision
 
 Allowed to rerun the `hanging_mug`/low10 smoke. The next run should confirm no `action_model_input=None` / empty-cache crash after trial reset.
+
+# Code Review: V6d Teacher Initial Prime
+
+## Scope
+
+- Repository: `/mnt/afs/intern/manlichen/ivan/zhoujunl/Wam_Speed_up/lingbot-va-riskrouter-worldlatent-20260701`
+- Change: force `RiskRouterClientPolicy` to use the teacher for the first action chunk after every reset (`frame_st_id == 0`), logging source `teacher_initial_prime`.
+- Motivation: V6c still allowed a full-prefix draft at frame 0. That bypassed teacher `_infer(frame_st_id=0)`, leaving the teacher streaming VAE/init latent unprimed before the first sync `compute_kv_cache`.
+
+## Findings
+
+- No blocking findings.
+- Risk level: low. The change is intentionally narrow and affects only the first action chunk of each trial. It costs one teacher call per episode, but prevents invalid teacher cache state before speculative routing begins.
+- The older initial partial-prefix guard is now effectively redundant for normal control flow, but leaving it in place is harmless and avoids widening this fix.
+
+## Tests Run
+
+- `python3 -m pytest -q tests/test_specverify_client_policy.py::test_risk_router_world_verify_can_reject_action_accepted_chunk tests/test_specverify_client_policy.py::test_risk_router_primes_teacher_instead_of_initial_partial_prefix tests/test_specverify_client_policy.py::test_risk_router_uses_teacher_for_initial_full_prefix_to_prime_cache tests/test_specverify_client_policy.py::test_risk_router_uses_teacher_for_initial_low_risk_to_prime_cache tests/test_specverify_client_policy.py tests/test_specverify.py`
+  - Result: `16 passed`
+- `python3 -m py_compile evaluation/robotwin/specverify_client_policy.py wan_va/wan_va_server.py`
+  - Result: passed
+
+## Proceed Decision
+
+Allowed to rerun low10 TN=5/TN=10. The next validation criterion is no reset-time VAE shortcut mismatch and a completed summary, not final success/latency yet.

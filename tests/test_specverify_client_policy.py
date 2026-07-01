@@ -106,6 +106,7 @@ def test_risk_router_world_verify_can_reject_action_accepted_chunk(tmp_path):
         log_path=str(log_path),
         client_factory=factory,
     )
+    policy.frame_st_id = 2
     ret = policy.infer({"obs": ["x"], "state": np.zeros((16, 2, 16), dtype=np.float32)})
     assert ret["action"].shape == (16, 2, 16)
     records = [json.loads(line) for line in log_path.read_text().splitlines()]
@@ -113,7 +114,7 @@ def test_risk_router_world_verify_can_reject_action_accepted_chunk(tmp_path):
     assert records[-1]["verify"]["world_verify"]["world_pass"] is False
 
 
-def test_risk_router_rejects_initial_partial_prefix_before_cache_update(tmp_path):
+def test_risk_router_primes_teacher_instead_of_initial_partial_prefix(tmp_path):
     clients = []
 
     class _PartialPrefixClient:
@@ -157,5 +158,92 @@ def test_risk_router_rejects_initial_partial_prefix_before_cache_update(tmp_path
 
     assert np.all(ret["action"] == 3.0)
     records = [json.loads(line) for line in log_path.read_text().splitlines()]
-    assert records[-1]["source"] == "teacher_verify_reject"
-    assert records[-1]["verify"]["initial_partial_prefix_rejected"] is True
+    assert records[-1]["source"] == "teacher_initial_prime"
+
+
+def test_risk_router_uses_teacher_for_initial_full_prefix_to_prime_cache(tmp_path):
+    clients = []
+
+    class _InitialFullPrefixClient:
+        def __init__(self, role):
+            self.role = role
+            self.calls = []
+
+        def infer(self, obs):
+            self.calls.append(dict(obs))
+            if obs.get("verify_action"):
+                return {"accepted_prefix": 32, "raw_valid_prefix": 32}
+            if obs.get("verify_world_latent"):
+                return {"world_pass": True, "world_distance_max": 0.0}
+            if obs.get("return_action_latent"):
+                action = np.zeros((16, 2, 16), dtype=np.float32)
+                action[:, 1, :] = 1.0
+                return {
+                    "action": action,
+                    "action_latent": np.zeros((1, 30, 2, 16, 1), dtype=np.float32),
+                    "video_latent": np.zeros((1, 48, 2, 24, 20), dtype=np.float32),
+                }
+            return {"action": np.full((16, 2, 16), 3.0, dtype=np.float32)}
+
+    def factory(host, port):
+        client = _InitialFullPrefixClient("draft" if not clients else "teacher")
+        clients.append(client)
+        return client
+
+    log_path = tmp_path / "metrics.jsonl"
+    policy = RiskRouterClientPolicy(
+        draft_port=1,
+        teacher_port=2,
+        teacher_cache_mode="sync",
+        risk_low=0.0,
+        risk_high=0.5,
+        world_verify_enable=True,
+        log_path=str(log_path),
+        client_factory=factory,
+    )
+    ret = policy.infer({"obs": ["x"], "state": np.zeros((16, 2, 16), dtype=np.float32)})
+
+    assert np.all(ret["action"] == 3.0)
+    records = [json.loads(line) for line in log_path.read_text().splitlines()]
+    assert records[-1]["source"] == "teacher_initial_prime"
+
+
+def test_risk_router_uses_teacher_for_initial_low_risk_to_prime_cache(tmp_path):
+    clients = []
+
+    class _InitialLowRiskClient:
+        def __init__(self, role):
+            self.role = role
+            self.calls = []
+
+        def infer(self, obs):
+            self.calls.append(dict(obs))
+            if obs.get("return_action_latent"):
+                return {
+                    "action": np.zeros((16, 2, 16), dtype=np.float32),
+                    "action_latent": np.zeros((1, 30, 2, 16, 1), dtype=np.float32),
+                    "video_latent": np.zeros((1, 48, 2, 24, 20), dtype=np.float32),
+                }
+            return {"action": np.full((16, 2, 16), 3.0, dtype=np.float32)}
+
+    def factory(host, port):
+        client = _InitialLowRiskClient("draft" if not clients else "teacher")
+        clients.append(client)
+        return client
+
+    log_path = tmp_path / "metrics.jsonl"
+    policy = RiskRouterClientPolicy(
+        draft_port=1,
+        teacher_port=2,
+        teacher_cache_mode="sync",
+        risk_low=0.25,
+        risk_high=0.5,
+        world_verify_enable=True,
+        log_path=str(log_path),
+        client_factory=factory,
+    )
+    ret = policy.infer({"obs": ["x"], "state": np.zeros((16, 2, 16), dtype=np.float32)})
+
+    assert np.all(ret["action"] == 3.0)
+    records = [json.loads(line) for line in log_path.read_text().splitlines()]
+    assert records[-1]["source"] == "teacher_initial_prime"

@@ -136,3 +136,58 @@ V7b keeps V6/V7 controls unchanged: draft `v1/a2`, teacher `v2/a4`, `teacher_cac
 ### Gate
 
 Do not enable repair execution unless V7b shows nontrivial `repair_accept` candidates on low10 without introducing runtime issues. If `repair_attempt` remains near zero, the repair branch is not reachable and the next change should target verifier/reject routing rather than repair quality.
+
+## V8 SVDR: Video-Guided Draft Repair
+
+### Goal
+
+Use the WAM-specific future video latent without adding training or a new learned module. The verifier should still trust Realtime-VLA-style action endpoint consistency, but rejected draft chunks get one chance to repair before falling back to the teacher.
+
+### Hypothesis
+
+FlashWAM's cached future video latent contains a short-horizon prediction of where the scene is changing. Contact-rich or discrete-transition phases should show concentrated latent motion in a few regions/frames. That motion can guide how strongly each action step should move toward the teacher action verifier endpoint residual:
+
+`A_repair[h] = A_draft[h] + lambda_video[h] * (A_teacher_endpoint[h] - A_draft[h])`
+
+If the repair passes the same action-only verifier, the system can execute more draft-derived actions and reduce teacher fallback without replacing the verifier with an untrusted video score.
+
+### Single New Feature
+
+SVDR adds a training-free video-guided repair branch:
+
+1. Draft returns action, action latent, and future video latent.
+2. Existing teacher action verifier rejects the draft and returns the endpoint reconstruction repair candidate.
+3. `video_motion_risk` computes frame-level risk from adjacent draft future video latent differences using top-k regional motion, median-relative motion, and concentration.
+4. `video_guided_blend` maps that risk to per-frame/per-action-step repair strengths between `svdr_lambda_min` and `svdr_lambda_max`.
+5. The repaired action is verified again by the existing action-only verifier.
+6. If it passes, execute `draft_svdr_repair_accept`; otherwise fall back as `teacher_svdr_repair_reject`.
+
+No world-latent verifier, no learned IDM, no teacher video repair, no training.
+
+### Fixed Controls
+
+- Draft/teacher configs remain `v1/a2` and `v2/a4`.
+- Teacher cache mode remains `sync` for the first validation.
+- Action verify tau stays `[150, 300]`.
+- Action threshold stays `0.18`.
+- Risk thresholds stay `0.25/0.55`.
+- `world_verify_enable` stays off for SVDR validation so the second check is action-only.
+
+### New Controls
+
+- `--svdr_repair_enable`
+- `--svdr_lambda_min`, default `0.05`
+- `--svdr_lambda_max`, default `0.90`
+- `--svdr_motion_ref`, default `3.0`
+- `--svdr_topk_frac`, default `0.10`
+- `--svdr_temperature`, default `1.0`
+
+### Gate
+
+Run smoke first to confirm the draft server returns `video_latent` under `return_video_latent=True`. Then low10 TN=10 can proceed if:
+
+- no reset/cache shape mismatch,
+- nonzero `draft_svdr_repair_accept`,
+- teacher fallback rate decreases relative to V6/V7,
+- success is not worse than V6 worldlatent baseline,
+- latency is not worse than action repair without video guidance.

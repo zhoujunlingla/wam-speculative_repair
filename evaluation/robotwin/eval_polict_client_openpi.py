@@ -424,6 +424,12 @@ def main(usr_args):
                 repair_enable=bool(usr_args.get("repair_enable", False)),
                 repair_lambda=float(usr_args.get("repair_lambda", 0.75)),
                 repair_instrument_only=bool(usr_args.get("repair_instrument_only", False)),
+                svdr_repair_enable=bool(usr_args.get("svdr_repair_enable", False)),
+                svdr_lambda_min=float(usr_args.get("svdr_lambda_min", 0.05)),
+                svdr_lambda_max=float(usr_args.get("svdr_lambda_max", 0.90)),
+                svdr_motion_ref=float(usr_args.get("svdr_motion_ref", 3.0)),
+                svdr_topk_frac=float(usr_args.get("svdr_topk_frac", 0.10)),
+                svdr_temperature=float(usr_args.get("svdr_temperature", 1.0)),
                 log_path=usr_args.get("specverify_log"),
             )
         else:
@@ -759,6 +765,12 @@ def parse_args_and_config():
     parser.add_argument("--repair_enable", action="store_true")
     parser.add_argument("--repair_lambda", type=float, default=0.75)
     parser.add_argument("--repair_instrument_only", action="store_true")
+    parser.add_argument("--svdr_repair_enable", action="store_true")
+    parser.add_argument("--svdr_lambda_min", type=float, default=0.05)
+    parser.add_argument("--svdr_lambda_max", type=float, default=0.90)
+    parser.add_argument("--svdr_motion_ref", type=float, default=3.0)
+    parser.add_argument("--svdr_topk_frac", type=float, default=0.10)
+    parser.add_argument("--svdr_temperature", type=float, default=1.0)
     args = parser.parse_args()
 
     with open(args.config, "r", encoding="utf-8") as f:
@@ -813,6 +825,12 @@ def parse_args_and_config():
         "repair_enable": args.repair_enable,
         "repair_lambda": args.repair_lambda,
         "repair_instrument_only": args.repair_instrument_only,
+        "svdr_repair_enable": args.svdr_repair_enable,
+        "svdr_lambda_min": args.svdr_lambda_min,
+        "svdr_lambda_max": args.svdr_lambda_max,
+        "svdr_motion_ref": args.svdr_motion_ref,
+        "svdr_topk_frac": args.svdr_topk_frac,
+        "svdr_temperature": args.svdr_temperature,
     }
     argv_before_overrides = sys.argv[1:]
     if "--overrides" in argv_before_overrides:

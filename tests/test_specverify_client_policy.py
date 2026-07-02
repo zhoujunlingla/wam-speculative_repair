@@ -421,3 +421,95 @@ def test_risk_router_falls_back_when_repaired_action_still_rejects(tmp_path):
         log_path=str(log_path),
         client_factory=factory,
     )
+
+
+def test_video_guided_blend_repairs_high_motion_frames_more_than_low_motion_frames():
+    from evaluation.robotwin.specverify_client_policy import video_guided_blend
+
+    draft_action = np.zeros((16, 3, 4), dtype=np.float32)
+    endpoint_action = np.ones((16, 3, 4), dtype=np.float32)
+    draft_latent = np.zeros((1, 30, 3, 4, 1), dtype=np.float32)
+    endpoint_latent = np.ones((1, 30, 3, 4, 1), dtype=np.float32)
+    video_latent = np.zeros((1, 4, 3, 4, 4), dtype=np.float32)
+    video_latent[:, :, 2, 0, 0] = 10.0
+
+    action, latent, meta = video_guided_blend(
+        draft_action,
+        endpoint_action,
+        draft_latent,
+        endpoint_latent,
+        video_latent,
+        lambda_min=0.05,
+        lambda_max=0.90,
+        motion_ref=3.0,
+        topk_frac=0.10,
+        temperature=1.0,
+    )
+
+    assert meta["svdr_lambda_by_frame"][2] > meta["svdr_lambda_by_frame"][0]
+    assert action[:, 2, :].mean() > action[:, 0, :].mean()
+    assert latent[:, :, 2, :, :].mean() > latent[:, :, 0, :, :].mean()
+
+
+def test_risk_router_svdr_uses_video_latent_to_make_nonuniform_repair(tmp_path):
+    clients = []
+
+    class _SvdrClient:
+        def __init__(self, role):
+            self.role = role
+            self.calls = []
+
+        def infer(self, obs):
+            self.calls.append(dict(obs))
+            if obs.get("verify_action"):
+                if obs.get("return_repair"):
+                    return {
+                        "accepted_prefix": 0,
+                        "raw_valid_prefix": 0,
+                        "repair_action": np.ones((16, 3, 4), dtype=np.float32),
+                        "repair_action_latent": np.ones((1, 30, 3, 4, 1), dtype=np.float32),
+                    }
+                latent = np.asarray(obs["action_latent"])
+                if latent[:, :, 2, :, :].mean() > latent[:, :, 0, :, :].mean():
+                    return {"accepted_prefix": 12, "raw_valid_prefix": 12}
+                return {"accepted_prefix": 0, "raw_valid_prefix": 0}
+            if obs.get("return_action_latent"):
+                video_latent = np.zeros((1, 4, 3, 4, 4), dtype=np.float32)
+                video_latent[:, :, 2, 0, 0] = 10.0
+                return {
+                    "action": np.zeros((16, 3, 4), dtype=np.float32),
+                    "action_latent": np.zeros((1, 30, 3, 4, 1), dtype=np.float32),
+                    "video_latent": video_latent,
+                }
+            return {"action": np.full((16, 3, 4), 3.0, dtype=np.float32)}
+
+    def factory(host, port):
+        client = _SvdrClient("draft" if not clients else "teacher")
+        clients.append(client)
+        return client
+
+    log_path = tmp_path / "metrics.jsonl"
+    policy = RiskRouterClientPolicy(
+        draft_port=1,
+        teacher_port=2,
+        teacher_cache_mode="sync",
+        risk_low=0.0,
+        risk_high=0.5,
+        repair_enable=True,
+        svdr_repair_enable=True,
+        svdr_lambda_min=0.05,
+        svdr_lambda_max=0.90,
+        log_path=str(log_path),
+        client_factory=factory,
+    )
+    policy.frame_st_id = 2
+
+    ret = policy.infer({"obs": ["x"], "state": np.zeros((16, 2, 16), dtype=np.float32)})
+
+    assert ret["action"].shape == (16, 3, 4)
+    assert ret["action"][:, 2, :].mean() > ret["action"][:, 0, :].mean()
+    teacher_verify_calls = [call for call in clients[1].calls if call.get("verify_action")]
+    assert teacher_verify_calls[0]["repair_lambda"] == 1.0
+    records = [json.loads(line) for line in log_path.read_text().splitlines()]
+    assert records[-1]["source"] == "draft_svdr_repair_accept"
+    assert records[-1]["svdr"]["svdr_lambda_by_frame"][2] > records[-1]["svdr"]["svdr_lambda_by_frame"][0]

@@ -20,7 +20,7 @@ from pathlib import Path
 
 
 ROOT = Path("/mnt/afs/intern/manlichen/ivan/zhoujunl")
-CODE = ROOT / "Wam_Speed_up" / "lingbot-va-riskrouter-repairinstrument-20260702"
+CODE = ROOT / "Wam_Speed_up" / "lingbot-va-svdr-videorepair-20260702"
 ROBOTWIN_ROOT = ROOT / "Wam_Speed_up" / "RoboTwin"
 EXPERIMENT_ROOT = ROOT / "experiments" / "Wam_Speed_up"
 RESULT_ROOT = ROOT / "result" / "Wam_Speed_up"
@@ -171,12 +171,14 @@ ACTION_SOURCES = {
     "draft_medium_noverify",
     "draft_verify_accept",
     "draft_repair_accept",
+    "draft_svdr_repair_accept",
     "teacher_full",
     "teacher_fallback",
     "teacher_router_high",
     "teacher_verify_reject",
     "teacher_world_verify_reject",
     "teacher_repair_reject",
+    "teacher_svdr_repair_reject",
     "teacher_repair_world_reject",
 }
 CACHE_SOURCES = {"compute_kv_cache", "compute_kv_cache_lazy_reference", "compute_kv_cache_stale_reference", "teacher_cache_sync", "teacher_cache_latest_sync", "reset"}
@@ -213,7 +215,9 @@ def specverify_metrics(log_path: Path) -> dict[str, object]:
         "draft_medium_noverify": 0,
         "draft_verify_accept": 0,
         "draft_repair_accept": 0,
+        "draft_svdr_repair_accept": 0,
         "teacher_repair_reject": 0,
+        "teacher_svdr_repair_reject": 0,
         "teacher_repair_world_reject": 0,
         "teacher_router_high": 0,
         "teacher_verify_reject": 0,
@@ -273,7 +277,7 @@ def specverify_metrics(log_path: Path) -> dict[str, object]:
                 if verify.get("phase_switch") and verify.get("phase_mode") == "tighten":
                     counts["phase_tighten"] += 1
                     counts["phase_tighten_accept"] += 1
-            elif source in ("draft_low_risk", "draft_medium_noverify", "draft_verify_accept", "draft_repair_accept"):
+            elif source in ("draft_low_risk", "draft_medium_noverify", "draft_verify_accept", "draft_repair_accept", "draft_svdr_repair_accept"):
                 counts["draft_accept"] += 1
                 counts[source] += 1
                 verify = row.get("verify") if isinstance(row.get("verify"), dict) else {}
@@ -311,9 +315,9 @@ def specverify_metrics(log_path: Path) -> dict[str, object]:
                 counts["world_verify"] += 1
                 counts["world_verify_reject"] += 1
                 verify = row.get("repair_verify") if isinstance(row.get("repair_verify"), dict) else {}
-            elif source == "teacher_repair_reject":
+            elif source in ("teacher_repair_reject", "teacher_svdr_repair_reject"):
                 counts["teacher_fallback"] += 1
-                counts["teacher_repair_reject"] += 1
+                counts[source] += 1
                 counts["verify_reject"] += 1
                 verify = row.get("repair_verify") if isinstance(row.get("repair_verify"), dict) else {}
             elif source == "teacher_verify_reject":
@@ -487,6 +491,12 @@ def run_task(
     repair_enable: bool,
     repair_lambda: float,
     repair_instrument_only: bool,
+    svdr_repair_enable: bool,
+    svdr_lambda_min: float,
+    svdr_lambda_max: float,
+    svdr_motion_ref: float,
+    svdr_topk_frac: float,
+    svdr_temperature: float,
 ) -> tuple[int, str]:
     log_path = run_root / "logs" / f"client_{task}.log"
     result_task_log = result_root / "logs" / f"client_{task}.log"
@@ -544,6 +554,16 @@ def run_task(
         *[str(x) for x in world_verify_tau],
         "--repair_lambda",
         str(repair_lambda),
+        "--svdr_lambda_min",
+        str(svdr_lambda_min),
+        "--svdr_lambda_max",
+        str(svdr_lambda_max),
+        "--svdr_motion_ref",
+        str(svdr_motion_ref),
+        "--svdr_topk_frac",
+        str(svdr_topk_frac),
+        "--svdr_temperature",
+        str(svdr_temperature),
         "--overrides",
         "--task_name",
         task,
@@ -574,6 +594,8 @@ def run_task(
         cmd.insert(cmd.index("--overrides"), "--repair_enable")
     if repair_instrument_only:
         cmd.insert(cmd.index("--overrides"), "--repair_instrument_only")
+    if svdr_repair_enable:
+        cmd.insert(cmd.index("--overrides"), "--svdr_repair_enable")
     if disable_prime_draft_on_teacher_full:
         cmd.insert(cmd.index("--overrides"), "--specverify_disable_prime_draft_on_teacher_full")
     with log_path.open("a", buffering=1) as log:
@@ -601,7 +623,7 @@ def launch(args: argparse.Namespace) -> None:
         f"phase_threshold_scale={args.phase_threshold_scale}, "
         f"low10 clean TN{args.test_num}. "
         f"Teacher cache mode={args.teacher_cache_mode}; "
-        "No periodic full refresh; high-risk chunks verify before teacher fallback; phase switch tightens verify; action repair is instrumentation-only: it requests teacher-flow local correction diagnostics but never executes repaired actions."
+        "No periodic full refresh; high-risk chunks verify before teacher fallback; phase switch tightens verify; SVDR uses draft-side future video latent motion/region risk to weight teacher action endpoint residual, then action-only re-verifies repaired draft before teacher fallback."
     )
     (run_root / "command.sh").write_text(" ".join(sys.argv) + "\n", encoding="utf-8")
     (result_root / "command.sh").write_text(" ".join(sys.argv) + "\n", encoding="utf-8")
@@ -672,6 +694,12 @@ def launch(args: argparse.Namespace) -> None:
                     repair_enable=args.repair_enable,
                     repair_lambda=args.repair_lambda,
                     repair_instrument_only=args.repair_instrument_only,
+                    svdr_repair_enable=args.svdr_repair_enable,
+                    svdr_lambda_min=args.svdr_lambda_min,
+                    svdr_lambda_max=args.svdr_lambda_max,
+                    svdr_motion_ref=args.svdr_motion_ref,
+                    svdr_topk_frac=args.svdr_topk_frac,
+                    svdr_temperature=args.svdr_temperature,
                 )
             print(f"[launcher] task {task} status={status}", flush=True)
             summarize(
@@ -767,6 +795,12 @@ def main() -> None:
     parser.add_argument("--repair-enable", action="store_true")
     parser.add_argument("--repair-lambda", type=float, default=0.75)
     parser.add_argument("--repair-instrument-only", action="store_true")
+    parser.add_argument("--svdr-repair-enable", action="store_true")
+    parser.add_argument("--svdr-lambda-min", type=float, default=0.05)
+    parser.add_argument("--svdr-lambda-max", type=float, default=0.90)
+    parser.add_argument("--svdr-motion-ref", type=float, default=3.0)
+    parser.add_argument("--svdr-topk-frac", type=float, default=0.10)
+    parser.add_argument("--svdr-temperature", type=float, default=1.0)
     parser.add_argument("--wait-screen", default="lingbotva_top10_chunks_20260617")
     parser.add_argument("--wait-timeout-sec", type=int, default=21600)
     parser.add_argument(

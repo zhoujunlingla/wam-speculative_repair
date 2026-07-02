@@ -320,6 +320,158 @@ def action_risk_score(
     return metrics
 
 
+def video_motion_risk(
+    video_latent,
+    *,
+    topk_frac: float = 0.10,
+    motion_ref: float = 3.0,
+    temperature: float = 1.0,
+) -> Dict[str, object]:
+    """Compute frame-level risk from draft-side future video latent motion."""
+
+    arr = np.asarray(video_latent, dtype=np.float32)
+    result: Dict[str, object] = {
+        "frame_scores": [0.0],
+        "m_rel": [],
+        "m_conc": [],
+        "m_top": [],
+        "frame_axis": None,
+    }
+    if arr.size == 0 or arr.ndim < 2:
+        return result
+
+    if arr.ndim >= 5:
+        frame_axis = 2
+        diff = np.diff(arr, axis=frame_axis)
+        if diff.shape[frame_axis] <= 0:
+            return result
+        patch_motion = np.sqrt(np.mean(diff * diff, axis=(0, 1)))
+    elif arr.ndim == 4:
+        frame_axis = 1
+        diff = np.diff(arr, axis=frame_axis)
+        if diff.shape[frame_axis] <= 0:
+            return result
+        patch_motion = np.sqrt(np.mean(diff * diff, axis=0))
+    elif arr.ndim == 3:
+        frame_axis = 0
+        patch_motion = np.abs(np.diff(arr, axis=0))
+        if patch_motion.shape[0] <= 0:
+            return result
+    else:
+        frame_axis = 0
+        flat = arr.reshape(arr.shape[0], -1)
+        patch_motion = np.abs(np.diff(flat, axis=0))
+        if patch_motion.shape[0] <= 0:
+            return result
+
+    eps = 1e-6
+    topk_frac = float(np.clip(topk_frac, eps, 1.0))
+    motion_ref = float(max(motion_ref, eps))
+    temperature = float(max(temperature, eps))
+    scores = []
+    rels = []
+    concs = []
+    tops = []
+    for frame_motion in patch_motion:
+        flat = np.asarray(frame_motion, dtype=np.float32).reshape(-1)
+        if flat.size == 0:
+            rel = conc = top_mean = 0.0
+        else:
+            k = max(1, int(np.ceil(flat.size * topk_frac)))
+            top = np.partition(flat, flat.size - k)[-k:]
+            median = float(np.median(flat)) + eps
+            total = float(np.sum(flat)) + eps
+            top_mean = float(np.mean(top))
+            rel = top_mean / median
+            conc = float(np.sum(top)) / total
+        raw = ((rel + 0.5 * conc) - motion_ref) / temperature
+        score = float(1.0 / (1.0 + np.exp(-np.clip(raw, -50.0, 50.0))))
+        scores.append(score)
+        rels.append(float(rel))
+        concs.append(float(conc))
+        tops.append(float(top_mean))
+
+    frame_scores = [scores[0]] + scores if scores else [0.0]
+    result.update({
+        "frame_scores": frame_scores,
+        "m_rel": rels,
+        "m_conc": concs,
+        "m_top": tops,
+        "frame_axis": frame_axis,
+    })
+    return result
+
+
+def video_guided_blend(
+    draft_action: np.ndarray,
+    endpoint_action: np.ndarray,
+    draft_latent: np.ndarray,
+    endpoint_latent: np.ndarray,
+    video_latent: np.ndarray,
+    *,
+    lambda_min: float = 0.05,
+    lambda_max: float = 0.90,
+    motion_ref: float = 3.0,
+    topk_frac: float = 0.10,
+    temperature: float = 1.0,
+    repair_start_prefix: int = 0,
+):
+    """Blend toward teacher endpoint with per-action-step video-risk weights."""
+
+    draft_action = np.asarray(draft_action, dtype=np.float32)
+    endpoint_action = np.asarray(endpoint_action, dtype=np.float32)
+    draft_latent = np.asarray(draft_latent, dtype=np.float32)
+    endpoint_latent = np.asarray(endpoint_latent, dtype=np.float32)
+    if draft_action.shape != endpoint_action.shape:
+        raise ValueError("draft_action and endpoint_action must have the same shape")
+    if draft_action.ndim != 3:
+        raise ValueError("action must have shape [C, F, H]")
+    if draft_latent.shape != endpoint_latent.shape:
+        raise ValueError("draft_latent and endpoint_latent must have the same shape")
+
+    risk = video_motion_risk(
+        video_latent,
+        topk_frac=topk_frac,
+        motion_ref=motion_ref,
+        temperature=temperature,
+    )
+    frame_scores = list(risk.get("frame_scores", [0.0]))
+    action_frames = draft_action.shape[1]
+    if len(frame_scores) < action_frames:
+        frame_scores.extend([frame_scores[-1] if frame_scores else 0.0] * (action_frames - len(frame_scores)))
+    frame_scores = frame_scores[:action_frames]
+
+    lambda_min = float(lambda_min)
+    lambda_max = float(lambda_max)
+    if lambda_max < lambda_min:
+        lambda_min, lambda_max = lambda_max, lambda_min
+    frame_lambdas = [lambda_min + (lambda_max - lambda_min) * float(np.clip(s, 0.0, 1.0)) for s in frame_scores]
+
+    action_per_frame = draft_action.shape[2]
+    step_weights = np.repeat(np.asarray(frame_lambdas, dtype=np.float32), action_per_frame)
+    repair_start_prefix = int(max(0, repair_start_prefix))
+    if repair_start_prefix > 0:
+        step_weights[:min(repair_start_prefix, step_weights.size)] = 0.0
+    action_weights = step_weights.reshape(1, action_frames, action_per_frame)
+    repaired_action = draft_action + action_weights * (endpoint_action - draft_action)
+
+    if draft_latent.ndim >= 5 and draft_latent.shape[2] == action_frames and draft_latent.shape[3] == action_per_frame:
+        latent_weights = step_weights.reshape(1, 1, action_frames, action_per_frame, 1)
+    else:
+        latent_weights = np.asarray(np.mean(step_weights), dtype=np.float32)
+    repaired_latent = draft_latent + latent_weights * (endpoint_latent - draft_latent)
+
+    meta = dict(risk)
+    meta.update({
+        "svdr_lambda_by_frame": [float(x) for x in frame_lambdas],
+        "svdr_lambda_mean": float(np.mean(step_weights)) if step_weights.size else 0.0,
+        "svdr_lambda_min": float(np.min(step_weights)) if step_weights.size else 0.0,
+        "svdr_lambda_max": float(np.max(step_weights)) if step_weights.size else 0.0,
+        "repair_start_prefix": repair_start_prefix,
+    })
+    return repaired_action.astype(np.float32), repaired_latent.astype(np.float32), meta
+
+
 class RiskRouterClientPolicy:
     """Route LingBot v1/a2 draft to LingBot v2/a4 only when the chunk looks risky."""
 
@@ -345,6 +497,12 @@ class RiskRouterClientPolicy:
         repair_enable: bool = False,
         repair_lambda: float = 0.75,
         repair_instrument_only: bool = False,
+        svdr_repair_enable: bool = False,
+        svdr_lambda_min: float = 0.05,
+        svdr_lambda_max: float = 0.90,
+        svdr_motion_ref: float = 3.0,
+        svdr_topk_frac: float = 0.10,
+        svdr_temperature: float = 1.0,
         log_path: Optional[str] = None,
         client_factory=None,
     ) -> None:
@@ -374,6 +532,12 @@ class RiskRouterClientPolicy:
         self.repair_enable = bool(repair_enable)
         self.repair_lambda = float(repair_lambda)
         self.repair_instrument_only = bool(repair_instrument_only)
+        self.svdr_repair_enable = bool(svdr_repair_enable)
+        self.svdr_lambda_min = float(svdr_lambda_min)
+        self.svdr_lambda_max = float(svdr_lambda_max)
+        self.svdr_motion_ref = float(svdr_motion_ref)
+        self.svdr_topk_frac = float(svdr_topk_frac)
+        self.svdr_temperature = float(svdr_temperature)
         self.round_id = 0
         self.frame_st_id = 0
         self.pending_teacher_cache_obs = []
@@ -518,7 +682,7 @@ class RiskRouterClientPolicy:
 
         draft_obs = dict(obs)
         draft_obs["return_action_latent"] = self.risk_verify_mode == "medium"
-        draft_obs["return_video_latent"] = self.world_verify_enable
+        draft_obs["return_video_latent"] = self.world_verify_enable or self.svdr_repair_enable
         draft_ret = self.draft.infer(draft_obs)
         draft_action = draft_ret["action"]
         risk = action_risk_score(
@@ -568,7 +732,7 @@ class RiskRouterClientPolicy:
             "tau_timesteps": self.tau_timesteps,
             "frame_st_id": self.frame_st_id,
             "return_repair": self.repair_enable,
-            "repair_lambda": self.repair_lambda,
+            "repair_lambda": 1.0 if self.svdr_repair_enable else self.repair_lambda,
         })
         verify_ret["phase_switch"] = phase_switch
         verify_ret["phase_mode"] = "tighten" if phase_switch else "normal"
@@ -593,7 +757,25 @@ class RiskRouterClientPolicy:
         if accepted_prefix <= 0:
             repair_action = verify_ret.get("repair_action")
             repair_action_latent = verify_ret.get("repair_action_latent")
+            svdr_meta = None
             if self.repair_enable and repair_action is not None and repair_action_latent is not None:
+                if self.svdr_repair_enable:
+                    video_latent = draft_ret.get("video_latent")
+                    if video_latent is None:
+                        raise RuntimeError("SVDR repair requires draft server return_video_latent support")
+                    repair_action, repair_action_latent, svdr_meta = video_guided_blend(
+                        draft_action,
+                        np.asarray(repair_action),
+                        draft_ret["action_latent"],
+                        np.asarray(repair_action_latent),
+                        video_latent,
+                        lambda_min=self.svdr_lambda_min,
+                        lambda_max=self.svdr_lambda_max,
+                        motion_ref=self.svdr_motion_ref,
+                        topk_frac=self.svdr_topk_frac,
+                        temperature=self.svdr_temperature,
+                        repair_start_prefix=max(0, int(verify_ret.get("raw_valid_prefix", 0))),
+                    )
                 repair_start = time.perf_counter()
                 repair_verify_ret = self.teacher.infer({
                     "verify_action": True,
@@ -607,6 +789,8 @@ class RiskRouterClientPolicy:
                 repair_verify_ret["risk_zone"] = "high" if high_risk else "medium"
                 repair_verify_ret["base_threshold"] = self.threshold
                 repair_verify_ret["effective_threshold"] = verify_threshold
+                if svdr_meta is not None:
+                    repair_verify_ret["svdr"] = svdr_meta
                 repair_accepted_prefix = int(repair_verify_ret.get("accepted_prefix", 0))
                 if self.frame_st_id == 0 and action_per_frame > 0 and 0 < repair_accepted_prefix <= action_per_frame:
                     repair_verify_ret["raw_accepted_prefix"] = repair_accepted_prefix
@@ -654,6 +838,7 @@ class RiskRouterClientPolicy:
                             "verify": verify_log,
                             "repair_verify": repair_verify_ret,
                             "world_verify": world_verify_ret,
+                            "svdr": svdr_meta,
                             "repair_action_pass": bool(repair_action_pass),
                             "repair_world_pass": repair_world_pass,
                             "repair_fail_action": not repair_action_pass,
@@ -667,12 +852,13 @@ class RiskRouterClientPolicy:
                     else:
                         action = slice_action_prefix(np.asarray(repair_action), repair_accepted_prefix)
                         self._log({
-                            "source": "draft_repair_accept",
+                            "source": "draft_svdr_repair_accept" if svdr_meta is not None else "draft_repair_accept",
                             "accepted_prefix": repair_accepted_prefix,
                             "risk": risk,
                             "verify": verify_log,
                             "repair_verify": repair_verify_ret,
                             "world_verify": world_verify_ret,
+                            "svdr": svdr_meta,
                             "pending_teacher_cache_updates": len(self.pending_teacher_cache_obs),
                             "pending_teacher_cache_frames": self.pending_teacher_cache_frames,
                             "elapsed_sec": time.perf_counter() - start,
@@ -686,6 +872,7 @@ class RiskRouterClientPolicy:
                         "risk": risk,
                         "verify": verify_log,
                         "repair_verify": repair_verify_ret,
+                        "svdr": svdr_meta,
                         "repair_action_pass": False,
                         "repair_world_pass": None,
                         "repair_fail_action": True,
@@ -697,10 +884,11 @@ class RiskRouterClientPolicy:
                         "pending_teacher_cache_frames": self.pending_teacher_cache_frames,
                     })
             self.round_id += 1
-            fallback_source = "teacher_repair_reject" if self.repair_enable and repair_action is not None and not self.repair_instrument_only else "teacher_verify_reject"
+            fallback_source = "teacher_svdr_repair_reject" if self.svdr_repair_enable and repair_action is not None and not self.repair_instrument_only else ("teacher_repair_reject" if self.repair_enable and repair_action is not None and not self.repair_instrument_only else "teacher_verify_reject")
             return self._teacher_action(obs, fallback_source, {
                 "risk": risk,
                 "verify": verify_log,
+                "svdr": svdr_meta,
                 "accepted_prefix": accepted_prefix,
                 "elapsed_sec": elapsed,
                 "pending_teacher_cache_updates": len(self.pending_teacher_cache_obs),

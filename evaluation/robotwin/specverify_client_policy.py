@@ -344,6 +344,7 @@ class RiskRouterClientPolicy:
         world_verify_tau_timesteps=(150.0, 300.0),
         repair_enable: bool = False,
         repair_lambda: float = 0.75,
+        repair_instrument_only: bool = False,
         log_path: Optional[str] = None,
         client_factory=None,
     ) -> None:
@@ -372,6 +373,7 @@ class RiskRouterClientPolicy:
         self.world_verify_tau_timesteps = tuple(float(x) for x in world_verify_tau_timesteps)
         self.repair_enable = bool(repair_enable)
         self.repair_lambda = float(repair_lambda)
+        self.repair_instrument_only = bool(repair_instrument_only)
         self.round_id = 0
         self.frame_st_id = 0
         self.pending_teacher_cache_obs = []
@@ -592,6 +594,7 @@ class RiskRouterClientPolicy:
             repair_action = verify_ret.get("repair_action")
             repair_action_latent = verify_ret.get("repair_action_latent")
             if self.repair_enable and repair_action is not None and repair_action_latent is not None:
+                repair_start = time.perf_counter()
                 repair_verify_ret = self.teacher.infer({
                     "verify_action": True,
                     "action_latent": repair_action_latent,
@@ -613,6 +616,8 @@ class RiskRouterClientPolicy:
                     repair_verify_ret["raw_accepted_prefix"] = repair_accepted_prefix
                     repair_verify_ret[f"{self.teacher_cache_mode}_partial_prefix_rejected"] = True
                     repair_accepted_prefix = 0
+                repair_action_pass = repair_accepted_prefix > 0
+                repair_world_pass = None
                 if repair_accepted_prefix > 0:
                     world_verify_ret = None
                     if self.world_verify_enable:
@@ -627,7 +632,10 @@ class RiskRouterClientPolicy:
                             "frame_st_id": self.frame_st_id,
                         })
                         repair_verify_ret["world_verify"] = world_verify_ret
-                        if not bool(world_verify_ret.get("world_pass", False)):
+                        repair_world_pass = bool(world_verify_ret.get("world_pass", False))
+                        if self.repair_instrument_only:
+                            pass
+                        elif not repair_world_pass:
                             self.round_id += 1
                             return self._teacher_action(obs, "teacher_repair_world_reject", {
                                 "risk": risk,
@@ -638,23 +646,58 @@ class RiskRouterClientPolicy:
                                 "pending_teacher_cache_updates": len(self.pending_teacher_cache_obs),
                                 "pending_teacher_cache_frames": self.pending_teacher_cache_frames,
                             })
-                    action = slice_action_prefix(np.asarray(repair_action), repair_accepted_prefix)
+                    if self.repair_instrument_only:
+                        repair_accept = repair_action_pass and (repair_world_pass is not False)
+                        self._log({
+                            "source": "repair_attempt",
+                            "risk": risk,
+                            "verify": verify_log,
+                            "repair_verify": repair_verify_ret,
+                            "world_verify": world_verify_ret,
+                            "repair_action_pass": bool(repair_action_pass),
+                            "repair_world_pass": repair_world_pass,
+                            "repair_fail_action": not repair_action_pass,
+                            "repair_fail_world": bool(repair_action_pass and repair_world_pass is False),
+                            "repair_accept": bool(repair_accept),
+                            "accepted_prefix": repair_accepted_prefix if repair_accept else 0,
+                            "elapsed_sec": time.perf_counter() - repair_start,
+                            "pending_teacher_cache_updates": len(self.pending_teacher_cache_obs),
+                            "pending_teacher_cache_frames": self.pending_teacher_cache_frames,
+                        })
+                    else:
+                        action = slice_action_prefix(np.asarray(repair_action), repair_accepted_prefix)
+                        self._log({
+                            "source": "draft_repair_accept",
+                            "accepted_prefix": repair_accepted_prefix,
+                            "risk": risk,
+                            "verify": verify_log,
+                            "repair_verify": repair_verify_ret,
+                            "world_verify": world_verify_ret,
+                            "pending_teacher_cache_updates": len(self.pending_teacher_cache_obs),
+                            "pending_teacher_cache_frames": self.pending_teacher_cache_frames,
+                            "elapsed_sec": time.perf_counter() - start,
+                        })
+                        self._log_latency(obs, time.perf_counter() - start, "draft_repair_accept")
+                        self.round_id += 1
+                        return {"action": action}
+                elif self.repair_instrument_only:
                     self._log({
-                        "source": "draft_repair_accept",
-                        "accepted_prefix": repair_accepted_prefix,
+                        "source": "repair_attempt",
                         "risk": risk,
                         "verify": verify_log,
                         "repair_verify": repair_verify_ret,
-                        "world_verify": world_verify_ret,
+                        "repair_action_pass": False,
+                        "repair_world_pass": None,
+                        "repair_fail_action": True,
+                        "repair_fail_world": False,
+                        "repair_accept": False,
+                        "accepted_prefix": 0,
+                        "elapsed_sec": time.perf_counter() - repair_start,
                         "pending_teacher_cache_updates": len(self.pending_teacher_cache_obs),
                         "pending_teacher_cache_frames": self.pending_teacher_cache_frames,
-                        "elapsed_sec": time.perf_counter() - start,
                     })
-                    self._log_latency(obs, time.perf_counter() - start, "draft_repair_accept")
-                    self.round_id += 1
-                    return {"action": action}
             self.round_id += 1
-            fallback_source = "teacher_repair_reject" if self.repair_enable and repair_action is not None else "teacher_verify_reject"
+            fallback_source = "teacher_repair_reject" if self.repair_enable and repair_action is not None and not self.repair_instrument_only else "teacher_verify_reject"
             return self._teacher_action(obs, fallback_source, {
                 "risk": risk,
                 "verify": verify_log,

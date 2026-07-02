@@ -421,6 +421,9 @@ def main(usr_args):
                 world_verify_enable=bool(usr_args.get("world_verify_enable", False)),
                 world_verify_threshold=float(usr_args.get("world_verify_threshold", 0.35)),
                 world_verify_tau_timesteps=usr_args.get("world_verify_tau", [150.0, 300.0]),
+                repair_enable=bool(usr_args.get("repair_enable", False)),
+                repair_lambda=float(usr_args.get("repair_lambda", 0.75)),
+                repair_instrument_only=bool(usr_args.get("repair_instrument_only", False)),
                 log_path=usr_args.get("specverify_log"),
             )
         else:
@@ -755,6 +758,7 @@ def parse_args_and_config():
     parser.add_argument("--world_verify_tau", nargs="+", type=float, default=[150.0, 300.0])
     parser.add_argument("--repair_enable", action="store_true")
     parser.add_argument("--repair_lambda", type=float, default=0.75)
+    parser.add_argument("--repair_instrument_only", action="store_true")
     args = parser.parse_args()
 
     with open(args.config, "r", encoding="utf-8") as f:
@@ -808,6 +812,7 @@ def parse_args_and_config():
         "world_verify_tau": args.world_verify_tau,
         "repair_enable": args.repair_enable,
         "repair_lambda": args.repair_lambda,
+        "repair_instrument_only": args.repair_instrument_only,
     }
     argv_before_overrides = sys.argv[1:]
     if "--overrides" in argv_before_overrides:

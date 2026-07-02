@@ -107,3 +107,32 @@ Optional action repair in RiskRouter:
 Compare against V6 `20260701_0758_worldlatent_initialprime_sync_low10_tn10_g012`:
 
 - success must improve beyond `72/100`,
+
+## V7b Repair Instrumentation Only
+
+### Goal
+
+Determine whether action local repair has viable opportunities before allowing it to change closed-loop behavior.
+
+### Problem Evidence
+
+The V7 low10 run was stopped early at `18/30 = 60%`. More importantly, its metrics showed `draft_repair_accept = 0`, so the added repair capability had no observable positive effect. A root-cause check found an implementation gap: the launcher passed `--repair_enable`, but `eval_polict_client_openpi.py` did not forward `repair_enable` or `repair_lambda` into `RiskRouterClientPolicy`, so the policy never requested repair from the teacher verifier.
+
+### Single New Feature
+
+V7b fixes the missing repair argument forwarding and adds `repair_instrument_only`.
+
+When enabled:
+
+1. The teacher verifier returns a repaired action candidate when the original draft fails action verification.
+2. The policy re-verifies the repaired candidate and optionally checks the existing world-latent verifier.
+3. The policy logs `repair_attempt`, `repair_action_pass`, `repair_world_pass`, `repair_fail_action`, `repair_fail_world`, and `repair_accept`.
+4. The policy still falls back to the original teacher path. It never executes the repaired action.
+
+### Fixed Controls
+
+V7b keeps V6/V7 controls unchanged: draft `v1/a2`, teacher `v2/a4`, `teacher_cache_mode=sync`, action threshold `0.18`, risk thresholds `0.25/0.55`, world threshold `0.35`, and tau `[150, 300]`.
+
+### Gate
+
+Do not enable repair execution unless V7b shows nontrivial `repair_accept` candidates on low10 without introducing runtime issues. If `repair_attempt` remains near zero, the repair branch is not reachable and the next change should target verifier/reject routing rather than repair quality.

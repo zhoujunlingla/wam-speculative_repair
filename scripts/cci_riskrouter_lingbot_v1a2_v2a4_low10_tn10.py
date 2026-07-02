@@ -20,7 +20,7 @@ from pathlib import Path
 
 
 ROOT = Path("/mnt/afs/intern/manlichen/ivan/zhoujunl")
-CODE = ROOT / "Wam_Speed_up" / "lingbot-va-riskrouter-actionrepair-20260702"
+CODE = ROOT / "Wam_Speed_up" / "lingbot-va-riskrouter-repairinstrument-20260702"
 ROBOTWIN_ROOT = ROOT / "Wam_Speed_up" / "RoboTwin"
 EXPERIMENT_ROOT = ROOT / "experiments" / "Wam_Speed_up"
 RESULT_ROOT = ROOT / "result" / "Wam_Speed_up"
@@ -221,6 +221,12 @@ def specverify_metrics(log_path: Path) -> dict[str, object]:
         "world_verify": 0,
         "world_verify_accept": 0,
         "world_verify_reject": 0,
+        "repair_attempt": 0,
+        "repair_action_pass": 0,
+        "repair_world_pass": 0,
+        "repair_fail_action": 0,
+        "repair_fail_world": 0,
+        "repair_accept": 0,
         "high_verify": 0,
         "high_verify_accept": 0,
         "high_verify_reject": 0,
@@ -321,6 +327,18 @@ def specverify_metrics(log_path: Path) -> dict[str, object]:
                 if verify.get("risk_zone") == "high":
                     counts["high_verify"] += 1
                     counts["high_verify_reject"] += 1
+            elif source == "repair_attempt":
+                counts["repair_attempt"] += 1
+                if row.get("repair_action_pass"):
+                    counts["repair_action_pass"] += 1
+                if row.get("repair_world_pass"):
+                    counts["repair_world_pass"] += 1
+                if row.get("repair_fail_action"):
+                    counts["repair_fail_action"] += 1
+                if row.get("repair_fail_world"):
+                    counts["repair_fail_world"] += 1
+                if row.get("repair_accept"):
+                    counts["repair_accept"] += 1
     action_rounds = counts["draft_accept"] + counts["teacher_full"] + counts["teacher_fallback"]
 
     def rate(value: int) -> float | None:
@@ -468,6 +486,7 @@ def run_task(
     world_verify_tau: list[float],
     repair_enable: bool,
     repair_lambda: float,
+    repair_instrument_only: bool,
 ) -> tuple[int, str]:
     log_path = run_root / "logs" / f"client_{task}.log"
     result_task_log = result_root / "logs" / f"client_{task}.log"
@@ -553,6 +572,8 @@ def run_task(
         cmd.insert(cmd.index("--overrides"), "--world_verify_enable")
     if repair_enable:
         cmd.insert(cmd.index("--overrides"), "--repair_enable")
+    if repair_instrument_only:
+        cmd.insert(cmd.index("--overrides"), "--repair_instrument_only")
     if disable_prime_draft_on_teacher_full:
         cmd.insert(cmd.index("--overrides"), "--specverify_disable_prime_draft_on_teacher_full")
     with log_path.open("a", buffering=1) as log:
@@ -580,7 +601,7 @@ def launch(args: argparse.Namespace) -> None:
         f"phase_threshold_scale={args.phase_threshold_scale}, "
         f"low10 clean TN{args.test_num}. "
         f"Teacher cache mode={args.teacher_cache_mode}; "
-        "No periodic full refresh; high-risk chunks verify before teacher fallback; phase switch tightens verify; optional action repair tries one teacher-flow local correction before teacher fallback."
+        "No periodic full refresh; high-risk chunks verify before teacher fallback; phase switch tightens verify; action repair is instrumentation-only: it requests teacher-flow local correction diagnostics but never executes repaired actions."
     )
     (run_root / "command.sh").write_text(" ".join(sys.argv) + "\n", encoding="utf-8")
     (result_root / "command.sh").write_text(" ".join(sys.argv) + "\n", encoding="utf-8")
@@ -650,6 +671,7 @@ def launch(args: argparse.Namespace) -> None:
                     world_verify_tau=args.world_verify_tau,
                     repair_enable=args.repair_enable,
                     repair_lambda=args.repair_lambda,
+                    repair_instrument_only=args.repair_instrument_only,
                 )
             print(f"[launcher] task {task} status={status}", flush=True)
             summarize(
@@ -744,6 +766,7 @@ def main() -> None:
     parser.add_argument("--world-verify-tau", nargs="+", type=float, default=[150.0, 300.0])
     parser.add_argument("--repair-enable", action="store_true")
     parser.add_argument("--repair-lambda", type=float, default=0.75)
+    parser.add_argument("--repair-instrument-only", action="store_true")
     parser.add_argument("--wait-screen", default="lingbotva_top10_chunks_20260617")
     parser.add_argument("--wait-timeout-sec", type=int, default=21600)
     parser.add_argument(

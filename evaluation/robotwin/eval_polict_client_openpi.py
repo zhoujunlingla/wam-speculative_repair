@@ -867,6 +867,13 @@ def parse_args_and_config():
         "world_verify_tau": "--world_verify_tau",
         "repair_enable": "--repair_enable",
         "repair_lambda": "--repair_lambda",
+        "repair_instrument_only": "--repair_instrument_only",
+        "svdr_repair_enable": "--svdr_repair_enable",
+        "svdr_lambda_min": "--svdr_lambda_min",
+        "svdr_lambda_max": "--svdr_lambda_max",
+        "svdr_motion_ref": "--svdr_motion_ref",
+        "svdr_topk_frac": "--svdr_topk_frac",
+        "svdr_temperature": "--svdr_temperature",
     }
     for key, value in parser_updates.items():
         if flag_for_key[key] in explicit_flags or key not in config:

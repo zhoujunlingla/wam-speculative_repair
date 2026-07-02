@@ -16,6 +16,7 @@ No blocking findings.
 - Added SVDR policy flags and forwarding in `evaluation/robotwin/eval_polict_client_openpi.py`.
 - Updated the low10 launcher/summary script to record `draft_svdr_repair_accept` and `teacher_svdr_repair_reject`.
 - Added unit tests that verify high-motion latent frames receive stronger repair and that SVDR requests a full teacher endpoint repair before applying video-guided per-step blending.
+- Smoke-start fix: added the missing `flag_for_key` mappings for `repair_instrument_only` and all `svdr_*` parser updates after the first client launch exposed `KeyError: 'repair_instrument_only'`.
 
 ## Risk Assessment
 
@@ -29,8 +30,9 @@ Risk level: medium.
 
 - `python3 -m py_compile evaluation/robotwin/specverify_client_policy.py evaluation/robotwin/eval_polict_client_openpi.py scripts/cci_riskrouter_lingbot_v1a2_v2a4_low10_tn10.py`
 - `python3 -m pytest -q tests/test_specverify_client_policy.py tests/test_specverify.py`
+- `parse_args_and_config()` check under the launcher `base_env()` with `--repair_enable --svdr_repair_enable`.
 
-Result: `17 passed`.
+Result: `17 passed`; parser check returned `repair_enable=True`, `repair_instrument_only=False`, `svdr_repair_enable=True`.
 
 ## Proceed Decision
 

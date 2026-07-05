@@ -137,6 +137,104 @@ def start_server(
     return subprocess.Popen(cmd, cwd=str(CODE), env=base_env(gpu, use_torch29=True), stdout=log, stderr=subprocess.STDOUT)
 
 
+def start_single_spec_server(
+    run_root: Path,
+    *,
+    draft_config_name: str,
+    teacher_config_name: str,
+    gpu: int,
+    port: int,
+    threshold: float,
+    teacher_cache_mode: str,
+    phase_threshold_scale: float,
+    risk_low: float,
+    risk_high: float,
+    risk_verify_mode: str,
+    risk_delta_ref: float,
+    risk_mean_delta_ref: float,
+    risk_jerk_ref: float,
+    risk_phase_weight: float,
+    world_verify_enable: bool,
+    world_verify_threshold: float,
+    world_verify_tau: list[float],
+    repair_enable: bool,
+    repair_lambda: float,
+    repair_instrument_only: bool,
+    svdr_repair_enable: bool,
+    svdr_lambda_min: float,
+    svdr_lambda_max: float,
+    svdr_motion_ref: float,
+    svdr_topk_frac: float,
+    svdr_temperature: float,
+) -> subprocess.Popen:
+    log_path = run_root / "logs" / f"single_spec_server_g{gpu}.log"
+    log = log_path.open("a", buffering=1)
+    cmd = [
+        sys.executable,
+        "wan_va/wan_va_single_spec_server.py",
+        "--port",
+        str(port),
+        "--save_root",
+        str(run_root / "server" / "single_spec"),
+        "--draft-config-name",
+        draft_config_name,
+        "--teacher-config-name",
+        teacher_config_name,
+        "--teacher-cache-mode",
+        teacher_cache_mode,
+        "--threshold",
+        str(threshold),
+        "--phase-threshold-scale",
+        str(phase_threshold_scale),
+        "--risk-low",
+        str(risk_low),
+        "--risk-high",
+        str(risk_high),
+        "--risk-verify-mode",
+        risk_verify_mode,
+        "--risk-delta-ref",
+        str(risk_delta_ref),
+        "--risk-mean-delta-ref",
+        str(risk_mean_delta_ref),
+        "--risk-jerk-ref",
+        str(risk_jerk_ref),
+        "--risk-phase-weight",
+        str(risk_phase_weight),
+        "--world-verify-threshold",
+        str(world_verify_threshold),
+        "--world-verify-tau-timesteps",
+        *[str(x) for x in world_verify_tau],
+        "--repair-lambda",
+        str(repair_lambda),
+        "--svdr-lambda-min",
+        str(svdr_lambda_min),
+        "--svdr-lambda-max",
+        str(svdr_lambda_max),
+        "--svdr-motion-ref",
+        str(svdr_motion_ref),
+        "--svdr-topk-frac",
+        str(svdr_topk_frac),
+        "--svdr-temperature",
+        str(svdr_temperature),
+        "--specverify-log",
+        str(run_root / "logs" / "specverify_metrics.jsonl"),
+    ]
+    if world_verify_enable:
+        cmd.append("--world-verify-enable")
+    if repair_enable:
+        cmd.append("--repair-enable")
+    if repair_instrument_only:
+        cmd.append("--repair-instrument-only")
+    if svdr_repair_enable:
+        cmd.append("--svdr-repair-enable")
+    print(
+        f"[launcher] start single spec server gpu={gpu} port={port} "
+        f"draft={draft_config_name} teacher={teacher_config_name}",
+        flush=True,
+    )
+    return subprocess.Popen(cmd, cwd=str(CODE), env=base_env(gpu, use_torch29=True), stdout=log, stderr=subprocess.STDOUT)
+
+
 def read_task_metric(root: Path, task: str) -> dict[str, object]:
     metric_path = root / "results" / "stseed-10000" / "metrics" / task / "res.json"
     if not metric_path.exists():
@@ -470,6 +568,7 @@ def run_task(
     client_gpu: int,
     draft_port: int,
     teacher_port: int,
+    single_port: int | None,
     test_num: int,
     specverify_log: Path,
     teacher_cache_mode: str,
@@ -512,58 +611,65 @@ def run_task(
         "policy/ACT/deploy_policy.yml",
         "--host",
         "127.0.0.1",
-        "--specverify_enable",
-        "--specverify_policy_mode",
-        "risk_router",
-        "--draft_port",
-        str(draft_port),
-        "--teacher_port",
-        str(teacher_port),
-        "--specverify_pf",
-        str(specverify_pf),
-        "--specverify_threshold",
-        str(specverify_threshold),
-        "--specverify_tau",
-        "150",
-        "300",
-        "--specverify_teacher_cache_mode",
-        teacher_cache_mode,
-        "--specverify_log",
-        str(specverify_log),
-        "--specverify_phase_mode",
-        phase_mode,
-        "--specverify_phase_threshold_scale",
-        str(phase_threshold_scale),
-        "--risk_router_low",
-        str(risk_low),
-        "--risk_router_high",
-        str(risk_high),
-        "--risk_router_verify_mode",
-        risk_verify_mode,
-        "--risk_router_delta_ref",
-        str(risk_delta_ref),
-        "--risk_router_mean_delta_ref",
-        str(risk_mean_delta_ref),
-        "--risk_router_jerk_ref",
-        str(risk_jerk_ref),
-        "--risk_router_phase_weight",
-        str(risk_phase_weight),
-        "--world_verify_threshold",
-        str(world_verify_threshold),
-        "--world_verify_tau",
-        *[str(x) for x in world_verify_tau],
-        "--repair_lambda",
-        str(repair_lambda),
-        "--svdr_lambda_min",
-        str(svdr_lambda_min),
-        "--svdr_lambda_max",
-        str(svdr_lambda_max),
-        "--svdr_motion_ref",
-        str(svdr_motion_ref),
-        "--svdr_topk_frac",
-        str(svdr_topk_frac),
-        "--svdr_temperature",
-        str(svdr_temperature),
+    ]
+    if single_port is None:
+        cmd.extend([
+            "--specverify_enable",
+            "--specverify_policy_mode",
+            "risk_router",
+            "--draft_port",
+            str(draft_port),
+            "--teacher_port",
+            str(teacher_port),
+            "--specverify_pf",
+            str(specverify_pf),
+            "--specverify_threshold",
+            str(specverify_threshold),
+            "--specverify_tau",
+            "150",
+            "300",
+            "--specverify_teacher_cache_mode",
+            teacher_cache_mode,
+            "--specverify_log",
+            str(specverify_log),
+            "--specverify_phase_mode",
+            phase_mode,
+            "--specverify_phase_threshold_scale",
+            str(phase_threshold_scale),
+            "--risk_router_low",
+            str(risk_low),
+            "--risk_router_high",
+            str(risk_high),
+            "--risk_router_verify_mode",
+            risk_verify_mode,
+            "--risk_router_delta_ref",
+            str(risk_delta_ref),
+            "--risk_router_mean_delta_ref",
+            str(risk_mean_delta_ref),
+            "--risk_router_jerk_ref",
+            str(risk_jerk_ref),
+            "--risk_router_phase_weight",
+            str(risk_phase_weight),
+            "--world_verify_threshold",
+            str(world_verify_threshold),
+            "--world_verify_tau",
+            *[str(x) for x in world_verify_tau],
+            "--repair_lambda",
+            str(repair_lambda),
+            "--svdr_lambda_min",
+            str(svdr_lambda_min),
+            "--svdr_lambda_max",
+            str(svdr_lambda_max),
+            "--svdr_motion_ref",
+            str(svdr_motion_ref),
+            "--svdr_topk_frac",
+            str(svdr_topk_frac),
+            "--svdr_temperature",
+            str(svdr_temperature),
+        ])
+    else:
+        cmd.extend(["--port", str(single_port)])
+    cmd.extend([
         "--overrides",
         "--task_name",
         task,
@@ -574,7 +680,7 @@ def run_task(
         "--model_name",
         "0",
         "--ckpt_setting",
-        "RiskRouter-LingBot-v1a2-draft-v2a4-teacher",
+        "SVDR-onpolicy-step2000-v1a2-draft-v2a4-teacher",
         "--seed",
         "0",
         "--policy_name",
@@ -587,17 +693,18 @@ def run_task(
         "1",
         "--test_num",
         str(test_num),
-    ]
-    if world_verify_enable:
-        cmd.insert(cmd.index("--overrides"), "--world_verify_enable")
-    if repair_enable:
-        cmd.insert(cmd.index("--overrides"), "--repair_enable")
-    if repair_instrument_only:
-        cmd.insert(cmd.index("--overrides"), "--repair_instrument_only")
-    if svdr_repair_enable:
-        cmd.insert(cmd.index("--overrides"), "--svdr_repair_enable")
-    if disable_prime_draft_on_teacher_full:
-        cmd.insert(cmd.index("--overrides"), "--specverify_disable_prime_draft_on_teacher_full")
+    ])
+    if single_port is None:
+        if world_verify_enable:
+            cmd.insert(cmd.index("--overrides"), "--world_verify_enable")
+        if repair_enable:
+            cmd.insert(cmd.index("--overrides"), "--repair_enable")
+        if repair_instrument_only:
+            cmd.insert(cmd.index("--overrides"), "--repair_instrument_only")
+        if svdr_repair_enable:
+            cmd.insert(cmd.index("--overrides"), "--svdr_repair_enable")
+        if disable_prime_draft_on_teacher_full:
+            cmd.insert(cmd.index("--overrides"), "--specverify_disable_prime_draft_on_teacher_full")
     with log_path.open("a", buffering=1) as log:
         log.write(f"[task] {task} client_gpu={client_gpu} tn={test_num}\n")
         log.write("[command] " + " ".join(cmd) + "\n")
@@ -615,8 +722,9 @@ def launch(args: argparse.Namespace) -> None:
     ensure_dirs(run_root, result_root)
     queued_at = datetime.now().isoformat(timespec="seconds")
     content = (
-        "Risk-router speculative inference on LingBot-VA: "
-        f"LingBot v1/a2 draft config={args.draft_config_name}, "
+        ("Single-server " if args.single_server else "Two-server ")
+        + "risk-router speculative inference on LingBot-VA: "
+        f"on-policy step2000 v1/a2 draft config={args.draft_config_name}, "
         f"LingBot v2/a4 teacher config={args.teacher_config_name}, "
         f"risk_low={args.risk_low}, risk_high={args.risk_high}, "
         f"risk_verify_mode={args.risk_verify_mode}, threshold={args.specverify_threshold}, "
@@ -644,22 +752,54 @@ def launch(args: argparse.Namespace) -> None:
     try:
         draft_port = args.port_base
         teacher_port = args.port_base + 1
-        servers.append(start_server(
-            run_root,
-            name="draft_flashwam",
-            config_name=args.draft_config_name,
-            gpu=args.draft_gpu,
-            port=draft_port,
-            master_port=args.master_port_base,
-        ))
-        servers.append(start_server(
-            run_root,
-            name="teacher_lingbot",
-            config_name=args.teacher_config_name,
-            gpu=args.teacher_gpu,
-            port=teacher_port,
-            master_port=args.master_port_base + 1,
-        ))
+        single_port = args.port_base if args.single_server else None
+        if args.single_server:
+            servers.append(start_single_spec_server(
+                run_root,
+                draft_config_name=args.draft_config_name,
+                teacher_config_name=args.teacher_config_name,
+                gpu=args.draft_gpu,
+                port=single_port,
+                threshold=args.specverify_threshold,
+                teacher_cache_mode=args.teacher_cache_mode,
+                phase_threshold_scale=args.phase_threshold_scale,
+                risk_low=args.risk_low,
+                risk_high=args.risk_high,
+                risk_verify_mode=args.risk_verify_mode,
+                risk_delta_ref=args.risk_delta_ref,
+                risk_mean_delta_ref=args.risk_mean_delta_ref,
+                risk_jerk_ref=args.risk_jerk_ref,
+                risk_phase_weight=args.risk_phase_weight,
+                world_verify_enable=args.world_verify_enable,
+                world_verify_threshold=args.world_verify_threshold,
+                world_verify_tau=args.world_verify_tau,
+                repair_enable=args.repair_enable,
+                repair_lambda=args.repair_lambda,
+                repair_instrument_only=args.repair_instrument_only,
+                svdr_repair_enable=args.svdr_repair_enable,
+                svdr_lambda_min=args.svdr_lambda_min,
+                svdr_lambda_max=args.svdr_lambda_max,
+                svdr_motion_ref=args.svdr_motion_ref,
+                svdr_topk_frac=args.svdr_topk_frac,
+                svdr_temperature=args.svdr_temperature,
+            ))
+        else:
+            servers.append(start_server(
+                run_root,
+                name="draft_flashwam",
+                config_name=args.draft_config_name,
+                gpu=args.draft_gpu,
+                port=draft_port,
+                master_port=args.master_port_base,
+            ))
+            servers.append(start_server(
+                run_root,
+                name="teacher_lingbot",
+                config_name=args.teacher_config_name,
+                gpu=args.teacher_gpu,
+                port=teacher_port,
+                master_port=args.master_port_base + 1,
+            ))
         print(f"[launcher] warming servers for {args.server_warmup_sec}s", flush=True)
         time.sleep(args.server_warmup_sec)
 
@@ -673,6 +813,7 @@ def launch(args: argparse.Namespace) -> None:
                 client_gpu=args.client_gpu,
                 draft_port=draft_port,
                 teacher_port=teacher_port,
+                single_port=single_port,
                     test_num=args.test_num,
                     specverify_log=specverify_log,
                     teacher_cache_mode=args.teacher_cache_mode,
@@ -740,6 +881,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--run-root", default=str(EXPERIMENT_ROOT / "20260617_specverify_rtvla_low10_tn10"))
     parser.add_argument("--result-root", default=str(RESULT_ROOT / "20260617_specverify_rtvla_low10_tn10"))
+    parser.add_argument("--single-server", action="store_true", help="Serve draft and teacher inside one policy server; client connects with --port only.")
     parser.add_argument("--draft-gpu", type=int, default=0)
     parser.add_argument("--teacher-gpu", type=int, default=1)
     parser.add_argument("--client-gpu", type=int, default=2)
@@ -763,8 +905,8 @@ def main() -> None:
     )
     parser.add_argument(
         "--draft-config-name",
-        default="robotwin_lingbot_v1a2_draft",
-        help="LingBot draft server config. Default uses direct step compression v1/a2.",
+        default="robotwin_onpolicy_v1a2_draft",
+        help="Draft server config. Default uses on-policy step2000 video1/action2 checkpoint.",
     )
     parser.add_argument(
         "--teacher-config-name",

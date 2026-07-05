@@ -473,7 +473,7 @@ def video_guided_blend(
 
 
 class RiskRouterClientPolicy:
-    """Route LingBot v1/a2 draft to LingBot v2/a4 only when the chunk looks risky."""
+    """Route a cheap v1/a2 draft to LingBot v2/a4 only when the chunk looks risky."""
 
     def __init__(
         self,

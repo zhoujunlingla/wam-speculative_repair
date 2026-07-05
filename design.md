@@ -191,3 +191,78 @@ Run smoke first to confirm the draft server returns `video_latent` under `return
 - teacher fallback rate decreases relative to V6/V7,
 - success is not worse than V6 worldlatent baseline,
 - latency is not worse than action repair without video guidance.
+
+## V9 On-Policy Step2000 Draft Swap
+
+### Goal
+
+Test whether the same SVDR verifier/repair policy improves when the draft model is the on-policy step2000 video1/action2 checkpoint instead of the raw LingBot v1/a2 direct draft.
+
+### Single New Variable
+
+Only the draft server checkpoint changes:
+
+- Draft config: `robotwin_onpolicy_v1a2_draft`.
+- Draft model path: `/mnt/afs/intern/manlichen/ivan/zhoujunl/models/FlashWAM_eval_onpolicy_v1a2/step_2000_target_student`.
+- Draft inference budget: video=1, action=2.
+
+Fixed controls remain unchanged: teacher config `robotwin_lingbot_v2a4_teacher`, teacher inference budget video=2/action=4, low10 clean TN=10, SVDR action-only reverify, no world-latent gate, and no new training.
+
+### Gate
+
+Compare against the previous SVDR v1/a2 draft run using the same low10 TN=10 protocol. Proceed only if the on-policy draft improves success or reduces teacher fallback without new cache/reset errors.
+
+
+
+## V10 Single-Server Speculative Policy Smoke
+
+### Goal
+
+Match the Realtime-VLA FLASH deployment shape more closely: expose one policy server to the RobotWin client while keeping draft and teacher inside that server process.
+
+### Single New Feature
+
+Add `wan_va/wan_va_single_spec_server.py`, a thin wrapper that instantiates local draft and teacher `VA_Server` objects and passes them into the existing `RiskRouterClientPolicy` through local client adapters.
+
+### Not Changing
+
+- No new verifier logic.
+- No threshold change.
+- No new training.
+- No low10 evaluation for this gate.
+- No separate draft/teacher websocket servers in this smoke path.
+
+### Smoke Gate
+
+Pass if the single server starts on one A800 GPU and can serve a minimal RobotWin client request path without import/config errors. If two models in one process OOM, the next minimal variant is a one-policy-server/two-GPU runtime, not another verifier change.
+
+## V11 Formal Single-Server Low10 Launcher
+
+### Goal
+
+Run the V10 single-server runtime through the durable low10 launcher so RobotWin clients use the same one-port deployment shape as Realtime-VLA FLASH style serving.
+
+### Single New Feature
+
+Add `--single-server` to `scripts/cci_riskrouter_lingbot_v1a2_v2a4_low10_tn10.py`.
+
+When enabled, the launcher starts `wan_va/wan_va_single_spec_server.py` on the draft GPU. The RobotWin client connects to that single port without `--specverify_enable`; draft/teacher routing happens inside the server process.
+
+### Fixed Controls
+
+- Draft config stays `robotwin_onpolicy_v1a2_draft`.
+- Teacher config stays `robotwin_lingbot_v2a4_teacher`.
+- SVDR/RiskRouter thresholds and flags are passed through unchanged.
+- Two-server mode remains available and unchanged for fallback comparison.
+
+### Verification Plan
+
+1. `py_compile` launcher and single-server server.
+2. `--help` confirms the launcher exposes `--single-server`.
+3. Start low10 TN=10 with one single server and one RobotWin client GPU.
+4. Check first task reaches normal RobotWin progress and server logs metrics to `specverify_metrics.jsonl`.
+
+### Added
+
+2026-07-05T10:38:38
+

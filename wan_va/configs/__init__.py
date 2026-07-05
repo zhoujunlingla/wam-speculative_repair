@@ -4,6 +4,7 @@ from .va_robotwin_cfg import va_robotwin_cfg
 from .va_robotwin_flashwam_cfg import va_robotwin_flashwam_cfg
 from .va_robotwin_lingbot_posttrain_cfg import va_robotwin_lingbot_posttrain_cfg
 from .va_robotwin_lingbot_v1a2_draft_cfg import va_robotwin_lingbot_v1a2_draft_cfg
+from .va_robotwin_onpolicy_v1a2_draft_cfg import va_robotwin_onpolicy_v1a2_draft_cfg
 from .va_robotwin_lingbot_v2a4_teacher_cfg import va_robotwin_lingbot_v2a4_teacher_cfg
 from .va_robotwin_eval_ckpt_cfg import va_robotwin_eval_ckpt_cfg
 from .va_franka_i2va import va_franka_i2va_cfg
@@ -21,6 +22,7 @@ VA_CONFIGS = {
     'robotwin_flashwam': va_robotwin_flashwam_cfg,
     'robotwin_lingbot_posttrain': va_robotwin_lingbot_posttrain_cfg,
     'robotwin_lingbot_v1a2_draft': va_robotwin_lingbot_v1a2_draft_cfg,
+    'robotwin_onpolicy_v1a2_draft': va_robotwin_onpolicy_v1a2_draft_cfg,
     'robotwin_lingbot_v2a4_teacher': va_robotwin_lingbot_v2a4_teacher_cfg,
     'robotwin_eval_ckpt': va_robotwin_eval_ckpt_cfg,
     'franka': va_franka_cfg,

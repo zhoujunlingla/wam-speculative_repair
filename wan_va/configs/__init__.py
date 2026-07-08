@@ -2,6 +2,7 @@
 from .va_franka_cfg import va_franka_cfg
 from .va_robotwin_cfg import va_robotwin_cfg
 from .va_robotwin_flashwam_cfg import va_robotwin_flashwam_cfg
+from .va_robotwin_flashwam_official_step3000_v1a2_draft_cfg import va_robotwin_flashwam_official_step3000_v1a2_draft_cfg
 from .va_robotwin_lingbot_posttrain_cfg import va_robotwin_lingbot_posttrain_cfg
 from .va_robotwin_lingbot_v1a2_draft_cfg import va_robotwin_lingbot_v1a2_draft_cfg
 from .va_robotwin_onpolicy_v1a2_draft_cfg import va_robotwin_onpolicy_v1a2_draft_cfg
@@ -20,6 +21,7 @@ from .va_libero_i2va import va_libero_i2va_cfg
 VA_CONFIGS = {
     'robotwin': va_robotwin_cfg,
     'robotwin_flashwam': va_robotwin_flashwam_cfg,
+    'robotwin_flashwam_official_step3000_v1a2_draft': va_robotwin_flashwam_official_step3000_v1a2_draft_cfg,
     'robotwin_lingbot_posttrain': va_robotwin_lingbot_posttrain_cfg,
     'robotwin_lingbot_v1a2_draft': va_robotwin_lingbot_v1a2_draft_cfg,
     'robotwin_onpolicy_v1a2_draft': va_robotwin_onpolicy_v1a2_draft_cfg,

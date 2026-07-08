@@ -58,6 +58,75 @@ Result: `17 passed in 8.39s`.
 Allowed to proceed to low10 x 10 evaluation when requested. No experiment was launched in this change, per user instruction.
 
 
+# Code Review: V16 Verify++ and Step-Mask Repair
+
+## Scope
+
+Review of the Verify++ / step-mask repair implementation on branch `wam-speculative_repair`.
+
+Changed files:
+
+- `wan_va/specverify.py`
+- `wan_va/wan_va_server.py`
+- `evaluation/robotwin/specverify_client_policy.py`
+- `evaluation/robotwin/eval_polict_client_openpi.py`
+- `wan_va/wan_va_single_spec_server.py`
+- `scripts/cci_riskrouter_lingbot_v1a2_v2a4_low10_tn10.py`
+- `wan_va/configs/__init__.py`
+- `wan_va/configs/va_robotwin_flashwam_official_step3000_v1a2_draft_cfg.py`
+- `tests/test_specverify_client_policy.py`
+
+## Findings
+
+No blocking findings remain.
+
+Fixed during review:
+
+- Step-mask repair originally defaulted `repair_mask_dilate_radius=1`, which could repair verified-pass neighbor steps. This violated the requirement that pass steps stay unchanged. Default is now `0`; dilation remains an explicit ablation knob.
+
+## Diff Summary
+
+- Added `scheduler_step_to_timestep_batched()` for two-step shortcut verification.
+- Added optional Verify++ signals in `VA_Server.verify_action_chunk()`: cross-tau endpoint consistency, shortcut consistency, and dynamics gate.
+- Added JSON-safe per-step verifier outputs: `pass_by_step`, `step_score`, `endpoint_dist_max`, `cross_tau_score`, `shortcut_score`, `dynamics_score`.
+- Added step-mask repair helpers and wired them before repair re-verification.
+- Added CLI pass-through for Verify++ and step-mask repair flags.
+- Added FlashWAM official step3000 v1/a2 draft config and made it the default draft for the launcher/single-server path.
+
+## Reviews
+
+- Server verifier sub-agent: no blocking bugs; old endpoint verifier is preserved when `verify_plus=False`; no cache mutation beyond existing action-only verify path.
+- Client/launcher sub-agent: found the dilation default bug above; after fixing to default `0`, no remaining blocking issue identified.
+
+## Verification
+
+Commands run:
+
+```bash
+python3 -m py_compile wan_va/specverify.py wan_va/wan_va_server.py wan_va/wan_va_single_spec_server.py evaluation/robotwin/specverify_client_policy.py evaluation/robotwin/eval_polict_client_openpi.py scripts/cci_riskrouter_lingbot_v1a2_v2a4_low10_tn10.py tests/test_specverify_client_policy.py
+```
+
+```bash
+python3 - <<'PY'
+import importlib.util
+from pathlib import Path
+p = Path("tests/test_specverify_client_policy.py").resolve()
+spec = importlib.util.spec_from_file_location("test_specverify_client_policy", p)
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+for name in ["test_step_masked_repair_preserves_verified_steps", "test_step_repair_mask_dilation_expands_neighbors"]:
+    getattr(mod, name)()
+print("step-mask checks passed")
+PY
+```
+
+Both passed locally and on `a800-cci-8855` after syncing.
+
+## Proceed Decision
+
+Allowed to push. No evaluation was launched in this change.
+
+
 # Code Review: V10 Single-Server Speculative Policy Smoke
 
 ## Scope

@@ -380,3 +380,26 @@ Goal: finish stage 1 before repair. Keep world verifier and repair disabled, tun
 ## V15b Variable-K Action Verify Cache Chunking
 
 V15 showed K=3 action verifier timesteps fail before evaluation with transformer KV cache batch mismatch: verifier input batch was 3 while LingBot teacher caches are allocated with CFG batch size 2. The action verifier now keeps the existing fast path when K matches the cache batch and otherwise evaluates tau timesteps in cache-sized chunks, padding only the final partial chunk and discarding padded outputs. Verifier math, thresholds, repair, and world verifier remain unchanged.
+
+## V16 Verify++ and Step-Mask Repair
+
+Goal: keep the Realtime-VLA-FLASH endpoint verifier as the trusted base, then add optional verifier signals and safer repair.
+
+Changes:
+
+1. Server Verify++ adds cross-tau endpoint consistency, optional two-step shortcut consistency, and optional physical dynamics gate.
+2. Server returns JSON-safe per-step `pass_by_step` and score lists for logging and repair.
+3. Client repair now supports step-mask repair: pass steps stay draft, failed steps use the repair candidate, then the repaired chunk is verified again.
+4. The default draft config is now `robotwin_flashwam_official_step3000_v1a2_draft`; teacher remains `robotwin_lingbot_v2a4_teacher`.
+
+Compatibility:
+
+- `verify_plus=False` preserves old endpoint verifier behavior.
+- `repair_step_mask_enable=False` preserves old repair path.
+- `repair_mask_dilate_radius` defaults to `0` so verified-pass steps are preserved exactly.
+
+Verification:
+
+- Compile touched Python files.
+- Run lightweight step-mask helper checks.
+- Use parallel code-review agents for server verifier and client/launcher logic.

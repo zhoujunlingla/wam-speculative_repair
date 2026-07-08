@@ -543,6 +543,80 @@ def bounded_residual_blend(
     return repaired_action.astype(np.float32), repaired_latent.astype(np.float32), meta
 
 
+def dilate_1d_mask(mask: np.ndarray, radius: int) -> np.ndarray:
+    mask = np.asarray(mask, dtype=bool).reshape(-1)
+    radius = int(max(0, radius))
+    if radius <= 0 or mask.size == 0:
+        return mask
+    out = mask.copy()
+    for i in np.where(mask)[0]:
+        out[max(0, i - radius):min(mask.size, i + radius + 1)] = True
+    return out
+
+
+def build_step_repair_mask(
+    pass_by_step,
+    *,
+    frame_count: int,
+    action_per_frame: int,
+    conditioned_frame_count: int = 0,
+    dilate_radius: int = 0,
+) -> np.ndarray:
+    fail_valid = dilate_1d_mask(~np.asarray(pass_by_step, dtype=bool).reshape(-1), dilate_radius)
+    total_steps = int(frame_count) * int(action_per_frame)
+    full_mask = np.zeros((total_steps,), dtype=bool)
+    start = max(0, min(int(conditioned_frame_count) * int(action_per_frame), total_steps))
+    end = min(total_steps, start + fail_valid.size)
+    if end > start:
+        full_mask[start:end] = fail_valid[:end - start]
+    return full_mask.reshape(int(frame_count), int(action_per_frame))
+
+
+def apply_step_repair_mask(
+    *,
+    draft_action: np.ndarray,
+    repair_action: np.ndarray,
+    draft_latent: np.ndarray,
+    repair_latent: np.ndarray,
+    pass_by_step,
+    conditioned_frame_count: int,
+    dilate_radius: int = 0,
+):
+    draft_action = np.asarray(draft_action, dtype=np.float32)
+    repair_action = np.asarray(repair_action, dtype=np.float32)
+    draft_latent = np.asarray(draft_latent, dtype=np.float32)
+    repair_latent = np.asarray(repair_latent, dtype=np.float32)
+    if draft_action.shape != repair_action.shape:
+        raise ValueError("draft_action and repair_action must have identical shape")
+    if draft_latent.shape != repair_latent.shape:
+        raise ValueError("draft_latent and repair_latent must have identical shape")
+    if draft_action.ndim != 3 or draft_latent.ndim != 5:
+        raise ValueError("action must be [C,F,H] and latent must be [1,C,F,H,1]")
+
+    frame_count = draft_action.shape[1]
+    action_per_frame = draft_action.shape[2]
+    step_mask = build_step_repair_mask(
+        pass_by_step,
+        frame_count=frame_count,
+        action_per_frame=action_per_frame,
+        conditioned_frame_count=conditioned_frame_count,
+        dilate_radius=dilate_radius,
+    )
+    action_mask = step_mask.reshape(1, frame_count, action_per_frame)
+    latent_mask = step_mask.reshape(1, 1, frame_count, action_per_frame, 1)
+    meta = {
+        "repair_mask_ratio": float(step_mask.mean()) if step_mask.size else 0.0,
+        "repair_mask_steps": int(step_mask.sum()),
+        "repair_mask_total": int(step_mask.size),
+        "repair_mask_dilate_radius": int(max(0, dilate_radius)),
+    }
+    return (
+        np.where(action_mask, repair_action, draft_action).astype(np.float32),
+        np.where(latent_mask, repair_latent, draft_latent).astype(np.float32),
+        meta,
+    )
+
+
 class RiskRouterClientPolicy:
     """Route a cheap v1/a2 draft to LingBot v2/a4 only when the chunk looks risky."""
 
@@ -574,6 +648,14 @@ class RiskRouterClientPolicy:
         svdr_motion_ref: float = 3.0,
         svdr_topk_frac: float = 0.10,
         svdr_temperature: float = 1.0,
+        verify_plus_enable: bool = False,
+        verify_alpha_cross_tau: float = 0.30,
+        verify_shortcut_enable: bool = False,
+        verify_shortcut_high_risk_only: bool = True,
+        verify_alpha_shortcut: float = 0.30,
+        verify_dynamics_gate: bool = False,
+        repair_step_mask_enable: bool = False,
+        repair_mask_dilate_radius: int = 0,
         disable_teacher_initial_prime: bool = False,
         log_path: Optional[str] = None,
         client_factory=None,
@@ -610,6 +692,14 @@ class RiskRouterClientPolicy:
         self.svdr_motion_ref = float(svdr_motion_ref)
         self.svdr_topk_frac = float(svdr_topk_frac)
         self.svdr_temperature = float(svdr_temperature)
+        self.verify_plus_enable = bool(verify_plus_enable)
+        self.verify_alpha_cross_tau = float(verify_alpha_cross_tau)
+        self.verify_shortcut_enable = bool(verify_shortcut_enable)
+        self.verify_shortcut_high_risk_only = bool(verify_shortcut_high_risk_only)
+        self.verify_alpha_shortcut = float(verify_alpha_shortcut)
+        self.verify_dynamics_gate = bool(verify_dynamics_gate)
+        self.repair_step_mask_enable = bool(repair_step_mask_enable)
+        self.repair_mask_dilate_radius = int(repair_mask_dilate_radius)
         self.disable_teacher_initial_prime = bool(disable_teacher_initial_prime)
         self.round_id = 0
         self.frame_st_id = 0
@@ -805,6 +895,9 @@ class RiskRouterClientPolicy:
             verify_threshold = self.threshold * self.phase_threshold_scale
 
         want_repair = self.repair_enable or self.svdr_repair_enable
+        shortcut_verify = self.verify_shortcut_enable and (
+            high_risk or not self.verify_shortcut_high_risk_only
+        )
         verify_ret = self.teacher.infer({
             "verify_action": True,
             "action_latent": draft_ret["action_latent"],
@@ -813,6 +906,15 @@ class RiskRouterClientPolicy:
             "frame_st_id": self.frame_st_id,
             "return_repair": want_repair,
             "repair_lambda": 1.0 if self.svdr_repair_enable else self.repair_lambda,
+            "verify_plus": self.verify_plus_enable,
+            "alpha_cross_tau": self.verify_alpha_cross_tau,
+            "shortcut_verify": shortcut_verify,
+            "alpha_shortcut": self.verify_alpha_shortcut,
+            "dynamics_gate": self.verify_dynamics_gate,
+            "dynamics_delta_ref": self.risk_delta_ref,
+            "dynamics_jerk_ref": self.risk_jerk_ref,
+            "dynamics_phase_weight": self.risk_phase_weight,
+            "return_step_mask": self.repair_step_mask_enable,
         })
         verify_ret["phase_switch"] = phase_switch
         verify_ret["phase_mode"] = "tighten" if phase_switch else "normal"
@@ -838,6 +940,7 @@ class RiskRouterClientPolicy:
             repair_action = verify_ret.get("repair_action")
             repair_action_latent = verify_ret.get("repair_action_latent")
             svdr_meta = None
+            repair_mask_meta = None
             if want_repair and repair_action is not None and repair_action_latent is not None:
                 if self.svdr_repair_enable:
                     video_latent = draft_ret.get("video_latent")
@@ -871,6 +974,16 @@ class RiskRouterClientPolicy:
                             "pending_teacher_cache_updates": len(self.pending_teacher_cache_obs),
                             "pending_teacher_cache_frames": self.pending_teacher_cache_frames,
                         })
+                if self.repair_step_mask_enable and "pass_by_step" in verify_ret:
+                    repair_action, repair_action_latent, repair_mask_meta = apply_step_repair_mask(
+                        draft_action=draft_action,
+                        repair_action=np.asarray(repair_action),
+                        draft_latent=draft_ret["action_latent"],
+                        repair_latent=np.asarray(repair_action_latent),
+                        pass_by_step=verify_ret["pass_by_step"],
+                        conditioned_frame_count=int(verify_ret.get("conditioned_frame_count", 0)),
+                        dilate_radius=self.repair_mask_dilate_radius,
+                    )
                 repair_start = time.perf_counter()
                 repair_verify_ret = self.teacher.infer({
                     "verify_action": True,
@@ -878,6 +991,15 @@ class RiskRouterClientPolicy:
                     "threshold": verify_threshold,
                     "tau_timesteps": self.tau_timesteps,
                     "frame_st_id": self.frame_st_id,
+                    "verify_plus": self.verify_plus_enable,
+                    "alpha_cross_tau": self.verify_alpha_cross_tau,
+                    "shortcut_verify": shortcut_verify,
+                    "alpha_shortcut": self.verify_alpha_shortcut,
+                    "dynamics_gate": self.verify_dynamics_gate,
+                    "dynamics_delta_ref": self.risk_delta_ref,
+                    "dynamics_jerk_ref": self.risk_jerk_ref,
+                    "dynamics_phase_weight": self.risk_phase_weight,
+                    "return_step_mask": self.repair_step_mask_enable,
                 })
                 repair_verify_ret["phase_switch"] = phase_switch
                 repair_verify_ret["phase_mode"] = "repair_tighten" if phase_switch else "repair"
@@ -886,6 +1008,8 @@ class RiskRouterClientPolicy:
                 repair_verify_ret["effective_threshold"] = verify_threshold
                 if svdr_meta is not None:
                     repair_verify_ret["svdr"] = svdr_meta
+                if repair_mask_meta is not None:
+                    repair_verify_ret["repair_mask"] = repair_mask_meta
                 repair_accepted_prefix = int(repair_verify_ret.get("accepted_prefix", 0))
                 if self.frame_st_id == 0 and action_per_frame > 0 and 0 < repair_accepted_prefix <= action_per_frame:
                     repair_verify_ret["raw_accepted_prefix"] = repair_accepted_prefix
@@ -934,6 +1058,7 @@ class RiskRouterClientPolicy:
                             "repair_verify": repair_verify_ret,
                             "world_verify": world_verify_ret,
                             "svdr": svdr_meta,
+                            "repair_mask": repair_mask_meta,
                             "repair_action_pass": bool(repair_action_pass),
                             "repair_world_pass": repair_world_pass,
                             "repair_fail_action": not repair_action_pass,
@@ -954,6 +1079,7 @@ class RiskRouterClientPolicy:
                             "repair_verify": repair_verify_ret,
                             "world_verify": world_verify_ret,
                             "svdr": svdr_meta,
+                            "repair_mask": repair_mask_meta,
                             "pending_teacher_cache_updates": len(self.pending_teacher_cache_obs),
                             "pending_teacher_cache_frames": self.pending_teacher_cache_frames,
                             "elapsed_sec": time.perf_counter() - start,
@@ -968,6 +1094,7 @@ class RiskRouterClientPolicy:
                         "verify": verify_log,
                         "repair_verify": repair_verify_ret,
                         "svdr": svdr_meta,
+                        "repair_mask": repair_mask_meta,
                         "repair_action_pass": False,
                         "repair_world_pass": None,
                         "repair_fail_action": True,

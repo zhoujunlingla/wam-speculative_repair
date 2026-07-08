@@ -154,3 +154,34 @@ def scheduler_step_to_final_batched(
             )
         )
     return torch.cat(outputs, dim=0)
+
+
+def scheduler_step_to_timestep_batched(
+    *,
+    scheduler: FlowMatchScheduler,
+    model_output: torch.Tensor,
+    from_timesteps: torch.Tensor,
+    to_timesteps: torch.Tensor,
+    sample: torch.Tensor,
+) -> torch.Tensor:
+    """Step batched flow samples from tau to another tau."""
+
+    from_timesteps = from_timesteps.to(device=model_output.device, dtype=torch.float32).flatten()
+    to_timesteps = to_timesteps.to(device=model_output.device, dtype=torch.float32).flatten()
+    if model_output.shape[0] != from_timesteps.numel() or sample.shape[0] != from_timesteps.numel():
+        raise ValueError("model_output, sample, and from_timesteps must share batch K")
+    if to_timesteps.numel() == 1:
+        to_timesteps = to_timesteps.repeat(from_timesteps.numel())
+    if to_timesteps.numel() != from_timesteps.numel():
+        raise ValueError("to_timesteps must be scalar or share batch K")
+
+    scheduler_timesteps = scheduler.timesteps.to(from_timesteps.device)
+    scheduler_sigmas = scheduler.sigmas.to(device=model_output.device, dtype=model_output.dtype)
+    outputs = []
+    for row, (t_from, t_to) in enumerate(zip(from_timesteps, to_timesteps)):
+        from_id = torch.argmin((scheduler_timesteps - t_from).abs())
+        to_id = torch.argmin((scheduler_timesteps - t_to).abs())
+        sigma_from = scheduler_sigmas[from_id]
+        sigma_to = scheduler_sigmas[to_id]
+        outputs.append(sample[row:row + 1] + model_output[row:row + 1] * (sigma_to - sigma_from))
+    return torch.cat(outputs, dim=0)

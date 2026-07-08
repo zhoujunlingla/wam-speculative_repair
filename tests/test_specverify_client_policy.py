@@ -9,6 +9,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from evaluation.robotwin.specverify_client_policy import (
     RiskRouterClientPolicy,
     SpecVerifyClientPolicy,
+    apply_step_repair_mask,
+    build_step_repair_mask,
     has_gripper_switch,
     slice_action_prefix,
 )
@@ -29,6 +31,42 @@ def test_phase_fallback_detects_gripper_switch():
     action[7, 0, 0] = 0.0
     action[7, 1, 15] = 1.0
     assert has_gripper_switch(action)
+
+
+def test_step_masked_repair_preserves_verified_steps():
+    draft_action = np.zeros((16, 2, 4), dtype=np.float32)
+    repair_action = np.ones((16, 2, 4), dtype=np.float32)
+    draft_latent = np.zeros((1, 30, 2, 4, 1), dtype=np.float32)
+    repair_latent = np.ones((1, 30, 2, 4, 1), dtype=np.float32)
+
+    action, latent, meta = apply_step_repair_mask(
+        draft_action=draft_action,
+        repair_action=repair_action,
+        draft_latent=draft_latent,
+        repair_latent=repair_latent,
+        pass_by_step=[True, False, True, False, True, True, False, True],
+        conditioned_frame_count=0,
+        dilate_radius=0,
+    )
+
+    flat = action.transpose(1, 2, 0).reshape(-1, 16)
+    assert np.all(flat[0] == 0.0)
+    assert np.all(flat[1] == 1.0)
+    assert np.all(flat[2] == 0.0)
+    assert np.all(flat[3] == 1.0)
+    assert latent.reshape(-1)[0] == 0.0
+    assert meta["repair_mask_steps"] == 3
+
+
+def test_step_repair_mask_dilation_expands_neighbors():
+    mask = build_step_repair_mask(
+        [True, True, False, True, True],
+        frame_count=1,
+        action_per_frame=5,
+        conditioned_frame_count=0,
+        dilate_radius=1,
+    )
+    assert mask.reshape(-1).tolist() == [False, True, True, True, False]
 
 
 class _FakeWsPolicy:

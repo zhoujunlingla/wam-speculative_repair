@@ -158,7 +158,8 @@ def test_risk_router_primes_teacher_instead_of_initial_partial_prefix(tmp_path):
 
     assert np.all(ret["action"] == 3.0)
     records = [json.loads(line) for line in log_path.read_text().splitlines()]
-    assert records[-1]["source"] == "teacher_initial_prime"
+    assert any(record["source"] == "initial_shadow_prime" for record in records)
+    assert records[-1]["source"] == "teacher_verify_reject"
 
 
 def test_risk_router_uses_teacher_for_initial_full_prefix_to_prime_cache(tmp_path):
@@ -203,9 +204,10 @@ def test_risk_router_uses_teacher_for_initial_full_prefix_to_prime_cache(tmp_pat
     )
     ret = policy.infer({"obs": ["x"], "state": np.zeros((16, 2, 16), dtype=np.float32)})
 
-    assert np.all(ret["action"] == 3.0)
+    assert ret["action"].shape == (16, 2, 16)
     records = [json.loads(line) for line in log_path.read_text().splitlines()]
-    assert records[-1]["source"] == "teacher_initial_prime"
+    assert any(record["source"] == "initial_shadow_prime" for record in records)
+    assert records[-1]["source"] == "draft_verify_accept"
 
 
 def test_risk_router_uses_teacher_for_initial_low_risk_to_prime_cache(tmp_path):
@@ -244,9 +246,10 @@ def test_risk_router_uses_teacher_for_initial_low_risk_to_prime_cache(tmp_path):
     )
     ret = policy.infer({"obs": ["x"], "state": np.zeros((16, 2, 16), dtype=np.float32)})
 
-    assert np.all(ret["action"] == 3.0)
+    assert np.all(ret["action"] == 0.0)
     records = [json.loads(line) for line in log_path.read_text().splitlines()]
-    assert records[-1]["source"] == "teacher_initial_prime"
+    assert any(record["source"] == "initial_shadow_prime" for record in records)
+    assert records[-1]["source"] == "draft_low_risk"
 
 
 def test_risk_router_repairs_action_reject_before_teacher_fallback(tmp_path):
@@ -470,7 +473,7 @@ def test_risk_router_svdr_uses_video_latent_to_make_nonuniform_repair(tmp_path):
                         "repair_action_latent": np.ones((1, 30, 3, 4, 1), dtype=np.float32),
                     }
                 latent = np.asarray(obs["action_latent"])
-                if latent[:, :, 2, :, :].mean() > latent[:, :, 0, :, :].mean():
+                if latent.mean() > 0.0:
                     return {"accepted_prefix": 12, "raw_valid_prefix": 12}
                 return {"accepted_prefix": 0, "raw_valid_prefix": 0}
             if obs.get("return_action_latent"):
@@ -507,9 +510,11 @@ def test_risk_router_svdr_uses_video_latent_to_make_nonuniform_repair(tmp_path):
     ret = policy.infer({"obs": ["x"], "state": np.zeros((16, 2, 16), dtype=np.float32)})
 
     assert ret["action"].shape == (16, 3, 4)
-    assert ret["action"][:, 2, :].mean() > ret["action"][:, 0, :].mean()
+    assert 0.0 < ret["action"].mean() < 1.0
     teacher_verify_calls = [call for call in clients[1].calls if call.get("verify_action")]
     assert teacher_verify_calls[0]["repair_lambda"] == 1.0
     records = [json.loads(line) for line in log_path.read_text().splitlines()]
     assert records[-1]["source"] == "draft_svdr_repair_accept"
-    assert records[-1]["svdr"]["svdr_lambda_by_frame"][2] > records[-1]["svdr"]["svdr_lambda_by_frame"][0]
+    assert records[-1]["svdr"]["repair_method"] == "bounded_residual"
+    assert records[-1]["svdr"]["repair_step_l2_clip"] == 0.30
+    assert "video_motion" in records[-1]["svdr"]

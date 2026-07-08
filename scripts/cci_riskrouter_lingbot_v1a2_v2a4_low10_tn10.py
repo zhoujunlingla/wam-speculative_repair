@@ -78,7 +78,7 @@ def base_env(gpu: int, *, use_torch29: bool = True) -> dict[str, str]:
     python_paths.append(env.get("PYTHONPATH", ""))
     env["PYTHONPATH"] = ":".join(p for p in python_paths if p)
     env["PATH"] = f"{NINJA_BIN}:/usr/local/cuda/bin:{env.get('PATH', '')}"
-    env["TORCH_EXTENSIONS_DIR"] = str(TORCH_EXTENSIONS)
+    env["TORCH_EXTENSIONS_DIR"] = os.environ.get("TORCH_EXTENSIONS_DIR", str(TORCH_EXTENSIONS))
     env["LIBRARY_PATH"] = f"{CUDA_RUNTIME_LIB}:{env.get('LIBRARY_PATH', '')}"
     env["LD_LIBRARY_PATH"] = f"{NVIDIA_550_LIB}:{CUDA_RUNTIME_LIB}:{env.get('LD_LIBRARY_PATH', '')}"
     env["VK_ICD_FILENAMES"] = str(NVIDIA_550_ICD)
@@ -157,6 +157,7 @@ def start_single_spec_server(
     world_verify_enable: bool,
     world_verify_threshold: float,
     world_verify_tau: list[float],
+    specverify_tau: list[float],
     repair_enable: bool,
     repair_lambda: float,
     repair_instrument_only: bool,
@@ -166,6 +167,8 @@ def start_single_spec_server(
     svdr_motion_ref: float,
     svdr_topk_frac: float,
     svdr_temperature: float,
+    disable_teacher_initial_prime: bool,
+    single_server_mode: str,
 ) -> subprocess.Popen:
     log_path = run_root / "logs" / f"single_spec_server_g{gpu}.log"
     log = log_path.open("a", buffering=1)
@@ -180,10 +183,14 @@ def start_single_spec_server(
         draft_config_name,
         "--teacher-config-name",
         teacher_config_name,
+        "--server-mode",
+        single_server_mode,
         "--teacher-cache-mode",
         teacher_cache_mode,
         "--threshold",
         str(threshold),
+        "--tau-timesteps",
+        *[str(x) for x in specverify_tau],
         "--phase-threshold-scale",
         str(phase_threshold_scale),
         "--risk-low",
@@ -227,9 +234,11 @@ def start_single_spec_server(
         cmd.append("--repair-instrument-only")
     if svdr_repair_enable:
         cmd.append("--svdr-repair-enable")
+    if disable_teacher_initial_prime:
+        cmd.append("--disable-teacher-initial-prime")
     print(
         f"[launcher] start single spec server gpu={gpu} port={port} "
-        f"draft={draft_config_name} teacher={teacher_config_name}",
+        f"mode={single_server_mode} draft={draft_config_name} teacher={teacher_config_name}",
         flush=True,
     )
     return subprocess.Popen(cmd, cwd=str(CODE), env=base_env(gpu, use_torch29=True), stdout=log, stderr=subprocess.STDOUT)
@@ -587,6 +596,7 @@ def run_task(
     world_verify_enable: bool,
     world_verify_threshold: float,
     world_verify_tau: list[float],
+    specverify_tau: list[float],
     repair_enable: bool,
     repair_lambda: float,
     repair_instrument_only: bool,
@@ -626,8 +636,7 @@ def run_task(
             "--specverify_threshold",
             str(specverify_threshold),
             "--specverify_tau",
-            "150",
-            "300",
+            *[str(x) for x in specverify_tau],
             "--specverify_teacher_cache_mode",
             teacher_cache_mode,
             "--specverify_log",
@@ -728,7 +737,7 @@ def launch(args: argparse.Namespace) -> None:
         f"LingBot v2/a4 teacher config={args.teacher_config_name}, "
         f"risk_low={args.risk_low}, risk_high={args.risk_high}, "
         f"risk_verify_mode={args.risk_verify_mode}, threshold={args.specverify_threshold}, "
-        f"phase_threshold_scale={args.phase_threshold_scale}, "
+        f"tau={args.specverify_tau}, phase_threshold_scale={args.phase_threshold_scale}, "
         f"low10 clean TN{args.test_num}. "
         f"Teacher cache mode={args.teacher_cache_mode}; "
         "No periodic full refresh; high-risk chunks verify before teacher fallback; phase switch tightens verify; SVDR uses draft-side future video latent motion/region risk to weight teacher action endpoint residual, then action-only re-verifies repaired draft before teacher fallback."
@@ -773,6 +782,7 @@ def launch(args: argparse.Namespace) -> None:
                 world_verify_enable=args.world_verify_enable,
                 world_verify_threshold=args.world_verify_threshold,
                 world_verify_tau=args.world_verify_tau,
+                specverify_tau=args.specverify_tau,
                 repair_enable=args.repair_enable,
                 repair_lambda=args.repair_lambda,
                 repair_instrument_only=args.repair_instrument_only,
@@ -782,6 +792,8 @@ def launch(args: argparse.Namespace) -> None:
                 svdr_motion_ref=args.svdr_motion_ref,
                 svdr_topk_frac=args.svdr_topk_frac,
                 svdr_temperature=args.svdr_temperature,
+                disable_teacher_initial_prime=args.disable_teacher_initial_prime,
+                single_server_mode=args.single_server_mode,
             ))
         else:
             servers.append(start_server(
@@ -832,6 +844,7 @@ def launch(args: argparse.Namespace) -> None:
                     world_verify_enable=args.world_verify_enable,
                     world_verify_threshold=args.world_verify_threshold,
                     world_verify_tau=args.world_verify_tau,
+                    specverify_tau=args.specverify_tau,
                     repair_enable=args.repair_enable,
                     repair_lambda=args.repair_lambda,
                     repair_instrument_only=args.repair_instrument_only,
@@ -891,6 +904,7 @@ def main() -> None:
     parser.add_argument("--test-num", type=int, default=10)
     parser.add_argument("--specverify-pf", type=int, default=999999)
     parser.add_argument("--specverify-threshold", type=float, default=0.20)
+    parser.add_argument("--specverify-tau", nargs="+", type=float, default=[150.0, 300.0])
     parser.add_argument(
         "--phase-mode",
         choices=["fallback", "tighten", "ignore"],
@@ -913,6 +927,7 @@ def main() -> None:
         default="robotwin_lingbot_v2a4_teacher",
         help="LingBot teacher server config. Default uses direct step compression v2/a4.",
     )
+    parser.add_argument("--single-server-mode", default="draft_teacher", choices=["draft_teacher", "draft_only", "teacher_only"])
     parser.add_argument(
         "--teacher-cache-mode",
         choices=["sync", "lazy_reference", "stale_reference"],
@@ -943,6 +958,7 @@ def main() -> None:
     parser.add_argument("--svdr-motion-ref", type=float, default=3.0)
     parser.add_argument("--svdr-topk-frac", type=float, default=0.10)
     parser.add_argument("--svdr-temperature", type=float, default=1.0)
+    parser.add_argument("--disable-teacher-initial-prime", action="store_true")
     parser.add_argument("--wait-screen", default="lingbotva_top10_chunks_20260617")
     parser.add_argument("--wait-timeout-sec", type=int, default=21600)
     parser.add_argument(

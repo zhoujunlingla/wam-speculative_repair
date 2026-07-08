@@ -46,6 +46,15 @@ from specverify import (
 )
 
 
+
+def _is_wanvae_temporal_cache_error(exc: BaseException) -> bool:
+    msg = str(exc)
+    return (
+        "Calculated padded input size per channel" in msg
+        and "Kernel size can't be greater than actual input size" in msg
+    )
+
+
 class VA_Server:
 
     def __init__(self, job_config):
@@ -341,7 +350,7 @@ class VA_Server:
                                    action_timesteps,
                                    frame_st_id=0,
                                    cache_name=None):
-        """Run the action branch for K verifier timesteps without CFG repeat."""
+        """Run the action branch for verifier timesteps without CFG repeat."""
         if self.prompt_embeds is None:
             raise RuntimeError("forward_action_only_verify requires a prompt cache")
         if noisy_actions.ndim != 5:
@@ -359,6 +368,37 @@ class VA_Server:
             timesteps = timesteps.repeat(batch_size)
         if timesteps.numel() != batch_size:
             raise ValueError("action_timesteps must be scalar or length K")
+
+        # The transformer KV cache batch is allocated from CFG state. For the
+        # LingBot teacher it is usually 2, so K=2 used to work by accident while
+        # K=3 crashed during temporary cache writes. Keep the fast path when K
+        # matches the cache batch; otherwise run verifier chunks with padding.
+        verify_batch_size = 2 if self.use_cfg else 1
+        if batch_size != verify_batch_size:
+            outputs = []
+            for start in range(0, batch_size, verify_batch_size):
+                end = min(start + verify_batch_size, batch_size)
+                real_size = end - start
+                action_chunk = noisy_actions[start:end]
+                timestep_chunk = timesteps[start:end]
+                if real_size < verify_batch_size:
+                    pad = verify_batch_size - real_size
+                    action_chunk = torch.cat([
+                        action_chunk,
+                        action_chunk[-1:].repeat(pad, 1, 1, 1, 1),
+                    ], dim=0)
+                    timestep_chunk = torch.cat([
+                        timestep_chunk,
+                        timestep_chunk[-1:].repeat(pad),
+                    ], dim=0)
+                chunk_out = self.forward_action_only_verify(
+                    action_chunk,
+                    timestep_chunk,
+                    frame_st_id=frame_st_id,
+                    cache_name=cache_name,
+                )[:real_size]
+                outputs.append(chunk_out)
+            return torch.cat(outputs, dim=0)
 
         conditioned_frame_count = action_verify_frame_start(frame_st_id)
         if conditioned_frame_count:
@@ -960,7 +1000,17 @@ class VA_Server:
             return dict()
         else:
             logger.info(f"################# Infer One Chunk #################")
-            action, _ = self._infer(obs, frame_st_id=self.frame_st_id)
+            try:
+                action, _ = self._infer(obs, frame_st_id=self.frame_st_id)
+            except RuntimeError as exc:
+                if not _is_wanvae_temporal_cache_error(exc):
+                    raise
+                # ponytail: streaming WanVAE can carry a 1-frame temporal cache
+                # across trial boundaries; reset once, then treat current obs as
+                # a fresh prime. If this repeats, the real bug is upstream reset.
+                logger.warning("WanVAE temporal cache too short; reset and retry current obs once")
+                self._reset(prompt=prompt)
+                action, _ = self._infer(obs, frame_st_id=self.frame_st_id)
             ret = dict(action=action)
             if obs.get("return_action_latent", False):
                 ret["action_latent"] = self.last_action_latent

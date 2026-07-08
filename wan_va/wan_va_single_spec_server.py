@@ -49,6 +49,16 @@ class LocalClientFactory:
         return client
 
 
+class SingleModelPolicy:
+    """Directly expose one VA_Server for draft-only or teacher-only sanity runs."""
+
+    def __init__(self, model: VA_Server) -> None:
+        self.model = model
+
+    def infer(self, obs):
+        return self.model.infer(obs)
+
+
 def _build_config(name: str, save_root: Path, local_rank: int):
     cfg = copy.deepcopy(VA_CONFIGS[name])
     cfg.save_root = str(save_root)
@@ -58,9 +68,20 @@ def _build_config(name: str, save_root: Path, local_rank: int):
     return cfg
 
 
-def build_policy(args: argparse.Namespace) -> RiskRouterClientPolicy:
+def build_policy(args: argparse.Namespace):
     save_root = Path(args.save_root)
     save_root.mkdir(parents=True, exist_ok=True)
+
+    if args.server_mode == "draft_only":
+        draft_cfg = _build_config(args.draft_config_name, save_root / "draft", args.local_rank)
+        logging.info("loading draft-only config=%s", args.draft_config_name)
+        return SingleModelPolicy(VA_Server(draft_cfg))
+
+    if args.server_mode == "teacher_only":
+        teacher_cfg = _build_config(args.teacher_config_name, save_root / "teacher", args.local_rank)
+        logging.info("loading teacher-only config=%s", args.teacher_config_name)
+        return SingleModelPolicy(VA_Server(teacher_cfg))
+
     draft_cfg = _build_config(args.draft_config_name, save_root / "draft", args.local_rank)
     teacher_cfg = _build_config(args.teacher_config_name, save_root / "teacher", args.local_rank)
 
@@ -96,6 +117,7 @@ def build_policy(args: argparse.Namespace) -> RiskRouterClientPolicy:
         svdr_motion_ref=args.svdr_motion_ref,
         svdr_topk_frac=args.svdr_topk_frac,
         svdr_temperature=args.svdr_temperature,
+        disable_teacher_initial_prime=args.disable_teacher_initial_prime,
         log_path=args.specverify_log,
         client_factory=LocalClientFactory(draft, teacher),
     )
@@ -105,6 +127,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Serve draft+teacher speculative policy in one process")
     parser.add_argument("--draft-config-name", default="robotwin_onpolicy_v1a2_draft")
     parser.add_argument("--teacher-config-name", default="robotwin_lingbot_v2a4_teacher")
+    parser.add_argument("--server-mode", default="draft_teacher", choices=["draft_teacher", "draft_only", "teacher_only"])
     parser.add_argument("--save_root", default="/tmp/wanva_single_spec_server")
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, required=True)
@@ -132,6 +155,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--svdr-motion-ref", type=float, default=3.0)
     parser.add_argument("--svdr-topk-frac", type=float, default=0.10)
     parser.add_argument("--svdr-temperature", type=float, default=1.0)
+    parser.add_argument("--disable-teacher-initial-prime", action="store_true")
     parser.add_argument("--specverify-log", default=None)
     return parser.parse_args()
 
@@ -146,6 +170,7 @@ def main() -> None:
         port=args.port,
         metadata={
             "server": "wanva_single_spec",
+            "server_mode": args.server_mode,
             "draft_config": args.draft_config_name,
             "teacher_config": args.teacher_config_name,
         },

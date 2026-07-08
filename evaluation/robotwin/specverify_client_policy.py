@@ -472,6 +472,77 @@ def video_guided_blend(
     return repaired_action.astype(np.float32), repaired_latent.astype(np.float32), meta
 
 
+def bounded_residual_blend(
+    draft_action: np.ndarray,
+    endpoint_action: np.ndarray,
+    draft_latent: np.ndarray,
+    endpoint_latent: np.ndarray,
+    *,
+    alpha: float = 0.25,
+    step_l2_clip: float = 0.30,
+    residual_gate: Optional[float] = None,
+    repair_start_prefix: int = 0,
+    ignore_channels=(7, 15),
+):
+    """DPS-style small residual correction toward the verifier endpoint."""
+
+    draft_action = np.asarray(draft_action, dtype=np.float32)
+    endpoint_action = np.asarray(endpoint_action, dtype=np.float32)
+    draft_latent = np.asarray(draft_latent, dtype=np.float32)
+    endpoint_latent = np.asarray(endpoint_latent, dtype=np.float32)
+    if draft_action.shape != endpoint_action.shape:
+        raise ValueError("draft_action and endpoint_action must have the same shape")
+    if draft_action.ndim != 3:
+        raise ValueError("action must have shape [C, F, H]")
+    if draft_latent.shape != endpoint_latent.shape:
+        raise ValueError("draft_latent and endpoint_latent must have the same shape")
+
+    delta_action = endpoint_action - draft_action
+    delta_latent = endpoint_latent - draft_latent
+    channels, action_frames, action_per_frame = draft_action.shape
+    seq_delta = delta_action.transpose(1, 2, 0).reshape(action_frames * action_per_frame, channels)
+    cont_idx = [i for i in range(channels) if i not in ignore_channels]
+    cont_delta = seq_delta[:, cont_idx] if cont_idx else seq_delta
+    step_l2 = np.linalg.norm(cont_delta, axis=1) if cont_delta.size else np.zeros(seq_delta.shape[0], dtype=np.float32)
+
+    residual_mean = float(np.mean(step_l2)) if step_l2.size else 0.0
+    residual_p95 = float(np.percentile(step_l2, 95)) if step_l2.size else 0.0
+    alpha = float(np.clip(alpha, 0.0, 1.0))
+    meta = {
+        "repair_method": "bounded_residual",
+        "repair_alpha": alpha,
+        "repair_residual_l2_mean": residual_mean,
+        "repair_residual_l2_p95": residual_p95,
+        "repair_start_prefix": int(max(0, repair_start_prefix)),
+    }
+
+    if residual_gate is not None and residual_gate > 0 and residual_p95 > residual_gate:
+        meta["repair_skip_reason"] = "residual_too_large"
+        meta["repair_residual_gate"] = float(residual_gate)
+        return None, None, meta
+
+    step_scale = np.ones_like(step_l2, dtype=np.float32)
+    if step_l2_clip is not None and step_l2_clip > 0 and step_l2.size:
+        step_scale = np.minimum(1.0, float(step_l2_clip) / (step_l2 + 1e-6)).astype(np.float32)
+        meta["repair_step_l2_clip"] = float(step_l2_clip)
+        meta["repair_step_scale_mean"] = float(np.mean(step_scale))
+        meta["repair_step_scale_min"] = float(np.min(step_scale))
+
+    repair_start_prefix = int(max(0, repair_start_prefix))
+    if repair_start_prefix > 0 and step_scale.size:
+        step_scale[:min(repair_start_prefix, step_scale.size)] = 0.0
+
+    action_scale = step_scale.reshape(1, action_frames, action_per_frame)
+    repaired_action = draft_action + alpha * action_scale * delta_action
+
+    if draft_latent.ndim >= 5 and draft_latent.shape[2] == action_frames and draft_latent.shape[3] == action_per_frame:
+        latent_scale = step_scale.reshape(1, 1, action_frames, action_per_frame, 1)
+    else:
+        latent_scale = np.asarray(np.mean(step_scale), dtype=np.float32)
+    repaired_latent = draft_latent + alpha * latent_scale * delta_latent
+    return repaired_action.astype(np.float32), repaired_latent.astype(np.float32), meta
+
+
 class RiskRouterClientPolicy:
     """Route a cheap v1/a2 draft to LingBot v2/a4 only when the chunk looks risky."""
 
@@ -503,6 +574,7 @@ class RiskRouterClientPolicy:
         svdr_motion_ref: float = 3.0,
         svdr_topk_frac: float = 0.10,
         svdr_temperature: float = 1.0,
+        disable_teacher_initial_prime: bool = False,
         log_path: Optional[str] = None,
         client_factory=None,
     ) -> None:
@@ -538,6 +610,7 @@ class RiskRouterClientPolicy:
         self.svdr_motion_ref = float(svdr_motion_ref)
         self.svdr_topk_frac = float(svdr_topk_frac)
         self.svdr_temperature = float(svdr_temperature)
+        self.disable_teacher_initial_prime = bool(disable_teacher_initial_prime)
         self.round_id = 0
         self.frame_st_id = 0
         self.pending_teacher_cache_obs = []
@@ -695,12 +768,18 @@ class RiskRouterClientPolicy:
         risk_score = float(risk["risk_score"])
         elapsed = time.perf_counter() - start
 
-        if self.frame_st_id == 0:
-            self.round_id += 1
-            return self._teacher_action(obs, "teacher_initial_prime", {
+        if self.frame_st_id == 0 and not self.disable_teacher_initial_prime:
+            # ponytail: warm the teacher caches without executing its first chunk;
+            # execute-teacher prime hurt draft-heavy contact tasks. Use a real
+            # teacher fallback later if verification/repair rejects.
+            prime_start = time.perf_counter()
+            self._sync_teacher_pending()
+            self.teacher.infer(obs)
+            self._log({
+                "source": "initial_shadow_prime",
                 "risk": risk,
                 "accepted_prefix": 0,
-                "elapsed_sec": elapsed,
+                "elapsed_sec": time.perf_counter() - prime_start,
                 "pending_teacher_cache_updates": len(self.pending_teacher_cache_obs),
                 "pending_teacher_cache_frames": self.pending_teacher_cache_frames,
             })
@@ -725,13 +804,14 @@ class RiskRouterClientPolicy:
         if phase_switch:
             verify_threshold = self.threshold * self.phase_threshold_scale
 
+        want_repair = self.repair_enable or self.svdr_repair_enable
         verify_ret = self.teacher.infer({
             "verify_action": True,
             "action_latent": draft_ret["action_latent"],
             "threshold": verify_threshold,
             "tau_timesteps": self.tau_timesteps,
             "frame_st_id": self.frame_st_id,
-            "return_repair": self.repair_enable,
+            "return_repair": want_repair,
             "repair_lambda": 1.0 if self.svdr_repair_enable else self.repair_lambda,
         })
         verify_ret["phase_switch"] = phase_switch
@@ -758,24 +838,39 @@ class RiskRouterClientPolicy:
             repair_action = verify_ret.get("repair_action")
             repair_action_latent = verify_ret.get("repair_action_latent")
             svdr_meta = None
-            if self.repair_enable and repair_action is not None and repair_action_latent is not None:
+            if want_repair and repair_action is not None and repair_action_latent is not None:
                 if self.svdr_repair_enable:
                     video_latent = draft_ret.get("video_latent")
-                    if video_latent is None:
-                        raise RuntimeError("SVDR repair requires draft server return_video_latent support")
-                    repair_action, repair_action_latent, svdr_meta = video_guided_blend(
+                    svdr_meta = {
+                        "video_motion": video_motion_risk(
+                            video_latent,
+                            topk_frac=self.svdr_topk_frac,
+                            motion_ref=self.svdr_motion_ref,
+                            temperature=self.svdr_temperature,
+                        ) if video_latent is not None else {"missing_video_latent": True}
+                    }
+                    repair_action, repair_action_latent, bounded_meta = bounded_residual_blend(
                         draft_action,
                         np.asarray(repair_action),
                         draft_ret["action_latent"],
                         np.asarray(repair_action_latent),
-                        video_latent,
-                        lambda_min=self.svdr_lambda_min,
-                        lambda_max=self.svdr_lambda_max,
-                        motion_ref=self.svdr_motion_ref,
-                        topk_frac=self.svdr_topk_frac,
-                        temperature=self.svdr_temperature,
+                        alpha=self.repair_lambda,
+                        step_l2_clip=0.30,
+                        residual_gate=None,
                         repair_start_prefix=max(0, int(verify_ret.get("raw_valid_prefix", 0))),
                     )
+                    svdr_meta.update(bounded_meta)
+                    if repair_action is None or repair_action_latent is None:
+                        self.round_id += 1
+                        return self._teacher_action(obs, "teacher_svdr_repair_skip", {
+                            "risk": risk,
+                            "verify": verify_log,
+                            "svdr": svdr_meta,
+                            "accepted_prefix": 0,
+                            "elapsed_sec": time.perf_counter() - start,
+                            "pending_teacher_cache_updates": len(self.pending_teacher_cache_obs),
+                            "pending_teacher_cache_frames": self.pending_teacher_cache_frames,
+                        })
                 repair_start = time.perf_counter()
                 repair_verify_ret = self.teacher.infer({
                     "verify_action": True,

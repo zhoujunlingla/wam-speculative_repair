@@ -20,7 +20,7 @@ from pathlib import Path
 
 
 ROOT = Path("/mnt/afs/intern/manlichen/ivan/zhoujunl")
-CODE = ROOT / "Wam_Speed_up" / "lingbot-va-specverify"
+CODE = ROOT / "Wam_Speed_up" / "lingbot-va-svdr-videorepair-20260702"
 ROBOTWIN_ROOT = ROOT / "Wam_Speed_up" / "RoboTwin"
 EXPERIMENT_ROOT = ROOT / "experiments" / "Wam_Speed_up"
 RESULT_ROOT = ROOT / "result" / "Wam_Speed_up"
@@ -338,15 +338,15 @@ def summarize(
             writer.writeheader()
             writer.writerows(rows)
         lines = [
-            "# SpecVerify Realtime-VLA Triple On LingBot-VA / FlashWAM Low10 TN10",
+            "# SpecVerify Realtime-VLA Action Verify On LingBot-VA Low10 TN10",
             "",
             f"- Start: {start_time}",
             f"- End: {end_time or 'RUNNING'}",
             f"- Experiment: {experiment_content}",
             f"- Run root: `{run_root}`",
             f"- Result root: `{result_root}`",
-            "- Draft: FlashWAM-RoboTwin v1/a1",
-            "- Teacher/verifier/fallback: configured LingBot-VA server; see experiment line",
+            "- Draft: explicit robotwin_onpolicy_v1a2_draft unless overridden",
+            "- Teacher/verifier/fallback: explicit configured LingBot-VA server; see experiment line",
             "- Verify: action flow endpoint check; exact PF/threshold/phase mode in experiment line",
             "- Runtime controls: prefix {0,16,32}",
             f"- Current success: {success}/{total} = {rate * 100:.2f}%",
@@ -432,7 +432,7 @@ def run_task(
         "--model_name",
         "0",
         "--ckpt_setting",
-        "SpecVerify-FlashWAM-draft-LingBot-teacher-RTVLA-v1",
+        "SpecVerify-OnPolicy-v1a2-draft-LingBot-v2a4-teacher-RTVLA-v1",
         "--seed",
         "0",
         "--policy_name",
@@ -466,11 +466,11 @@ def launch(args: argparse.Namespace) -> None:
     queued_at = datetime.now().isoformat(timespec="seconds")
     content = (
         "Realtime-VLA first-version speculative verification on LingBot-VA: "
-        "FlashWAM v1/a1 draft, LingBot v2/a4 teacher action-flow verifier, "
+        f"draft config={args.draft_config_name}, "
+        f"teacher config={args.teacher_config_name}, action-flow verifier, "
         f"prefix {{0,16,32}}, phase_mode={args.phase_mode}, "
         f"phase_threshold_scale={args.phase_threshold_scale}, PF={args.specverify_pf}, "
         f"threshold={args.specverify_threshold}, low10 clean TN{args.test_num}. "
-        f"Teacher config={args.teacher_config_name}; "
         f"Teacher cache mode={args.teacher_cache_mode}; "
         f"prime draft on teacher full={not args.disable_prime_draft_on_teacher_full}."
     )
@@ -495,8 +495,8 @@ def launch(args: argparse.Namespace) -> None:
         teacher_port = args.port_base + 1
         servers.append(start_server(
             run_root,
-            name="draft_flashwam",
-            config_name="robotwin_flashwam",
+            name="draft_onpolicy",
+            config_name=args.draft_config_name,
             gpu=args.draft_gpu,
             port=draft_port,
             master_port=args.master_port_base,
@@ -580,6 +580,11 @@ def main() -> None:
     parser.add_argument("--specverify-pf", type=int, default=2)
     parser.add_argument("--specverify-threshold", type=float, default=0.15)
     parser.add_argument(
+        "--draft-config-name",
+        default="robotwin_onpolicy_v1a2_draft",
+        help="Draft server config. Default is the on-policy step2000 video1/action2 checkpoint.",
+    )
+    parser.add_argument(
         "--phase-mode",
         choices=["fallback", "tighten", "ignore"],
         default="fallback",
@@ -607,7 +612,7 @@ def main() -> None:
         action="store_true",
         help="Skip the extra draft action request on teacher-full rounds.",
     )
-    parser.add_argument("--wait-screen", default="lingbotva_top10_chunks_20260617")
+    parser.add_argument("--wait-screen", default=None)
     parser.add_argument("--wait-timeout-sec", type=int, default=21600)
     parser.add_argument(
         "--tasks",

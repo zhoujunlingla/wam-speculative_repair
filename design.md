@@ -266,3 +266,140 @@ When enabled, the launcher starts `wan_va/wan_va_single_spec_server.py` on the d
 
 2026-07-05T10:38:38
 
+## Stage A0 All-Draft Sanity Prime Bypass
+
+The previous all-draft sanity run was invalid because `RiskRouterClientPolicy` still forced `teacher_initial_prime` at `frame_st_id == 0`. Add an explicit `--disable-teacher-initial-prime` switch for sanity-only runs. Default behavior remains unchanged, so normal action verification, SVDR, and world-verifier experiments still keep the conservative teacher initial prime.
+
+Gate: with `risk_verify_mode=off`, `phase_mode=ignore`, and `--disable-teacher-initial-prime`, router success should approach the direct onpolicy step2000 v1/a2 baseline before enabling action-only verification.
+
+## V10b Stage A0 Single-Model Sanity Modes
+
+### Goal
+
+Make Stage A0 test the router boundary without loading an unused model. In a draft-only sanity run, the teacher must not be constructed; in a teacher-only sanity run, the draft must not be constructed. Only full speculative evaluation should load both models.
+
+### Change
+
+`wan_va_single_spec_server.py` now supports `--server-mode`:
+
+- `draft_teacher`: default, unchanged full RiskRouter path with draft and teacher.
+- `draft_only`: loads only `--draft-config-name` and forwards requests directly to that VA server.
+- `teacher_only`: loads only `--teacher-config-name` and forwards requests directly to that VA server.
+
+`scripts/cci_riskrouter_lingbot_v1a2_v2a4_low10_tn10.py` forwards this as `--single-server-mode`.
+
+### Gate
+
+Use `--single-server --single-server-mode draft_only` for Stage A0. Its result should match the new-code direct draft baseline before any action verifier, SVDR repair, or world verifier experiment is trusted.
+
+## V12 Realtime-VLA Action Verify Explicit Config Launcher
+
+### Goal
+
+Make the two-server Realtime-VLA-style action verifier use the current explicit model configs instead of a generic env-injected checkpoint config. This keeps draft and teacher experiment identity unambiguous.
+
+### Reference
+
+Cloned dexmal/realtime-vla-flash to /mnt/afs/intern/manlichen/ivan/zhoujunl/Wam_Speed_up/realtime-vla-flash at da6ceccad603695a8a3d6fa14dd410c3aadb536f. The relevant path is scripts/spec/spec_serve_policy.py: draft action -> teacher verify at t_list -> radius prefix acceptance -> gripper/phase fallback -> optional periodic full refresh.
+
+### Single New Change
+
+Update scripts/cci_specverify_rtvla_low10_tn10.py to run from the current SVDR code root and start the draft server with robotwin_onpolicy_v1a2_draft by default. The teacher remains robotwin_lingbot_v2a4_teacher. The verifier math is unchanged and still uses wan_va/wan_va_server.py verify_action_chunk.
+
+### Not Changing
+
+No new verifier implementation, no threshold change, no cache-policy change, no SVDR/world verifier change, and no experiment launch in this edit.
+
+### Verification Plan
+
+Run py_compile on the launcher and existing specverify modules, then run the existing lightweight specverify tests.
+
+## V13 Success-First SVDR Repair Gate
+
+### Goal
+
+Make speculative inference beat the direct draft on low10 before optimizing teacher usage further. The target is low10 TN=10 success above 75%.
+
+### Problem Evidence
+
+V12/V8-style runs showed many failed chunks were logged as `draft_verify_accept`, often with full-prefix acceptance. `SVDR` only ran after action verifier rejection, so it never repaired false-positive accepts. The first post-reset teacher prime also executed the teacher chunk, which can hurt draft-heavy contact tasks such as `hanging_mug`.
+
+### Minimal Change
+
+1. Change initial teacher prime to shadow prime: run teacher once to initialize caches, but do not execute its action.
+2. If an accepted draft is risky (`phase_switch`, risk score >= 0.35, or verifier margin near threshold), force it through the existing SVDR repair + action reverify path instead of executing it directly.
+
+No new model, no new loss, no world verifier change.
+
+## V13b Reject-Only SVDR Repair
+
+### Goal
+
+Fix V13 over-repair. SVDR repair should only run when the original action verifier rejects the draft chunk (`accepted_prefix <= 0`), i.e. the path that would otherwise fall back to teacher.
+
+### Change
+
+Remove the risky-accept override that converted accepted draft prefixes into repair attempts. Accepted draft prefixes now execute normally. Rejected prefixes still use the existing SVDR repair + action reverify path before teacher fallback.
+
+### Gate
+
+`forced_repair_after_accept` must disappear from new metrics. `draft_svdr_repair_accept` should only appear after verifier rejection, and success should be compared against V13 and direct draft.
+
+## V14 DPS-Style Bounded Residual Repair
+
+### Goal
+
+Replace high-gain video-lambda SVDR repair with a safer inference-time repair inspired by DPS / manifold-constrained guidance: small bounded correction toward the teacher verifier endpoint, followed by the same action verifier.
+
+### Change
+
+1. Keep Realtime-VLA-FLASH-style action verifier unchanged.
+2. Request teacher endpoint repair whenever either `repair_enable` or `svdr_repair_enable` is enabled.
+3. In the SVDR branch, use video latent motion only as logging metadata.
+4. Replace `video_guided_blend` execution with `bounded_residual_blend`:
+   `A_repair = A_draft + alpha * clip(A_endpoint - A_draft)`, where `alpha = repair_lambda` and per-step continuous-action L2 clip is `0.30`.
+5. Reverify repaired latent with the same action verifier. Execute repaired action only if it passes; otherwise fallback teacher.
+
+### Not Changing
+
+No new training, no candidate search, no world/video teacher rollout, no verifier threshold change.
+
+### Gate
+
+New metrics should show `svdr.repair_method=bounded_residual`. Compare success, teacher rate, and `draft_svdr_repair_accept` against V13b and direct draft.
+
+## V14b WanVAE Temporal Cache Retry
+
+A bounded-repair shard repeatedly crashed on `turn_switch` when a teacher fallback hit WanVAE streaming encode with only two temporal frames for a kernel-size-3 conv. The minimal guard is in the shared `VA_Server.infer` full-inference path: if and only if that exact WanVAE temporal-cache RuntimeError is raised, reset the server cache/prompt and retry the same observation once. This keeps verifier/repair policy unchanged and avoids hiding unrelated errors.
+
+## V15 Action-Only Verify Hyperparameter Tuning
+
+Goal: finish stage 1 before repair. Keep world verifier and repair disabled, tune only the Realtime-VLA-FLASH action verifier hyperparameters: selected flow timesteps tau and endpoint distance threshold. The launcher now exposes `--specverify-tau` and passes it to both single-server and two-server paths. No verifier math or policy logic changes.
+
+
+## V15b Variable-K Action Verify Cache Chunking
+
+V15 showed K=3 action verifier timesteps fail before evaluation with transformer KV cache batch mismatch: verifier input batch was 3 while LingBot teacher caches are allocated with CFG batch size 2. The action verifier now keeps the existing fast path when K matches the cache batch and otherwise evaluates tau timesteps in cache-sized chunks, padding only the final partial chunk and discarding padded outputs. Verifier math, thresholds, repair, and world verifier remain unchanged.
+
+## V16 Verify++ and Step-Mask Repair
+
+Goal: keep the Realtime-VLA-FLASH endpoint verifier as the trusted base, then add optional verifier signals and safer repair.
+
+Changes:
+
+1. Server Verify++ adds cross-tau endpoint consistency, optional two-step shortcut consistency, and optional physical dynamics gate.
+2. Server returns JSON-safe per-step `pass_by_step` and score lists for logging and repair.
+3. Client repair now supports step-mask repair: pass steps stay draft, failed steps use the repair candidate, then the repaired chunk is verified again.
+4. The default draft config is now `robotwin_flashwam_official_step3000_v1a2_draft`; teacher remains `robotwin_lingbot_v2a4_teacher`.
+
+Compatibility:
+
+- `verify_plus=False` preserves old endpoint verifier behavior.
+- `repair_step_mask_enable=False` preserves old repair path.
+- `repair_mask_dilate_radius` defaults to `0` so verified-pass steps are preserved exactly.
+
+Verification:
+
+- Compile touched Python files.
+- Run lightweight step-mask helper checks.
+- Use parallel code-review agents for server verifier and client/launcher logic.

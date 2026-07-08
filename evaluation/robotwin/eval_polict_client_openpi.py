@@ -430,6 +430,14 @@ def main(usr_args):
                 svdr_motion_ref=float(usr_args.get("svdr_motion_ref", 3.0)),
                 svdr_topk_frac=float(usr_args.get("svdr_topk_frac", 0.10)),
                 svdr_temperature=float(usr_args.get("svdr_temperature", 1.0)),
+                verify_plus_enable=bool(usr_args.get("verify_plus_enable", False)),
+                verify_alpha_cross_tau=float(usr_args.get("verify_alpha_cross_tau", 0.30)),
+                verify_shortcut_enable=bool(usr_args.get("verify_shortcut_enable", False)),
+                verify_shortcut_high_risk_only=bool(usr_args.get("verify_shortcut_high_risk_only", True)),
+                verify_alpha_shortcut=float(usr_args.get("verify_alpha_shortcut", 0.30)),
+                verify_dynamics_gate=bool(usr_args.get("verify_dynamics_gate", False)),
+                repair_step_mask_enable=bool(usr_args.get("repair_step_mask_enable", False)),
+                repair_mask_dilate_radius=int(usr_args.get("repair_mask_dilate_radius", 0)),
                 log_path=usr_args.get("specverify_log"),
             )
         else:
@@ -771,6 +779,14 @@ def parse_args_and_config():
     parser.add_argument("--svdr_motion_ref", type=float, default=3.0)
     parser.add_argument("--svdr_topk_frac", type=float, default=0.10)
     parser.add_argument("--svdr_temperature", type=float, default=1.0)
+    parser.add_argument("--verify_plus_enable", action="store_true")
+    parser.add_argument("--verify_alpha_cross_tau", type=float, default=0.30)
+    parser.add_argument("--verify_shortcut_enable", action="store_true")
+    parser.add_argument("--verify_shortcut_high_risk_only", action="store_true", default=True)
+    parser.add_argument("--verify_alpha_shortcut", type=float, default=0.30)
+    parser.add_argument("--verify_dynamics_gate", action="store_true")
+    parser.add_argument("--repair_step_mask_enable", action="store_true")
+    parser.add_argument("--repair_mask_dilate_radius", type=int, default=0)
     args = parser.parse_args()
 
     with open(args.config, "r", encoding="utf-8") as f:
@@ -831,6 +847,14 @@ def parse_args_and_config():
         "svdr_motion_ref": args.svdr_motion_ref,
         "svdr_topk_frac": args.svdr_topk_frac,
         "svdr_temperature": args.svdr_temperature,
+        "verify_plus_enable": args.verify_plus_enable,
+        "verify_alpha_cross_tau": args.verify_alpha_cross_tau,
+        "verify_shortcut_enable": args.verify_shortcut_enable,
+        "verify_shortcut_high_risk_only": args.verify_shortcut_high_risk_only,
+        "verify_alpha_shortcut": args.verify_alpha_shortcut,
+        "verify_dynamics_gate": args.verify_dynamics_gate,
+        "repair_step_mask_enable": args.repair_step_mask_enable,
+        "repair_mask_dilate_radius": args.repair_mask_dilate_radius,
     }
     argv_before_overrides = sys.argv[1:]
     if "--overrides" in argv_before_overrides:
@@ -874,6 +898,14 @@ def parse_args_and_config():
         "svdr_motion_ref": "--svdr_motion_ref",
         "svdr_topk_frac": "--svdr_topk_frac",
         "svdr_temperature": "--svdr_temperature",
+        "verify_plus_enable": "--verify_plus_enable",
+        "verify_alpha_cross_tau": "--verify_alpha_cross_tau",
+        "verify_shortcut_enable": "--verify_shortcut_enable",
+        "verify_shortcut_high_risk_only": "--verify_shortcut_high_risk_only",
+        "verify_alpha_shortcut": "--verify_alpha_shortcut",
+        "verify_dynamics_gate": "--verify_dynamics_gate",
+        "repair_step_mask_enable": "--repair_step_mask_enable",
+        "repair_mask_dilate_radius": "--repair_mask_dilate_radius",
     }
     for key, value in parser_updates.items():
         if flag_for_key[key] in explicit_flags or key not in config:

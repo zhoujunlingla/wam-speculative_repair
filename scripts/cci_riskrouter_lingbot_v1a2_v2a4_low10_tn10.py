@@ -78,7 +78,7 @@ def base_env(gpu: int, *, use_torch29: bool = True) -> dict[str, str]:
     python_paths.append(env.get("PYTHONPATH", ""))
     env["PYTHONPATH"] = ":".join(p for p in python_paths if p)
     env["PATH"] = f"{NINJA_BIN}:/usr/local/cuda/bin:{env.get('PATH', '')}"
-    env["TORCH_EXTENSIONS_DIR"] = str(TORCH_EXTENSIONS)
+    env["TORCH_EXTENSIONS_DIR"] = os.environ.get("TORCH_EXTENSIONS_DIR", str(TORCH_EXTENSIONS))
     env["LIBRARY_PATH"] = f"{CUDA_RUNTIME_LIB}:{env.get('LIBRARY_PATH', '')}"
     env["LD_LIBRARY_PATH"] = f"{NVIDIA_550_LIB}:{CUDA_RUNTIME_LIB}:{env.get('LD_LIBRARY_PATH', '')}"
     env["VK_ICD_FILENAMES"] = str(NVIDIA_550_ICD)
@@ -157,6 +157,7 @@ def start_single_spec_server(
     world_verify_enable: bool,
     world_verify_threshold: float,
     world_verify_tau: list[float],
+    specverify_tau: list[float],
     repair_enable: bool,
     repair_lambda: float,
     repair_instrument_only: bool,
@@ -166,6 +167,16 @@ def start_single_spec_server(
     svdr_motion_ref: float,
     svdr_topk_frac: float,
     svdr_temperature: float,
+    verify_plus_enable: bool,
+    verify_alpha_cross_tau: float,
+    verify_shortcut_enable: bool,
+    verify_shortcut_high_risk_only: bool,
+    verify_alpha_shortcut: float,
+    verify_dynamics_gate: bool,
+    repair_step_mask_enable: bool,
+    repair_mask_dilate_radius: int,
+    disable_teacher_initial_prime: bool,
+    single_server_mode: str,
 ) -> subprocess.Popen:
     log_path = run_root / "logs" / f"single_spec_server_g{gpu}.log"
     log = log_path.open("a", buffering=1)
@@ -180,10 +191,14 @@ def start_single_spec_server(
         draft_config_name,
         "--teacher-config-name",
         teacher_config_name,
+        "--server-mode",
+        single_server_mode,
         "--teacher-cache-mode",
         teacher_cache_mode,
         "--threshold",
         str(threshold),
+        "--tau-timesteps",
+        *[str(x) for x in specverify_tau],
         "--phase-threshold-scale",
         str(phase_threshold_scale),
         "--risk-low",
@@ -227,9 +242,29 @@ def start_single_spec_server(
         cmd.append("--repair-instrument-only")
     if svdr_repair_enable:
         cmd.append("--svdr-repair-enable")
+    if verify_plus_enable:
+        cmd.append("--verify-plus-enable")
+    if verify_shortcut_enable:
+        cmd.append("--verify-shortcut-enable")
+    if verify_shortcut_high_risk_only:
+        cmd.append("--verify-shortcut-high-risk-only")
+    if verify_dynamics_gate:
+        cmd.append("--verify-dynamics-gate")
+    if repair_step_mask_enable:
+        cmd.append("--repair-step-mask-enable")
+    cmd.extend([
+        "--verify-alpha-cross-tau",
+        str(verify_alpha_cross_tau),
+        "--verify-alpha-shortcut",
+        str(verify_alpha_shortcut),
+        "--repair-mask-dilate-radius",
+        str(repair_mask_dilate_radius),
+    ])
+    if disable_teacher_initial_prime:
+        cmd.append("--disable-teacher-initial-prime")
     print(
         f"[launcher] start single spec server gpu={gpu} port={port} "
-        f"draft={draft_config_name} teacher={teacher_config_name}",
+        f"mode={single_server_mode} draft={draft_config_name} teacher={teacher_config_name}",
         flush=True,
     )
     return subprocess.Popen(cmd, cwd=str(CODE), env=base_env(gpu, use_torch29=True), stdout=log, stderr=subprocess.STDOUT)
@@ -587,6 +622,7 @@ def run_task(
     world_verify_enable: bool,
     world_verify_threshold: float,
     world_verify_tau: list[float],
+    specverify_tau: list[float],
     repair_enable: bool,
     repair_lambda: float,
     repair_instrument_only: bool,
@@ -596,6 +632,14 @@ def run_task(
     svdr_motion_ref: float,
     svdr_topk_frac: float,
     svdr_temperature: float,
+    verify_plus_enable: bool,
+    verify_alpha_cross_tau: float,
+    verify_shortcut_enable: bool,
+    verify_shortcut_high_risk_only: bool,
+    verify_alpha_shortcut: float,
+    verify_dynamics_gate: bool,
+    repair_step_mask_enable: bool,
+    repair_mask_dilate_radius: int,
 ) -> tuple[int, str]:
     log_path = run_root / "logs" / f"client_{task}.log"
     result_task_log = result_root / "logs" / f"client_{task}.log"
@@ -626,8 +670,7 @@ def run_task(
             "--specverify_threshold",
             str(specverify_threshold),
             "--specverify_tau",
-            "150",
-            "300",
+            *[str(x) for x in specverify_tau],
             "--specverify_teacher_cache_mode",
             teacher_cache_mode,
             "--specverify_log",
@@ -666,6 +709,12 @@ def run_task(
             str(svdr_topk_frac),
             "--svdr_temperature",
             str(svdr_temperature),
+            "--verify_alpha_cross_tau",
+            str(verify_alpha_cross_tau),
+            "--verify_alpha_shortcut",
+            str(verify_alpha_shortcut),
+            "--repair_mask_dilate_radius",
+            str(repair_mask_dilate_radius),
         ])
     else:
         cmd.extend(["--port", str(single_port)])
@@ -680,7 +729,7 @@ def run_task(
         "--model_name",
         "0",
         "--ckpt_setting",
-        "SVDR-onpolicy-step2000-v1a2-draft-v2a4-teacher",
+        "WAM-SpecRepair-official-step3000-v1a2-draft-v2a4-teacher",
         "--seed",
         "0",
         "--policy_name",
@@ -703,6 +752,16 @@ def run_task(
             cmd.insert(cmd.index("--overrides"), "--repair_instrument_only")
         if svdr_repair_enable:
             cmd.insert(cmd.index("--overrides"), "--svdr_repair_enable")
+        if verify_plus_enable:
+            cmd.insert(cmd.index("--overrides"), "--verify_plus_enable")
+        if verify_shortcut_enable:
+            cmd.insert(cmd.index("--overrides"), "--verify_shortcut_enable")
+        if verify_shortcut_high_risk_only:
+            cmd.insert(cmd.index("--overrides"), "--verify_shortcut_high_risk_only")
+        if verify_dynamics_gate:
+            cmd.insert(cmd.index("--overrides"), "--verify_dynamics_gate")
+        if repair_step_mask_enable:
+            cmd.insert(cmd.index("--overrides"), "--repair_step_mask_enable")
         if disable_prime_draft_on_teacher_full:
             cmd.insert(cmd.index("--overrides"), "--specverify_disable_prime_draft_on_teacher_full")
     with log_path.open("a", buffering=1) as log:
@@ -728,7 +787,7 @@ def launch(args: argparse.Namespace) -> None:
         f"LingBot v2/a4 teacher config={args.teacher_config_name}, "
         f"risk_low={args.risk_low}, risk_high={args.risk_high}, "
         f"risk_verify_mode={args.risk_verify_mode}, threshold={args.specverify_threshold}, "
-        f"phase_threshold_scale={args.phase_threshold_scale}, "
+        f"tau={args.specverify_tau}, phase_threshold_scale={args.phase_threshold_scale}, "
         f"low10 clean TN{args.test_num}. "
         f"Teacher cache mode={args.teacher_cache_mode}; "
         "No periodic full refresh; high-risk chunks verify before teacher fallback; phase switch tightens verify; SVDR uses draft-side future video latent motion/region risk to weight teacher action endpoint residual, then action-only re-verifies repaired draft before teacher fallback."
@@ -773,6 +832,7 @@ def launch(args: argparse.Namespace) -> None:
                 world_verify_enable=args.world_verify_enable,
                 world_verify_threshold=args.world_verify_threshold,
                 world_verify_tau=args.world_verify_tau,
+                specverify_tau=args.specverify_tau,
                 repair_enable=args.repair_enable,
                 repair_lambda=args.repair_lambda,
                 repair_instrument_only=args.repair_instrument_only,
@@ -782,6 +842,16 @@ def launch(args: argparse.Namespace) -> None:
                 svdr_motion_ref=args.svdr_motion_ref,
                 svdr_topk_frac=args.svdr_topk_frac,
                 svdr_temperature=args.svdr_temperature,
+                verify_plus_enable=args.verify_plus_enable,
+                verify_alpha_cross_tau=args.verify_alpha_cross_tau,
+                verify_shortcut_enable=args.verify_shortcut_enable,
+                verify_shortcut_high_risk_only=args.verify_shortcut_high_risk_only,
+                verify_alpha_shortcut=args.verify_alpha_shortcut,
+                verify_dynamics_gate=args.verify_dynamics_gate,
+                repair_step_mask_enable=args.repair_step_mask_enable,
+                repair_mask_dilate_radius=args.repair_mask_dilate_radius,
+                disable_teacher_initial_prime=args.disable_teacher_initial_prime,
+                single_server_mode=args.single_server_mode,
             ))
         else:
             servers.append(start_server(
@@ -832,6 +902,7 @@ def launch(args: argparse.Namespace) -> None:
                     world_verify_enable=args.world_verify_enable,
                     world_verify_threshold=args.world_verify_threshold,
                     world_verify_tau=args.world_verify_tau,
+                    specverify_tau=args.specverify_tau,
                     repair_enable=args.repair_enable,
                     repair_lambda=args.repair_lambda,
                     repair_instrument_only=args.repair_instrument_only,
@@ -841,6 +912,14 @@ def launch(args: argparse.Namespace) -> None:
                     svdr_motion_ref=args.svdr_motion_ref,
                     svdr_topk_frac=args.svdr_topk_frac,
                     svdr_temperature=args.svdr_temperature,
+                    verify_plus_enable=args.verify_plus_enable,
+                    verify_alpha_cross_tau=args.verify_alpha_cross_tau,
+                    verify_shortcut_enable=args.verify_shortcut_enable,
+                    verify_shortcut_high_risk_only=args.verify_shortcut_high_risk_only,
+                    verify_alpha_shortcut=args.verify_alpha_shortcut,
+                    verify_dynamics_gate=args.verify_dynamics_gate,
+                    repair_step_mask_enable=args.repair_step_mask_enable,
+                    repair_mask_dilate_radius=args.repair_mask_dilate_radius,
                 )
             print(f"[launcher] task {task} status={status}", flush=True)
             summarize(
@@ -891,6 +970,7 @@ def main() -> None:
     parser.add_argument("--test-num", type=int, default=10)
     parser.add_argument("--specverify-pf", type=int, default=999999)
     parser.add_argument("--specverify-threshold", type=float, default=0.20)
+    parser.add_argument("--specverify-tau", nargs="+", type=float, default=[150.0, 300.0])
     parser.add_argument(
         "--phase-mode",
         choices=["fallback", "tighten", "ignore"],
@@ -905,14 +985,15 @@ def main() -> None:
     )
     parser.add_argument(
         "--draft-config-name",
-        default="robotwin_onpolicy_v1a2_draft",
-        help="Draft server config. Default uses on-policy step2000 video1/action2 checkpoint.",
+        default="robotwin_flashwam_official_step3000_v1a2_draft",
+        help="Draft server config. Default uses FlashWAM official step3000 video1/action2 checkpoint.",
     )
     parser.add_argument(
         "--teacher-config-name",
         default="robotwin_lingbot_v2a4_teacher",
         help="LingBot teacher server config. Default uses direct step compression v2/a4.",
     )
+    parser.add_argument("--single-server-mode", default="draft_teacher", choices=["draft_teacher", "draft_only", "teacher_only"])
     parser.add_argument(
         "--teacher-cache-mode",
         choices=["sync", "lazy_reference", "stale_reference"],
@@ -943,6 +1024,15 @@ def main() -> None:
     parser.add_argument("--svdr-motion-ref", type=float, default=3.0)
     parser.add_argument("--svdr-topk-frac", type=float, default=0.10)
     parser.add_argument("--svdr-temperature", type=float, default=1.0)
+    parser.add_argument("--verify-plus-enable", action="store_true")
+    parser.add_argument("--verify-alpha-cross-tau", type=float, default=0.30)
+    parser.add_argument("--verify-shortcut-enable", action="store_true")
+    parser.add_argument("--verify-shortcut-high-risk-only", action="store_true", default=True)
+    parser.add_argument("--verify-alpha-shortcut", type=float, default=0.30)
+    parser.add_argument("--verify-dynamics-gate", action="store_true")
+    parser.add_argument("--repair-step-mask-enable", action="store_true")
+    parser.add_argument("--repair-mask-dilate-radius", type=int, default=0)
+    parser.add_argument("--disable-teacher-initial-prime", action="store_true")
     parser.add_argument("--wait-screen", default="lingbotva_top10_chunks_20260617")
     parser.add_argument("--wait-timeout-sec", type=int, default=21600)
     parser.add_argument(

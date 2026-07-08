@@ -43,7 +43,50 @@ from specverify import (
     quantize_prefix_to_frame_boundary,
     scheduler_add_noise_batched,
     scheduler_step_to_final_batched,
+    scheduler_step_to_timestep_batched,
 )
+
+
+def action_dynamics_step_score(
+    action: np.ndarray,
+    *,
+    conditioned_frame_count: int,
+    action_per_frame: int,
+    delta_ref: float = 0.25,
+    jerk_ref: float = 0.18,
+    phase_weight: float = 0.25,
+    delta_weight: float = 0.10,
+    jerk_weight: float = 0.10,
+) -> np.ndarray:
+    """Per-step dynamics penalty for verifier gating."""
+
+    if not isinstance(action, np.ndarray) or action.ndim != 3:
+        return np.zeros((0,), dtype=np.float32)
+    seq = action.transpose(1, 2, 0).reshape(-1, action.shape[0])
+    score = np.zeros((seq.shape[0],), dtype=np.float32)
+    cont_idx = [i for i in range(seq.shape[1]) if i not in (7, 15)]
+    cont = seq[:, cont_idx] if cont_idx else seq
+    if seq.shape[0] >= 2:
+        delta = np.linalg.norm(np.diff(cont, axis=0), axis=1)
+        score[1:] += np.clip(delta / max(delta_ref, 1e-6), 0.0, 1.0) * float(delta_weight)
+    if seq.shape[0] >= 3:
+        jerk = np.linalg.norm(np.diff(cont, n=2, axis=0), axis=1)
+        score[2:] += np.clip(jerk / max(jerk_ref, 1e-6), 0.0, 1.0) * float(jerk_weight)
+    for channel in (7, 15):
+        if seq.shape[1] > channel and seq.shape[0] >= 2:
+            switch = (seq[1:, channel] > 0.5) != (seq[:-1, channel] > 0.5)
+            score[1:] += switch.astype(np.float32) * float(phase_weight)
+    start = max(0, min(int(conditioned_frame_count) * int(action_per_frame), seq.shape[0]))
+    return score[start:].astype(np.float32)
+
+
+
+def _is_wanvae_temporal_cache_error(exc: BaseException) -> bool:
+    msg = str(exc)
+    return (
+        "Calculated padded input size per channel" in msg
+        and "Kernel size can't be greater than actual input size" in msg
+    )
 
 
 class VA_Server:
@@ -341,7 +384,7 @@ class VA_Server:
                                    action_timesteps,
                                    frame_st_id=0,
                                    cache_name=None):
-        """Run the action branch for K verifier timesteps without CFG repeat."""
+        """Run the action branch for verifier timesteps without CFG repeat."""
         if self.prompt_embeds is None:
             raise RuntimeError("forward_action_only_verify requires a prompt cache")
         if noisy_actions.ndim != 5:
@@ -359,6 +402,37 @@ class VA_Server:
             timesteps = timesteps.repeat(batch_size)
         if timesteps.numel() != batch_size:
             raise ValueError("action_timesteps must be scalar or length K")
+
+        # The transformer KV cache batch is allocated from CFG state. For the
+        # LingBot teacher it is usually 2, so K=2 used to work by accident while
+        # K=3 crashed during temporary cache writes. Keep the fast path when K
+        # matches the cache batch; otherwise run verifier chunks with padding.
+        verify_batch_size = 2 if self.use_cfg else 1
+        if batch_size != verify_batch_size:
+            outputs = []
+            for start in range(0, batch_size, verify_batch_size):
+                end = min(start + verify_batch_size, batch_size)
+                real_size = end - start
+                action_chunk = noisy_actions[start:end]
+                timestep_chunk = timesteps[start:end]
+                if real_size < verify_batch_size:
+                    pad = verify_batch_size - real_size
+                    action_chunk = torch.cat([
+                        action_chunk,
+                        action_chunk[-1:].repeat(pad, 1, 1, 1, 1),
+                    ], dim=0)
+                    timestep_chunk = torch.cat([
+                        timestep_chunk,
+                        timestep_chunk[-1:].repeat(pad),
+                    ], dim=0)
+                chunk_out = self.forward_action_only_verify(
+                    action_chunk,
+                    timestep_chunk,
+                    frame_st_id=frame_st_id,
+                    cache_name=cache_name,
+                )[:real_size]
+                outputs.append(chunk_out)
+            return torch.cat(outputs, dim=0)
 
         conditioned_frame_count = action_verify_frame_start(frame_st_id)
         if conditioned_frame_count:
@@ -511,7 +585,16 @@ class VA_Server:
                             threshold=0.15,
                             cache_name=None,
                             return_repair=False,
-                            repair_lambda=0.75):
+                            repair_lambda=0.75,
+                            verify_plus=False,
+                            alpha_cross_tau=0.30,
+                            shortcut_verify=False,
+                            alpha_shortcut=0.30,
+                            dynamics_gate=False,
+                            dynamics_delta_ref=0.25,
+                            dynamics_jerk_ref=0.18,
+                            dynamics_phase_weight=0.25,
+                            return_step_mask=False):
         """Verify a normalized draft action chunk against the teacher flow."""
         if draft_actions.ndim != 5 or draft_actions.shape[0] != 1:
             raise ValueError("draft_actions must have shape [1, C, F, N, 1]")
@@ -555,7 +638,72 @@ class VA_Server:
         dist = (recon - draft_batch).abs()[:, self.action_mask, :, :, 0]
         dist = dist.mean(dim=1)
         valid_dist = dist[:, conditioned_frame_count:, :].reshape(batch_size, -1)
-        pass_by_step = (valid_dist <= threshold).all(dim=0)
+        endpoint_dist_max = valid_dist.max(dim=0).values
+        endpoint_dist_mean = valid_dist.mean(dim=0)
+
+        if verify_plus and batch_size > 1:
+            endpoint_std = recon[:, self.action_mask, :, :, 0].float().std(dim=0, unbiased=False)
+            endpoint_std = endpoint_std.mean(dim=0)
+            cross_tau_score = endpoint_std[conditioned_frame_count:, :].reshape(-1)
+        else:
+            cross_tau_score = torch.zeros_like(endpoint_dist_max)
+
+        if verify_plus and shortcut_verify:
+            tau_mid = torch.clamp(tau_timesteps * 0.5, min=0.0)
+            z_mid = scheduler_step_to_timestep_batched(
+                scheduler=self.verify_scheduler,
+                model_output=velocity,
+                from_timesteps=tau_timesteps,
+                to_timesteps=tau_mid,
+                sample=z_tau,
+            )
+            if conditioned_frame_count:
+                z_mid[:, :, :conditioned_frame_count] = 0
+            velocity_mid = self.forward_action_only_verify(
+                z_mid,
+                tau_mid,
+                frame_st_id=frame_st_id,
+                cache_name=cache_name,
+            )
+            recon_two_step = scheduler_step_to_final_batched(
+                scheduler=self.verify_scheduler,
+                model_output=velocity_mid,
+                timesteps=tau_mid,
+                sample=z_mid,
+            )
+            shortcut_dist = (recon_two_step - recon).abs()[:, self.action_mask, :, :, 0]
+            shortcut_dist = shortcut_dist.mean(dim=1)
+            valid_shortcut_dist = shortcut_dist[:, conditioned_frame_count:, :].reshape(batch_size, -1)
+            shortcut_score = valid_shortcut_dist.max(dim=0).values
+        else:
+            shortcut_score = torch.zeros_like(endpoint_dist_max)
+
+        if verify_plus and dynamics_gate:
+            dynamics_np = action_dynamics_step_score(
+                self.postprocess_action(draft.detach()).astype(np.float32),
+                conditioned_frame_count=conditioned_frame_count,
+                action_per_frame=self.action_per_frame,
+                delta_ref=dynamics_delta_ref,
+                jerk_ref=dynamics_jerk_ref,
+                phase_weight=dynamics_phase_weight,
+            )
+            dynamics_score = torch.as_tensor(dynamics_np, dtype=endpoint_dist_max.dtype, device=endpoint_dist_max.device)
+            if dynamics_score.numel() != endpoint_dist_max.numel():
+                dynamics_score = torch.zeros_like(endpoint_dist_max)
+        else:
+            dynamics_score = torch.zeros_like(endpoint_dist_max)
+
+        if verify_plus:
+            step_score = (
+                endpoint_dist_max
+                + float(alpha_cross_tau) * cross_tau_score
+                + float(alpha_shortcut) * shortcut_score
+                + float(threshold) * dynamics_score
+            )
+        else:
+            step_score = endpoint_dist_max
+
+        pass_by_step = step_score <= float(threshold)
         raw_valid_prefix = 0
         for ok in pass_by_step.detach().cpu().tolist():
             if not ok:
@@ -575,6 +723,17 @@ class VA_Server:
             "distances": dist.detach().float().cpu(),
             "tau_timesteps": tau_timesteps.detach().float().cpu(),
             "threshold": float(threshold),
+            "verify_plus": bool(verify_plus),
+            "shortcut_verify": bool(shortcut_verify),
+            "pass_by_step": [bool(x) for x in pass_by_step.detach().cpu().tolist()],
+            "step_score": step_score.detach().float().cpu().numpy().tolist(),
+            "endpoint_dist_max": endpoint_dist_max.detach().float().cpu().numpy().tolist(),
+            "endpoint_dist_mean": endpoint_dist_mean.detach().float().cpu().numpy().tolist(),
+            "cross_tau_score": cross_tau_score.detach().float().cpu().numpy().tolist(),
+            "shortcut_score": shortcut_score.detach().float().cpu().numpy().tolist(),
+            "dynamics_score": dynamics_score.detach().float().cpu().numpy().tolist(),
+            "alpha_cross_tau": float(alpha_cross_tau),
+            "alpha_shortcut": float(alpha_shortcut),
         }
         if return_repair:
             repair_lambda = max(0.0, min(1.0, float(repair_lambda)))
@@ -915,6 +1074,15 @@ class VA_Server:
                 threshold=float(obs.get("threshold", 0.15)),
                 return_repair=bool(obs.get("return_repair", False)),
                 repair_lambda=float(obs.get("repair_lambda", 0.75)),
+                verify_plus=bool(obs.get("verify_plus", False)),
+                alpha_cross_tau=float(obs.get("alpha_cross_tau", 0.30)),
+                shortcut_verify=bool(obs.get("shortcut_verify", False)),
+                alpha_shortcut=float(obs.get("alpha_shortcut", 0.30)),
+                dynamics_gate=bool(obs.get("dynamics_gate", False)),
+                dynamics_delta_ref=float(obs.get("dynamics_delta_ref", 0.25)),
+                dynamics_jerk_ref=float(obs.get("dynamics_jerk_ref", 0.18)),
+                dynamics_phase_weight=float(obs.get("dynamics_phase_weight", 0.25)),
+                return_step_mask=bool(obs.get("return_step_mask", False)),
             )
             distances = verify_result.pop("distances")
             tau_timesteps = verify_result.pop("tau_timesteps")
@@ -960,7 +1128,17 @@ class VA_Server:
             return dict()
         else:
             logger.info(f"################# Infer One Chunk #################")
-            action, _ = self._infer(obs, frame_st_id=self.frame_st_id)
+            try:
+                action, _ = self._infer(obs, frame_st_id=self.frame_st_id)
+            except RuntimeError as exc:
+                if not _is_wanvae_temporal_cache_error(exc):
+                    raise
+                # ponytail: streaming WanVAE can carry a 1-frame temporal cache
+                # across trial boundaries; reset once, then treat current obs as
+                # a fresh prime. If this repeats, the real bug is upstream reset.
+                logger.warning("WanVAE temporal cache too short; reset and retry current obs once")
+                self._reset(prompt=prompt)
+                action, _ = self._infer(obs, frame_st_id=self.frame_st_id)
             ret = dict(action=action)
             if obs.get("return_action_latent", False):
                 ret["action_latent"] = self.last_action_latent

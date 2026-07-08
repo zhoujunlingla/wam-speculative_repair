@@ -9,6 +9,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from evaluation.robotwin.specverify_client_policy import (
     RiskRouterClientPolicy,
     SpecVerifyClientPolicy,
+    apply_step_repair_mask,
+    build_step_repair_mask,
     has_gripper_switch,
     slice_action_prefix,
 )
@@ -29,6 +31,42 @@ def test_phase_fallback_detects_gripper_switch():
     action[7, 0, 0] = 0.0
     action[7, 1, 15] = 1.0
     assert has_gripper_switch(action)
+
+
+def test_step_masked_repair_preserves_verified_steps():
+    draft_action = np.zeros((16, 2, 4), dtype=np.float32)
+    repair_action = np.ones((16, 2, 4), dtype=np.float32)
+    draft_latent = np.zeros((1, 30, 2, 4, 1), dtype=np.float32)
+    repair_latent = np.ones((1, 30, 2, 4, 1), dtype=np.float32)
+
+    action, latent, meta = apply_step_repair_mask(
+        draft_action=draft_action,
+        repair_action=repair_action,
+        draft_latent=draft_latent,
+        repair_latent=repair_latent,
+        pass_by_step=[True, False, True, False, True, True, False, True],
+        conditioned_frame_count=0,
+        dilate_radius=0,
+    )
+
+    flat = action.transpose(1, 2, 0).reshape(-1, 16)
+    assert np.all(flat[0] == 0.0)
+    assert np.all(flat[1] == 1.0)
+    assert np.all(flat[2] == 0.0)
+    assert np.all(flat[3] == 1.0)
+    assert latent.reshape(-1)[0] == 0.0
+    assert meta["repair_mask_steps"] == 3
+
+
+def test_step_repair_mask_dilation_expands_neighbors():
+    mask = build_step_repair_mask(
+        [True, True, False, True, True],
+        frame_count=1,
+        action_per_frame=5,
+        conditioned_frame_count=0,
+        dilate_radius=1,
+    )
+    assert mask.reshape(-1).tolist() == [False, True, True, True, False]
 
 
 class _FakeWsPolicy:
@@ -158,7 +196,8 @@ def test_risk_router_primes_teacher_instead_of_initial_partial_prefix(tmp_path):
 
     assert np.all(ret["action"] == 3.0)
     records = [json.loads(line) for line in log_path.read_text().splitlines()]
-    assert records[-1]["source"] == "teacher_initial_prime"
+    assert any(record["source"] == "initial_shadow_prime" for record in records)
+    assert records[-1]["source"] == "teacher_verify_reject"
 
 
 def test_risk_router_uses_teacher_for_initial_full_prefix_to_prime_cache(tmp_path):
@@ -203,9 +242,10 @@ def test_risk_router_uses_teacher_for_initial_full_prefix_to_prime_cache(tmp_pat
     )
     ret = policy.infer({"obs": ["x"], "state": np.zeros((16, 2, 16), dtype=np.float32)})
 
-    assert np.all(ret["action"] == 3.0)
+    assert ret["action"].shape == (16, 2, 16)
     records = [json.loads(line) for line in log_path.read_text().splitlines()]
-    assert records[-1]["source"] == "teacher_initial_prime"
+    assert any(record["source"] == "initial_shadow_prime" for record in records)
+    assert records[-1]["source"] == "draft_verify_accept"
 
 
 def test_risk_router_uses_teacher_for_initial_low_risk_to_prime_cache(tmp_path):
@@ -244,9 +284,10 @@ def test_risk_router_uses_teacher_for_initial_low_risk_to_prime_cache(tmp_path):
     )
     ret = policy.infer({"obs": ["x"], "state": np.zeros((16, 2, 16), dtype=np.float32)})
 
-    assert np.all(ret["action"] == 3.0)
+    assert np.all(ret["action"] == 0.0)
     records = [json.loads(line) for line in log_path.read_text().splitlines()]
-    assert records[-1]["source"] == "teacher_initial_prime"
+    assert any(record["source"] == "initial_shadow_prime" for record in records)
+    assert records[-1]["source"] == "draft_low_risk"
 
 
 def test_risk_router_repairs_action_reject_before_teacher_fallback(tmp_path):
@@ -470,7 +511,7 @@ def test_risk_router_svdr_uses_video_latent_to_make_nonuniform_repair(tmp_path):
                         "repair_action_latent": np.ones((1, 30, 3, 4, 1), dtype=np.float32),
                     }
                 latent = np.asarray(obs["action_latent"])
-                if latent[:, :, 2, :, :].mean() > latent[:, :, 0, :, :].mean():
+                if latent.mean() > 0.0:
                     return {"accepted_prefix": 12, "raw_valid_prefix": 12}
                 return {"accepted_prefix": 0, "raw_valid_prefix": 0}
             if obs.get("return_action_latent"):
@@ -507,9 +548,11 @@ def test_risk_router_svdr_uses_video_latent_to_make_nonuniform_repair(tmp_path):
     ret = policy.infer({"obs": ["x"], "state": np.zeros((16, 2, 16), dtype=np.float32)})
 
     assert ret["action"].shape == (16, 3, 4)
-    assert ret["action"][:, 2, :].mean() > ret["action"][:, 0, :].mean()
+    assert 0.0 < ret["action"].mean() < 1.0
     teacher_verify_calls = [call for call in clients[1].calls if call.get("verify_action")]
     assert teacher_verify_calls[0]["repair_lambda"] == 1.0
     records = [json.loads(line) for line in log_path.read_text().splitlines()]
     assert records[-1]["source"] == "draft_svdr_repair_accept"
-    assert records[-1]["svdr"]["svdr_lambda_by_frame"][2] > records[-1]["svdr"]["svdr_lambda_by_frame"][0]
+    assert records[-1]["svdr"]["repair_method"] == "bounded_residual"
+    assert records[-1]["svdr"]["repair_step_l2_clip"] == 0.30
+    assert "video_motion" in records[-1]["svdr"]

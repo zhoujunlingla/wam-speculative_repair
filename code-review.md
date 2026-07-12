@@ -35,6 +35,10 @@ Fixed during review:
    read-only attention path that never writes or duplicates persistent cache
    tensors. Episode reset also releases unused CUDA allocator blocks. The
    launcher can put rendering on a separate GPU.
+8. The first memory-fix smoke exposed the expected mixed-CFG shape: video CFG
+   initializes two cache rows while action guidance one produces one query
+   row. The read-only path now selects row zero exactly as the removed compact
+   cache did; guidance-enabled action verification selects rows `(0, 1)`.
 
 ## Risk Assessment
 

@@ -33,6 +33,11 @@
   one long smoke, then rerun the three tasks from 10 completed trials rather
   than merging partial episodes. Post-fix remote suite: `15 passed`, including
   exact equality of all cache tensors across read-only attention.
+- First post-fix smoke stopped before a valid episode because the teacher's
+  video-CFG cache has batch two while action guidance one has batch one. The
+  removed compact cache selected positive row zero; the read-only path now
+  carries the same explicit CFG-row mapping. No experiment score was produced
+  from this failed smoke.
 
 ### Prior Failure Carried Forward
 

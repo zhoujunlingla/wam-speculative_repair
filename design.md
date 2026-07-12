@@ -47,12 +47,13 @@ video/action cache, so skipped real updates cannot be discarded.
 Copying every live KV tensor into a K-batched temporary cache grows with long
 episodes and exceeds 80 GB when the policy server and RoboTwin renderer share a
 GPU. The A800 path therefore evaluates the same K probes serially against the
-teacher's existing cache. A read-only attention path concatenates live cached
-keys/values with the probe query without allocating cache slots, so all cache
-tensors and `frame_st_id` stay unchanged. Shared noise, probe levels, distance
-reduction, and prefix acceptance are identical; only K-way execution is
-microbatched. The launcher may place rendering clients on a separate GPU
-without changing the episode or policy configuration.
+teacher's existing cache. A read-only attention path selects the same CFG cache
+rows as the action branch and concatenates live cached keys/values with the
+probe query without allocating cache slots, so all cache tensors and
+`frame_st_id` stay unchanged. Shared noise, probe levels, distance reduction,
+and prefix acceptance are identical; only K-way execution is microbatched. The
+launcher may place rendering clients on a separate GPU without changing the
+episode or policy configuration.
 
 ## Verifier
 

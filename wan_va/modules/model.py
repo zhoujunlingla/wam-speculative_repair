@@ -424,7 +424,7 @@ class WanAttention(torch.nn.Module):
         rotary_emb,
         update_cache=0,
         cache_name='pos',
-        readonly_cache=False,
+        readonly_cache_indices=None,
     ):
         kv_cache = self.attn_caches[
             cache_name] if (self.attn_caches is not None) and (cache_name in self.attn_caches) else None
@@ -446,14 +446,26 @@ class WanAttention(torch.nn.Module):
             query = apply_rotary_emb(query, rotary_emb)
             key = apply_rotary_emb(key, rotary_emb)
         slots = None
-        if readonly_cache and kv_cache is not None and kv_cache['k'] is not None:
+        if readonly_cache_indices is not None and kv_cache is not None and kv_cache['k'] is not None:
             key_pool = kv_cache['k']
             value_pool = kv_cache['v']
-            if key_pool.shape[0] != key.shape[0]:
+            indices = tuple(int(index) for index in readonly_cache_indices)
+            if len(indices) != key.shape[0] or not indices or \
+                    min(indices) < 0 or max(indices) >= key_pool.shape[0]:
                 raise RuntimeError('read-only cache batch does not match query batch')
+            if indices == tuple(range(key_pool.shape[0])):
+                selected_key = key_pool
+                selected_value = value_pool
+            elif len(indices) == 1:
+                selected_key = key_pool[indices[0]:indices[0] + 1]
+                selected_value = value_pool[indices[0]:indices[0] + 1]
+            else:
+                index = torch.as_tensor(indices, device=key_pool.device)
+                selected_key = key_pool.index_select(0, index)
+                selected_value = value_pool.index_select(0, index)
             valid = kv_cache['mask'].nonzero(as_tuple=False).squeeze(-1)
-            key = torch.cat((key_pool[:, valid], key), dim=1)
-            value = torch.cat((value_pool[:, valid], value), dim=1)
+            key = torch.cat((selected_key[:, valid], key), dim=1)
+            value = torch.cat((selected_value[:, valid], value), dim=1)
         elif kv_cache is not None and kv_cache['k'] is not None:
             slots = self.update_cache(cache_name,
                                       key,
@@ -468,7 +480,7 @@ class WanAttention(torch.nn.Module):
 
         hidden_states = self.attn_op(query, key, value)
 
-        if update_cache == 0 and not readonly_cache:
+        if update_cache == 0 and readonly_cache_indices is None:
             if kv_cache is not None and kv_cache['k'] is not None:
                 self.restore_cache(cache_name, slots)
 
@@ -534,7 +546,7 @@ class WanTransformerBlock(nn.Module):
         rotary_emb,
         update_cache=0,
         cache_name='pos',
-        readonly_cache=False,
+        readonly_cache_indices=None,
     ) -> torch.Tensor:
         temb_scale_shift_table = self.scale_shift_table[None] + temb.float()
         shift_msa, scale_msa, gate_msa, c_shift_msa, c_scale_msa, c_gate_msa = \
@@ -555,7 +567,7 @@ class WanTransformerBlock(nn.Module):
                                  rotary_emb,
                                  update_cache=update_cache,
                                  cache_name=cache_name,
-                                 readonly_cache=readonly_cache)
+                                 readonly_cache_indices=readonly_cache_indices)
         hidden_states = (hidden_states.float() +
                          attn_output * gate_msa).type_as(hidden_states)
 
@@ -820,7 +832,7 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin):
         cache_name="pos",
         action_mode=False,
         train_mode=False,
-        readonly_cache=False,
+        readonly_cache_indices=None,
     ):
         r"""
         Forward pass through the diffusion model
@@ -881,7 +893,7 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin):
                                          rotary_emb,
                                          update_cache=update_cache,
                                          cache_name=cache_name,
-                                         readonly_cache=readonly_cache)
+                                         readonly_cache_indices=readonly_cache_indices)
         temb_scale_shift_table = self.scale_shift_table[None] + temb[:, :, None, ...]
         shift, scale = rearrange(temb_scale_shift_table,
                                  'b l n c -> b n l c').chunk(2, dim=1)

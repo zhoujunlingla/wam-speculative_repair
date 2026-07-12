@@ -390,13 +390,14 @@ class VA_Server:
             conditioned_frame_count=conditioned_frame_count,
             guidance_scale=guidance_scale,
         )
+        readonly_cache_indices = (0, 1) if guidance_scale > 1 else (0, )
 
         action_noise_pred = self.transformer(
             input_dict,
             update_cache=0,
             cache_name=cache_name,
             action_mode=True,
-            readonly_cache=True,
+            readonly_cache_indices=readonly_cache_indices,
         )
 
         action_noise_pred = rearrange(action_noise_pred,

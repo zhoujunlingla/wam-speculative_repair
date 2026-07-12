@@ -18,7 +18,7 @@ def test_readonly_attention_preserves_every_cache_tensor():
         head_dim=4,
         device=torch.device("cpu"),
         dtype=torch.float32,
-        batch_size=1,
+        batch_size=2,
     )
     cache = attention.attn_caches["pos"]
     cache["k"].zero_()
@@ -37,7 +37,7 @@ def test_readonly_attention_preserves_every_cache_tensor():
         rotary_emb=None,
         update_cache=0,
         cache_name="pos",
-        readonly_cache=True,
+        readonly_cache_indices=(0, ),
     )
 
     assert output.shape == query.shape

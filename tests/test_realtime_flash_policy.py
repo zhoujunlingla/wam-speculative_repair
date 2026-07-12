@@ -254,6 +254,48 @@ def test_cumulative_flow_budget_triggers_next_full_and_resets():
     assert policy.flow_error_budget == 0.0
 
 
+def test_second_flow_budget_refresh_runs_two_teacher_rounds():
+    distances = np.full((2, 2, 16), 0.04, dtype=np.float32)
+    events = []
+    draft = _FakeModel("draft", events)
+    teacher = _FakeModel(
+        "teacher",
+        events,
+        verify_results=(
+            {"accepted_prefix": 32, "distances": distances},
+            {"accepted_prefix": 32, "distances": distances},
+        ),
+    )
+    policy = RealtimeFlashPolicy(
+        draft,
+        teacher,
+        pf_interval=0,
+        flow_budget_threshold=0.03,
+        flow_budget_burst_after=2,
+        flow_budget_burst_rounds=2,
+        rng=np.random.default_rng(7),
+    )
+    policy.infer({"reset": True, "prompt": "test task"})
+    initial = policy.infer(_action_request())
+    policy.infer(_cache_request("anchor", initial["action"]))
+
+    flash_1 = policy.infer(_action_request())
+    policy.infer(_cache_request("flash-1", flash_1["action"]))
+    refresh_1 = policy.infer(_action_request())
+    policy.infer(_cache_request("refresh-1", refresh_1["action"]))
+    flash_2 = policy.infer(_action_request())
+    policy.infer(_cache_request("flash-2", flash_2["action"]))
+    refresh_2 = policy.infer(_action_request())
+    policy.infer(_cache_request("refresh-2", refresh_2["action"]))
+    burst = policy.infer(_action_request())
+
+    assert refresh_1["full_reason"] == "flow_budget"
+    assert refresh_2["full_reason"] == "flow_budget"
+    assert burst["full_reason"] == "flow_budget_burst"
+    assert policy.flow_budget_refresh_count == 2
+    assert policy.teacher_burst_rounds_left == 0
+
+
 def test_teacher_reconstructed_gripper_switch_forces_replan():
     policy, _, _, _ = _anchored_policy(
         pf_interval=10,

@@ -187,3 +187,20 @@ ordering follow the existing state machine. Remote policy/specverify tests pass
 
 Decision: allowed to proceed to a real step-zero switch smoke. Consensus-based
 gripper acceptance remains disabled.
+
+## V2b Repeated-Budget Teacher Burst Review
+
+No blocking correctness finding remains. The first budget crossing retains the
+existing one-round refresh. From the configured crossing count onward, the
+counter schedules exactly two consecutive full rounds including the triggering
+round. Cache acknowledgement still occurs between them, so the second teacher
+action conditions on the first teacher action rather than a stale snapshot.
+
+The refresh count and burst state reset per episode, while ordinary full rounds
+reset only the accumulated discrepancy. Defaults are zero, preserving all prior
+commands. Endpoint acceptance, gripper routing, repair, and video paths are
+unchanged.
+
+Remote policy/specverify suite passes `19/19`; local compile and diff checks
+pass. Allowed to run a two-task (`hanging_mug`, `open_microwave`) TN=5
+comparison while the non-burst V2 run finishes.

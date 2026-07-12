@@ -133,6 +133,8 @@ def main() -> None:
     parser.add_argument("--tau", type=float, nargs="+", default=(50.0, 100.0))
     parser.add_argument("--pf-interval", type=int, default=2)
     parser.add_argument("--flow-budget-threshold", type=float, default=0.0)
+    parser.add_argument("--flow-budget-burst-after", type=int, default=0)
+    parser.add_argument("--flow-budget-burst-rounds", type=int, default=0)
     parser.add_argument(
         "--teacher-gripper-fallback",
         action=argparse.BooleanOptionalAction,
@@ -158,6 +160,8 @@ def main() -> None:
         "--tau-timesteps", *[str(value) for value in args.tau],
         "--pf-interval", str(args.pf_interval),
         "--flow-budget-threshold", str(args.flow_budget_threshold),
+        "--flow-budget-burst-after", str(args.flow_budget_burst_after),
+        "--flow-budget-burst-rounds", str(args.flow_budget_burst_rounds),
         "--log-path", str(metrics_log),
     ]
     if not args.teacher_gripper_fallback:
@@ -228,6 +232,9 @@ def main() -> None:
         "threshold": args.threshold,
         "tau": args.tau,
         "pf_interval": args.pf_interval,
+        "flow_budget_threshold": args.flow_budget_threshold,
+        "flow_budget_burst_after": args.flow_budget_burst_after,
+        "flow_budget_burst_rounds": args.flow_budget_burst_rounds,
         "teacher_gripper_fallback": args.teacher_gripper_fallback,
         "started_at": started,
         "ended_at": datetime.now().isoformat(timespec="seconds"),

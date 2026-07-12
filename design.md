@@ -190,6 +190,21 @@ The partial V2 run before this fix is marked invalid. No consensus-based phase
 acceptance may be enabled until this state parity fix passes unit tests and a
 real smoke.
 
+### V2b: Escalate repeated budget refreshes
+
+Valid episode telemetry shows that one flow-budget refresh is often sufficient
+for a successful episode, while stuck episodes repeatedly cross the same budget
+two to seven times. Isolated teacher chunks do not reliably return those
+trajectories to the teacher manifold. V2b therefore leaves the first budget
+refresh unchanged, but on the second and later crossings executes a configurable
+two-round teacher burst. The burst is counted in full action rounds, survives
+the intervening cache acknowledgement, and resets only at episode reset.
+
+This is a quality recovery mechanism for repeatedly detected drift, not a new
+risk score. It does not alter endpoint acceptance, gripper fallback, repair, or
+video signals. The first test is restricted to `hanging_mug` and
+`open_microwave`; it must improve completed-trial success before replacing V2.
+
 ### Verifier calibration telemetry
 
 The V1 smoke showed that removing periodic and reconstructed-gripper full paths

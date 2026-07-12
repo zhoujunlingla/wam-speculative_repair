@@ -151,6 +151,8 @@ class RealtimeFlashPolicy:
         gripper_threshold: float = 0.5,
         teacher_gripper_fallback: bool = True,
         flow_budget_threshold: float = 0.0,
+        flow_budget_burst_after: int = 0,
+        flow_budget_burst_rounds: int = 0,
         rng: Optional[np.random.Generator] = None,
         log_path: Optional[str] = None,
     ) -> None:
@@ -162,6 +164,8 @@ class RealtimeFlashPolicy:
             raise ValueError("action_per_frame must be positive")
         if not np.isfinite(flow_budget_threshold) or flow_budget_threshold < 0:
             raise ValueError("flow_budget_threshold must be non-negative")
+        if flow_budget_burst_after < 0 or flow_budget_burst_rounds < 0:
+            raise ValueError("flow budget burst values must be non-negative")
         tau_timesteps = tuple(float(timestep) for timestep in tau_timesteps)
         if not tau_timesteps:
             raise ValueError("tau_timesteps must be non-empty")
@@ -176,6 +180,8 @@ class RealtimeFlashPolicy:
         self.gripper_threshold = float(gripper_threshold)
         self.teacher_gripper_fallback = bool(teacher_gripper_fallback)
         self.flow_budget_threshold = float(flow_budget_threshold)
+        self.flow_budget_burst_after = int(flow_budget_burst_after)
+        self.flow_budget_burst_rounds = int(flow_budget_burst_rounds)
         self.rng = rng or np.random.default_rng()
         self.log_path = Path(log_path) if log_path else None
         if self.log_path:
@@ -194,6 +200,8 @@ class RealtimeFlashPolicy:
         self.last_source = None
         self.last_gripper = None
         self.flow_error_budget = 0.0
+        self.flow_budget_refresh_count = 0
+        self.teacher_burst_rounds_left = 0
         self._draft_primed = False
 
     def _call(self, model, request: dict) -> dict:
@@ -248,6 +256,8 @@ class RealtimeFlashPolicy:
             return "initial"
         if self.force_full_reason:
             return self.force_full_reason
+        if self.teacher_burst_rounds_left > 0:
+            return "flow_budget_burst"
         if self.pf_interval > 0 and self.flash_rounds_since_full >= self.pf_interval:
             return "periodic"
         return None
@@ -314,6 +324,8 @@ class RealtimeFlashPolicy:
         self.flash_rounds_since_full = 0
         self.flow_error_budget = 0.0
         self.force_full_reason = None
+        if self.teacher_burst_rounds_left > 0:
+            self.teacher_burst_rounds_left -= 1
         self.round_id += 1
 
         response = dict(teacher_response)
@@ -479,6 +491,12 @@ class RealtimeFlashPolicy:
             and self.flow_error_budget >= self.flow_budget_threshold
         ):
             self.force_full_reason = "flow_budget"
+            self.flow_budget_refresh_count += 1
+            if (
+                self.flow_budget_burst_after > 0
+                and self.flow_budget_refresh_count >= self.flow_budget_burst_after
+            ):
+                self.teacher_burst_rounds_left = self.flow_budget_burst_rounds
         executed_action = slice_action_prefix(action, accepted_prefix)
         self._stage_gripper(executed_action)
         response = {
@@ -501,6 +519,8 @@ class RealtimeFlashPolicy:
             teacher_gripper_switch=teacher_gripper_switch,
             flow_budget_charge=flow_budget_charge,
             flow_error_budget=self.flow_error_budget,
+            flow_budget_refresh_count=self.flow_budget_refresh_count,
+            teacher_burst_rounds_left=self.teacher_burst_rounds_left,
             **verify_telemetry,
             elapsed_sec=time.perf_counter() - start,
         )

@@ -424,6 +424,7 @@ class WanAttention(torch.nn.Module):
         rotary_emb,
         update_cache=0,
         cache_name='pos',
+        readonly_cache=False,
     ):
         kv_cache = self.attn_caches[
             cache_name] if (self.attn_caches is not None) and (cache_name in self.attn_caches) else None
@@ -445,7 +446,15 @@ class WanAttention(torch.nn.Module):
             query = apply_rotary_emb(query, rotary_emb)
             key = apply_rotary_emb(key, rotary_emb)
         slots = None
-        if kv_cache is not None and kv_cache['k'] is not None:
+        if readonly_cache and kv_cache is not None and kv_cache['k'] is not None:
+            key_pool = kv_cache['k']
+            value_pool = kv_cache['v']
+            if key_pool.shape[0] != key.shape[0]:
+                raise RuntimeError('read-only cache batch does not match query batch')
+            valid = kv_cache['mask'].nonzero(as_tuple=False).squeeze(-1)
+            key = torch.cat((key_pool[:, valid], key), dim=1)
+            value = torch.cat((value_pool[:, valid], value), dim=1)
+        elif kv_cache is not None and kv_cache['k'] is not None:
             slots = self.update_cache(cache_name,
                                       key,
                                       value,
@@ -459,7 +468,7 @@ class WanAttention(torch.nn.Module):
 
         hidden_states = self.attn_op(query, key, value)
 
-        if update_cache == 0:
+        if update_cache == 0 and not readonly_cache:
             if kv_cache is not None and kv_cache['k'] is not None:
                 self.restore_cache(cache_name, slots)
 
@@ -525,6 +534,7 @@ class WanTransformerBlock(nn.Module):
         rotary_emb,
         update_cache=0,
         cache_name='pos',
+        readonly_cache=False,
     ) -> torch.Tensor:
         temb_scale_shift_table = self.scale_shift_table[None] + temb.float()
         shift_msa, scale_msa, gate_msa, c_shift_msa, c_scale_msa, c_gate_msa = \
@@ -544,7 +554,8 @@ class WanTransformerBlock(nn.Module):
                                  norm_hidden_states,
                                  rotary_emb,
                                  update_cache=update_cache,
-                                 cache_name=cache_name)
+                                 cache_name=cache_name,
+                                 readonly_cache=readonly_cache)
         hidden_states = (hidden_states.float() +
                          attn_output * gate_msa).type_as(hidden_states)
 
@@ -809,6 +820,7 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin):
         cache_name="pos",
         action_mode=False,
         train_mode=False,
+        readonly_cache=False,
     ):
         r"""
         Forward pass through the diffusion model
@@ -868,7 +880,8 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin):
                                          timestep_proj,
                                          rotary_emb,
                                          update_cache=update_cache,
-                                         cache_name=cache_name)
+                                         cache_name=cache_name,
+                                         readonly_cache=readonly_cache)
         temb_scale_shift_table = self.scale_shift_table[None] + temb[:, :, None, ...]
         shift, scale = rearrange(temb_scale_shift_table,
                                  'b l n c -> b n l c').chunk(2, dim=1)

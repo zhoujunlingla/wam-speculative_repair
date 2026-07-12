@@ -42,6 +42,18 @@ video/action cache, so skipped real updates cannot be discarded.
 - Before the next teacher full action, queued updates are replayed in order.
 - Action-only verification must not mutate cache contents or `frame_st_id`.
 
+### A800 memory-safe verification
+
+Copying every live KV tensor into a K-batched temporary cache grows with long
+episodes and exceeds 80 GB when the policy server and RoboTwin renderer share a
+GPU. The A800 path therefore evaluates the same K probes serially against the
+teacher's existing cache. A read-only attention path concatenates live cached
+keys/values with the probe query without allocating cache slots, so all cache
+tensors and `frame_st_id` stay unchanged. Shared noise, probe levels, distance
+reduction, and prefix acceptance are identical; only K-way execution is
+microbatched. The launcher may place rendering clients on a separate GPU
+without changing the episode or policy configuration.
+
 ## Verifier
 
 For shared noise `eps` and each sigma `s_k`:
@@ -95,4 +107,6 @@ gate passes.
 - Unit-test first-full, periodic refresh, L=0 replan, and gripper fallback.
 - Unit-test teacher anchor/pending-update transitions.
 - Assert verifier calls preserve teacher cache state and `frame_st_id`.
+- Run a long-episode smoke with server and renderer memory recorded; no
+  per-probe temporary KV cache may remain allocated.
 - Run direct draft and teacher smokes before speculative evaluation.

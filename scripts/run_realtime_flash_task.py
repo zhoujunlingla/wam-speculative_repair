@@ -124,6 +124,7 @@ def main() -> None:
     parser.add_argument("--mode", choices=("spec", "draft_only", "teacher_only"), default="spec")
     parser.add_argument("--task", required=True)
     parser.add_argument("--gpu", type=int, required=True)
+    parser.add_argument("--client-gpu", type=int)
     parser.add_argument("--port", type=int, required=True)
     parser.add_argument("--test-num", type=int, default=10)
     parser.add_argument("--run-root", type=Path, required=True)
@@ -133,13 +134,14 @@ def main() -> None:
     parser.add_argument("--pf-interval", type=int, default=2)
     parser.add_argument("--server-timeout", type=int, default=600)
     args = parser.parse_args()
+    client_gpu = args.gpu if args.client_gpu is None else args.client_gpu
 
     for root in (args.run_root, args.result_root):
         (root / "logs").mkdir(parents=True, exist_ok=True)
     started = datetime.now().isoformat(timespec="seconds")
     metrics_log = args.run_root / "logs" / f"specverify_{args.task}.jsonl"
     server_log_path = args.run_root / "logs" / f"server_{args.task}_g{args.gpu}.log"
-    client_log_path = args.run_root / "logs" / f"client_{args.task}_g{args.gpu}.log"
+    client_log_path = args.run_root / "logs" / f"client_{args.task}_g{client_gpu}.log"
     server_cmd = [
         sys.executable,
         "wan_va/wan_va_single_spec_server.py",
@@ -169,7 +171,13 @@ def main() -> None:
         "--test_num", str(args.test_num),
         "--port", str(args.port),
     ]
-    command = {"server": server_cmd, "client": client_cmd, "started_at": started}
+    command = {
+        "server": server_cmd,
+        "client": client_cmd,
+        "server_gpu": args.gpu,
+        "client_gpu": client_gpu,
+        "started_at": started,
+    }
     (args.result_root / f"command_{args.task}.json").write_text(json.dumps(command, indent=2))
 
     server_log = server_log_path.open("a", buffering=1)
@@ -187,7 +195,7 @@ def main() -> None:
             client = subprocess.run(
                 client_cmd,
                 cwd=CODE,
-                env=runtime_env(args.gpu, server=False),
+                env=runtime_env(client_gpu, server=False),
                 stdout=client_log,
                 stderr=subprocess.STDOUT,
             )
@@ -207,6 +215,7 @@ def main() -> None:
         "mode": args.mode,
         "task": args.task,
         "gpu": args.gpu,
+        "client_gpu": client_gpu,
         "threshold": args.threshold,
         "tau": args.tau,
         "pf_interval": args.pf_interval,

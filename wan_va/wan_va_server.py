@@ -3,7 +3,6 @@ import argparse
 import os
 import sys
 import time
-from contextlib import contextmanager
 from functools import partial
 from PIL import Image
 from diffusers.video_processor import VideoProcessor
@@ -50,68 +49,6 @@ from specverify import (
     scheduler_step_to_final_batched,
     stitch_action_prefix,
 )
-
-
-@contextmanager
-def _readonly_verify_cache(transformer, source_name, batch_indices,
-                           action_tokens):
-    """Expose a compact batched copy of the reference cache for one forward."""
-
-    blocks = getattr(transformer, 'blocks', None)
-    if blocks is None:
-        yield source_name
-        return
-
-    target_name = f'{source_name}__verify_{id(batch_indices)}'
-    installed = []
-    try:
-        for block in blocks:
-            caches = block.attn1.attn_caches
-            source = caches.get(source_name) if caches is not None else None
-            if source is None:
-                raise RuntimeError(
-                    'action verification requires an initialized reference cache')
-            source_batch = source['k'].shape[0]
-            if not batch_indices or min(batch_indices) < 0 or max(
-                    batch_indices) >= source_batch:
-                raise RuntimeError('verifier cache batch does not match CFG state')
-
-            indices = torch.as_tensor(batch_indices,
-                                      dtype=torch.long,
-                                      device=source['k'].device)
-            valid = source['mask'].nonzero(as_tuple=False).flatten()
-            valid_count = valid.numel()
-            capacity = valid_count + int(action_tokens)
-
-            # ponytail: copy only live slots plus this action query, not the
-            # multi-gigabyte free cache window. The source tensors stay untouched.
-            key = source['k'].new_empty(
-                (len(batch_indices), capacity, *source['k'].shape[2:]))
-            value = source['v'].new_empty(
-                (len(batch_indices), capacity, *source['v'].shape[2:]))
-            ids = source['id'].new_full((capacity, ), -1)
-            mask = source['mask'].new_zeros((capacity, ))
-            is_pred = source['is_pred'].new_zeros((capacity, ))
-            if valid_count:
-                key[:, :valid_count] = source['k'].index_select(
-                    0, indices).index_select(1, valid)
-                value[:, :valid_count] = source['v'].index_select(
-                    0, indices).index_select(1, valid)
-                ids[:valid_count] = source['id'][valid]
-                mask[:valid_count] = True
-                is_pred[:valid_count] = source['is_pred'][valid]
-            caches[target_name] = {
-                'k': key,
-                'v': value,
-                'id': ids,
-                'mask': mask,
-                'is_pred': is_pred,
-            }
-            installed.append(caches)
-        yield target_name
-    finally:
-        for caches in installed:
-            caches.pop(target_name, None)
 
 
 class VA_Server:
@@ -418,6 +355,9 @@ class VA_Server:
         noisy_actions = noisy_actions.to(device=self.device,
                                          dtype=self.dtype).clone()
         batch_size = noisy_actions.shape[0]
+        if batch_size != 1:
+            raise ValueError(
+                'memory-safe action verification expects one probe per forward')
         frame_chunk_size = noisy_actions.shape[2]
         action_timesteps = torch.as_tensor(action_timesteps,
                                            dtype=torch.float32,
@@ -451,22 +391,13 @@ class VA_Server:
             guidance_scale=guidance_scale,
         )
 
-        if guidance_scale > 1:
-            cache_batch_indices = [0] * batch_size + [1] * batch_size
-        else:
-            cache_batch_indices = [0] * batch_size
-        with _readonly_verify_cache(
-                self.transformer,
-                cache_name,
-                cache_batch_indices,
-                action_tokens=noisy_actions.shape[2] *
-                noisy_actions.shape[3]) as verify_cache_name:
-            action_noise_pred = self.transformer(
-                input_dict,
-                update_cache=0,
-                cache_name=verify_cache_name,
-                action_mode=True,
-            )
+        action_noise_pred = self.transformer(
+            input_dict,
+            update_cache=0,
+            cache_name=cache_name,
+            action_mode=True,
+            readonly_cache=True,
+        )
 
         action_noise_pred = rearrange(action_noise_pred,
                                       'b (f n) c -> b c f n 1',
@@ -530,12 +461,16 @@ class VA_Server:
             noise=noise_batch,
             timesteps=tau_timesteps,
         )
-        velocity = self.forward_action_only_verify(
-            z_tau,
-            tau_timesteps,
-            frame_st_id=frame_st_id,
-            cache_name=cache_name,
-        )
+        # ponytail: microbatch K probes through the read-only cache path. A
+        # parallel temporary KV copy grows with episode length on A800.
+        velocity = torch.cat([
+            self.forward_action_only_verify(
+                z_tau[index:index + 1],
+                tau_timesteps[index:index + 1],
+                frame_st_id=frame_st_id,
+                cache_name=cache_name,
+            ) for index in range(batch_size)
+        ], dim=0)
         reconstructed = scheduler_step_to_final_batched(
             scheduler=self.verify_scheduler,
             model_output=velocity,
@@ -694,6 +629,8 @@ class VA_Server:
         #### clean vae and transformer cache
         self.transformer.clear_cache(self.cache_name)
         self.streaming_vae.clear_cache()
+        if self.device.type == 'cuda':
+            torch.cuda.empty_cache()
 
         self.action_per_frame = self.job_config.action_per_frame
         self.height, self.width = self.job_config.height, self.job_config.width

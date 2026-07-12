@@ -20,6 +20,19 @@
   initial teacher full/cache anchor, accepted draft flash rounds, performed a
   teacher-gripper `L=0` same-observation replan, replayed pending cache updates,
   and reached periodic refresh without a cache or shape exception.
+- First formal run root:
+  `20260712_115916_rtflash_full_k2d015_pf2_4task_tn10_g2467`.
+  `turn_switch` completed at `9/10`; `hanging_mug` stopped at `1/2`,
+  `place_can_basket` at `4/5`, and `open_microwave` at `1/1`. The incomplete
+  tasks all hit the same OOM in `_readonly_verify_cache` after the temporary
+  K-batched KV copy grew with episode length. These partial scores are not a
+  valid four-task result.
+- Memory repair removes the temporary cache, microbatches the unchanged K
+  probes through a cache-preserving attention path, clears unused allocator
+  blocks on reset, and allows clients to render on a separate GPU. Next gate:
+  one long smoke, then rerun the three tasks from 10 completed trials rather
+  than merging partial episodes. Post-fix remote suite: `15 passed`, including
+  exact equality of all cache tensors across read-only attention.
 
 ### Prior Failure Carried Forward
 

@@ -29,32 +29,39 @@ Fixed during review:
 6. The first launcher used a raw TCP readiness probe, which produced a false
    WebSocket handshake error. Readiness now follows the server's explicit log
    marker and does not touch the socket.
+7. The first TN=10 run copied every block's live KV cache for each parallel
+   verifier call. Cache size grew with long episodes until three tasks OOMed
+   near 79 GB. Verification now microbatches K probes and uses an explicit
+   read-only attention path that never writes or duplicates persistent cache
+   tensors. Episode reset also releases unused CUDA allocator blocks. The
+   launcher can put rendering on a separate GPU.
 
 ## Risk Assessment
 
-Risk is medium until GPU smoke passes.
+Risk is medium until the repaired long-episode GPU smoke passes.
 
-- The compact temporary verification cache avoids mutating the teacher
-  reference, but must be validated against the configured FSDP wrapper.
+- The new read-only attention path is limited to action verification and must
+  be checked for numerical equivalence and exact cache preservation in the
+  configured torch-attention model.
 - LingBot temporal cache updates are queued after draft actions and replayed
   before full inference. Shape/order errors must fail the smoke before any
   benchmark is launched.
 - Prefixes are quantized to 16 actions because that is the model's temporal
   observation boundary; this is the sole structural deviation from pi0.
-- One A800 must fit both models plus RoboTwin rendering, previously measured at
-  roughly 61.5 GB but rechecked for this clean commit.
+- A combined server/client reached the A800 limit in long episodes. Formal
+  completion uses separate server and render GPUs even after removing the
+  temporary KV copy, and records both assignments.
 
 ## Checks
 
 - `py_compile` passed for policy, client, server entrypoint, launcher, and
   configs.
 - Eleven fake-model state-machine tests passed with a direct function runner.
-- Verifier helper tests and the real cache/read-only contract still require the
-  A800 torch environment.
+- Remote post-fix suite: `15 passed`, including exact equality of every KV
+  cache tensor before and after read-only attention.
 
 ## Decision
 
-Proceed only to remote focused tests and one real `hanging_mug` smoke. The
-four-task TN=10 evaluation is allowed only after the smoke emits a full round,
-an accepted flash round or valid zero-prefix replan, and a real cache update
-without exception.
+Proceed only to remote focused tests and a real long-episode smoke. Resume the
+three incomplete TN=10 tasks only after read-only verification runs without
+cache mutation or rising persistent verifier memory.

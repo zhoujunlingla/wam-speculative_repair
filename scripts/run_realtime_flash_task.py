@@ -140,6 +140,9 @@ def main() -> None:
     parser.add_argument("--flow-budget-burst-after", type=int, default=0)
     parser.add_argument("--flow-budget-burst-rounds", type=int, default=0)
     parser.add_argument("--flow-budget-burst-limit", type=int, default=0)
+    parser.add_argument("--delayed-error-threshold", type=float, default=0.0)
+    parser.add_argument("--delayed-error-consecutive", type=int, default=2)
+    parser.add_argument("--delayed-error-teacher-rounds", type=int, default=2)
     parser.add_argument("--gripper-full-window", type=int, default=1)
     parser.add_argument("--gripper-consensus", action="store_true")
     parser.add_argument(
@@ -170,6 +173,9 @@ def main() -> None:
         "--flow-budget-burst-after", str(args.flow_budget_burst_after),
         "--flow-budget-burst-rounds", str(args.flow_budget_burst_rounds),
         "--flow-budget-burst-limit", str(args.flow_budget_burst_limit),
+        "--delayed-error-threshold", str(args.delayed_error_threshold),
+        "--delayed-error-consecutive", str(args.delayed_error_consecutive),
+        "--delayed-error-teacher-rounds", str(args.delayed_error_teacher_rounds),
         "--gripper-full-window", str(args.gripper_full_window),
         "--log-path", str(metrics_log),
     ]
@@ -247,6 +253,9 @@ def main() -> None:
         "flow_budget_burst_after": args.flow_budget_burst_after,
         "flow_budget_burst_rounds": args.flow_budget_burst_rounds,
         "flow_budget_burst_limit": args.flow_budget_burst_limit,
+        "delayed_error_threshold": args.delayed_error_threshold,
+        "delayed_error_consecutive": args.delayed_error_consecutive,
+        "delayed_error_teacher_rounds": args.delayed_error_teacher_rounds,
         "gripper_full_window": args.gripper_full_window,
         "gripper_consensus": args.gripper_consensus,
         "teacher_gripper_fallback": args.teacher_gripper_fallback,

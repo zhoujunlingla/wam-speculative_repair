@@ -334,3 +334,35 @@ is shadow-only and cannot change current actions.
 Remote policy/specverify suite passes `21/21`; local compile and diff checks
 pass. Allowed to run matched shadow collection; not allowed to gate teacher use
 until separation is demonstrated.
+
+## Persistent Delayed-Error Recovery Review
+
+No blocking correctness finding remains after an independent state-machine
+review.
+
+- Error persistence is updated only when acknowledging an actually executed
+  draft cache update. Replans, rejected tails, and teacher actions cannot add a
+  sample.
+- A two-round recovery includes an already-scheduled flow refresh as its first
+  round; the counters overlap rather than stacking a third teacher round.
+- Every full teacher action and episode reset clears the streak, so evidence
+  cannot leak across a new teacher anchor or episode.
+- Threshold zero disables routing and preserves the prior behavior. All three
+  launcher parameters reach the policy and are saved in the run summary.
+- Tests cover persistent triggering, low-error streak reset, and overlap with
+  an already-scheduled flow refresh.
+
+Residual risks: overlapping trigger telemetry reports only the highest-priority
+`full_reason`, although the preceding cache-update record retains the delayed
+trigger; the real server is trusted to provide finite `latent_nrmse`. The first
+pilot must remain small because the threshold was selected from only 12 shadow
+episodes.
+
+Verification: remote policy/launcher/specverify suite `33 passed`; local
+`py_compile` and `git diff --check` passed. The optional read-only-cache test
+cannot collect under the system Python because `diffusers` is absent; that path
+was unchanged and had passed in its configured model environment previously.
+
+Decision: allowed to proceed to a four-task TN=3 pilot with delayed threshold
+0.55, two consecutive high-error updates, two teacher recovery rounds, and a
+0.18 single flow refresh. Repair and adaptive K remain disabled.

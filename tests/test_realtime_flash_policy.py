@@ -26,12 +26,15 @@ def _action(switch_step=None, value=0.0):
 
 
 class _FakeModel:
-    def __init__(self, role, events, action=None, verify_results=()):
+    def __init__(
+        self, role, events, action=None, verify_results=(), delayed_errors=()
+    ):
         self.role = role
         self.events = events
         self.action = _action(value=0.25) if action is None else action
         self.action_latent = np.zeros((1, 30, 2, 16, 1), dtype=np.float32)
         self.verify_results = deque(verify_results)
+        self.delayed_errors = deque(delayed_errors)
         self.calls = []
         self.cache = []
         self.frame_st_id = 0
@@ -65,7 +68,10 @@ class _FakeModel:
             self.cache.append(request["tag"])
             self.frame_st_id += int(np.asarray(request["state"]).shape[1])
             if request.get("compare_video_prediction", False):
-                return {"delayed_video_error": {"latent_nrmse": 0.25}}
+                latent_nrmse = (
+                    self.delayed_errors.popleft() if self.delayed_errors else 0.25
+                )
+                return {"delayed_video_error": {"latent_nrmse": latent_nrmse}}
             return {}
         if kind == "verify":
             result = self.verify_results.popleft() if self.verify_results else 32
@@ -538,6 +544,106 @@ def test_executed_draft_cache_update_logs_delayed_video_error(tmp_path):
     assert draft_action["request"]["track_video_prediction"] is True
     assert draft_cache["request"]["compare_video_prediction"] is True
     assert record["delayed_video_error"]["latent_nrmse"] == 0.25
+
+
+def test_persistent_delayed_error_runs_two_teacher_rounds(tmp_path):
+    events = []
+    draft = _FakeModel("draft", events, delayed_errors=(0.6, 0.57))
+    teacher = _FakeModel("teacher", events)
+    log_path = tmp_path / "metrics.jsonl"
+    policy = RealtimeFlashPolicy(
+        draft,
+        teacher,
+        pf_interval=20,
+        delayed_error_threshold=0.55,
+        delayed_error_consecutive=2,
+        delayed_error_teacher_rounds=2,
+        log_path=log_path,
+        rng=np.random.default_rng(7),
+    )
+    policy.infer({"reset": True, "prompt": "test task"})
+    initial = policy.infer(_action_request())
+    policy.infer(_cache_request("anchor", initial["action"]))
+
+    flash_1 = policy.infer(_action_request())
+    policy.infer(_cache_request("flash-1", flash_1["action"]))
+    assert policy.delayed_error_streak == 1
+    flash_2 = policy.infer(_action_request())
+    policy.infer(_cache_request("flash-2", flash_2["action"]))
+
+    full_1 = policy.infer(_action_request())
+    policy.infer(_cache_request("recovery-1", full_1["action"]))
+    full_2 = policy.infer(_action_request())
+
+    records = [json.loads(line) for line in log_path.read_text().splitlines()]
+    trigger = next(record for record in records if record.get("delayed_error_triggered"))
+    assert trigger["delayed_error_streak"] == 2
+    assert trigger["delayed_error_teacher_rounds_left"] == 2
+    assert full_1["full_reason"] == "delayed_video_error"
+    assert full_2["full_reason"] == "delayed_video_error_burst"
+    assert policy.delayed_error_streak == 0
+    assert policy.delayed_error_teacher_rounds_left == 0
+
+
+def test_low_delayed_error_resets_recovery_streak():
+    events = []
+    draft = _FakeModel("draft", events, delayed_errors=(0.6, 0.4, 0.6))
+    teacher = _FakeModel("teacher", events)
+    policy = RealtimeFlashPolicy(
+        draft,
+        teacher,
+        pf_interval=20,
+        delayed_error_threshold=0.55,
+        delayed_error_consecutive=2,
+        rng=np.random.default_rng(7),
+    )
+    policy.infer({"reset": True, "prompt": "test task"})
+    action = policy.infer(_action_request())
+    policy.infer(_cache_request("anchor", action["action"]))
+    for tag in ("flash-1", "flash-2", "flash-3"):
+        action = policy.infer(_action_request())
+        policy.infer(_cache_request(tag, action["action"]))
+
+    assert policy.delayed_error_streak == 1
+    assert policy.delayed_error_trigger_count == 0
+    assert policy.delayed_error_teacher_rounds_left == 0
+
+
+def test_delayed_recovery_includes_an_already_scheduled_flow_refresh():
+    events = []
+    distances = np.zeros((2, 32), dtype=np.float32)
+    verify_results = (
+        {"accepted_prefix": 32, "distances": distances + 0.01},
+        {"accepted_prefix": 32, "distances": distances + 0.1},
+    )
+    draft = _FakeModel("draft", events, delayed_errors=(0.6, 0.57))
+    teacher = _FakeModel("teacher", events, verify_results=verify_results)
+    policy = RealtimeFlashPolicy(
+        draft,
+        teacher,
+        pf_interval=20,
+        flow_budget_threshold=0.1,
+        delayed_error_threshold=0.55,
+        delayed_error_consecutive=2,
+        delayed_error_teacher_rounds=2,
+        rng=np.random.default_rng(7),
+    )
+    policy.infer({"reset": True, "prompt": "test task"})
+    initial = policy.infer(_action_request())
+    policy.infer(_cache_request("anchor", initial["action"]))
+    for tag in ("flash-1", "flash-2"):
+        flash = policy.infer(_action_request())
+        policy.infer(_cache_request(tag, flash["action"]))
+
+    full_1 = policy.infer(_action_request())
+    policy.infer(_cache_request("recovery-1", full_1["action"]))
+    full_2 = policy.infer(_action_request())
+    policy.infer(_cache_request("recovery-2", full_2["action"]))
+    next_action = policy.infer(_action_request())
+
+    assert full_1["full_reason"] == "flow_budget"
+    assert full_2["full_reason"] == "delayed_video_error_burst"
+    assert next_action["action_source"] == "draft_flash"
 
 
 def test_zero_prefix_replans_same_observation_without_cache_update():

@@ -154,6 +154,9 @@ class RealtimeFlashPolicy:
         flow_budget_burst_after: int = 0,
         flow_budget_burst_rounds: int = 0,
         flow_budget_burst_limit: int = 0,
+        delayed_error_threshold: float = 0.0,
+        delayed_error_consecutive: int = 2,
+        delayed_error_teacher_rounds: int = 2,
         gripper_full_window: int = 1,
         gripper_consensus: bool = False,
         rng: Optional[np.random.Generator] = None,
@@ -173,6 +176,10 @@ class RealtimeFlashPolicy:
             or flow_budget_burst_limit < 0
         ):
             raise ValueError("flow budget burst values must be non-negative")
+        if not np.isfinite(delayed_error_threshold) or delayed_error_threshold < 0:
+            raise ValueError("delayed_error_threshold must be non-negative")
+        if delayed_error_consecutive < 1 or delayed_error_teacher_rounds < 1:
+            raise ValueError("delayed-error recovery values must be positive")
         if gripper_full_window < 1:
             raise ValueError("gripper_full_window must be positive")
         tau_timesteps = tuple(float(timestep) for timestep in tau_timesteps)
@@ -194,6 +201,9 @@ class RealtimeFlashPolicy:
         self.flow_budget_burst_after = int(flow_budget_burst_after)
         self.flow_budget_burst_rounds = int(flow_budget_burst_rounds)
         self.flow_budget_burst_limit = int(flow_budget_burst_limit)
+        self.delayed_error_threshold = float(delayed_error_threshold)
+        self.delayed_error_consecutive = int(delayed_error_consecutive)
+        self.delayed_error_teacher_rounds = int(delayed_error_teacher_rounds)
         self.gripper_full_window = int(gripper_full_window)
         self.gripper_consensus = bool(gripper_consensus)
         self.rng = rng or np.random.default_rng()
@@ -217,6 +227,9 @@ class RealtimeFlashPolicy:
         self.flow_budget_refresh_count = 0
         self.flow_budget_bursts_used = 0
         self.teacher_burst_rounds_left = 0
+        self.delayed_error_streak = 0
+        self.delayed_error_trigger_count = 0
+        self.delayed_error_teacher_rounds_left = 0
         self.gripper_full_rounds_left = 0
         self._draft_primed = False
 
@@ -272,6 +285,8 @@ class RealtimeFlashPolicy:
             return "initial"
         if self.force_full_reason:
             return self.force_full_reason
+        if self.delayed_error_teacher_rounds_left > 0:
+            return "delayed_video_error_burst"
         if self.teacher_burst_rounds_left > 0:
             return "flow_budget_burst"
         if self.gripper_full_rounds_left > 0:
@@ -318,11 +333,38 @@ class RealtimeFlashPolicy:
         self.last_gripper = self.pending_gripper
         self.pending_gripper = None
         self.pending_cache_source = None
+        delayed_video_error = draft_response.get("delayed_video_error")
+        delayed_error_triggered = False
+        if source == "full":
+            self.delayed_error_streak = 0
+        elif self.delayed_error_threshold > 0 and delayed_video_error is not None:
+            latent_nrmse = float(delayed_video_error["latent_nrmse"])
+            if not np.isfinite(latent_nrmse):
+                raise ValueError("delayed video latent_nrmse must be finite")
+            self.delayed_error_streak = (
+                self.delayed_error_streak + 1
+                if latent_nrmse > self.delayed_error_threshold
+                else 0
+            )
+            if self.delayed_error_streak >= self.delayed_error_consecutive:
+                delayed_error_triggered = True
+                self.delayed_error_trigger_count += 1
+                self.delayed_error_teacher_rounds_left = max(
+                    self.delayed_error_teacher_rounds_left,
+                    self.delayed_error_teacher_rounds,
+                )
+                if self.force_full_reason is None:
+                    self.force_full_reason = "delayed_video_error"
+
         self._log(
             source=f"{source}_cache_update",
             cache_frame_count=frame_count,
             pending_teacher_cache_updates=len(self.pending_teacher_cache_updates),
-            delayed_video_error=draft_response.get("delayed_video_error"),
+            delayed_video_error=delayed_video_error,
+            delayed_error_streak=self.delayed_error_streak,
+            delayed_error_triggered=delayed_error_triggered,
+            delayed_error_trigger_count=self.delayed_error_trigger_count,
+            delayed_error_teacher_rounds_left=self.delayed_error_teacher_rounds_left,
             elapsed_sec=time.perf_counter() - start,
         )
         return {}
@@ -345,7 +387,10 @@ class RealtimeFlashPolicy:
         self.last_source = "teacher_full"
         self.flash_rounds_since_full = 0
         self.flow_error_budget = 0.0
+        self.delayed_error_streak = 0
         self.force_full_reason = None
+        if self.delayed_error_teacher_rounds_left > 0:
+            self.delayed_error_teacher_rounds_left -= 1
         if self.teacher_burst_rounds_left > 0:
             self.teacher_burst_rounds_left -= 1
         if self.gripper_full_rounds_left > 0:
@@ -583,6 +628,9 @@ class RealtimeFlashPolicy:
             flow_error_budget=self.flow_error_budget,
             flow_budget_refresh_count=self.flow_budget_refresh_count,
             teacher_burst_rounds_left=self.teacher_burst_rounds_left,
+            delayed_error_streak=self.delayed_error_streak,
+            delayed_error_trigger_count=self.delayed_error_trigger_count,
+            delayed_error_teacher_rounds_left=self.delayed_error_teacher_rounds_left,
             gripper_full_rounds_left=self.gripper_full_rounds_left,
             **verify_telemetry,
             elapsed_sec=time.perf_counter() - start,

@@ -262,6 +262,34 @@ and top-patch residual. It cannot route teacher use until completed episodes
 show that it predicts failure better than raw motion at a matched fallback
 rate.
 
+### Delayed-error recovery pilot
+
+The four-task shadow run completed 12 episodes. Episode-level latent NRMSE
+median/max both reached failure AUC 0.857 and maximum cosine distance reached
+0.914, while raw intra-video motion had previously remained near chance. A
+single large residual is not sufficient: successful `place_can_basket`
+episodes contain isolated spikes. The first routing experiment therefore uses
+only a persistent error condition:
+
+```text
+if latent_nrmse > 0.55 for two consecutive executed draft cache updates:
+    run the teacher for two consecutive action rounds
+```
+
+Any low-error update resets the streak. A teacher action or episode reset also
+resets it, so stale evidence cannot cross a new teacher anchor. If a flow-budget
+refresh is already scheduled, that teacher round counts as the first round of
+the two-round recovery window rather than stacking a third round. The feature
+is disabled when its threshold is zero and must remain separately configurable
+from the flow budget.
+
+This pilot does not alter endpoint verification, gripper consensus, draft
+actions, cache tensors, or repair. It is evaluated with a less aggressive
+0.18 flow budget so the new signal replaces blind refreshes instead of merely
+adding teacher calls. The go gate is better `hanging_mug` success than the
+0/3 shadow result, no regression on the other three tasks, and lower teacher
+action-source rate than 36.36%.
+
 ## Cross-Tau Gripper Consensus
 
 The original migration applies two independent phase fallbacks: the server

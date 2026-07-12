@@ -94,3 +94,34 @@ Current experiments compare two forms on four matched tasks: consensus with
 the old flow budget, and consensus with no flow budget plus a two-round teacher
 window only on phase disagreement. Repair remains locked until one form matches
 teacher quality with materially lower teacher use.
+
+### Delayed-error shadow result
+
+- The completed four-task TN=3 shadow run scored `7/12 = 58.3%`:
+  `hanging_mug 0/3`, `turn_switch 2/3`, `place_can_basket 3/3`, and
+  `open_microwave 2/3`.
+- It used teacher actions in `80/220 = 36.36%` of action rounds. Draft/teacher
+  action latency p50 was `0.390s/1.190s`; draft/teacher cache latency p50 was
+  `0.374s/0.757s`.
+- Delayed draft-video error separated the seven successful and five failed
+  episodes better than raw motion: latent-NRMSE median/max failure AUC was
+  `0.857`, and maximum cosine-distance AUC was `0.914`. This is promising but
+  still task-confounded and too small for a universal threshold claim.
+- Isolated high errors occur in successful episodes. Two consecutive NRMSE
+  values above `0.55`, with persistence reset at every teacher anchor, produced
+  no trigger in the seven successful episodes and triggered in all three failed
+  `hanging_mug` episodes. The next controlled pilot combines this trigger with
+  a less aggressive `0.18` flow budget.
+- A bounded `.18` flow-budget pilot was early-stopped at `hanging_mug 0/2`;
+  it showed no recovery advantage and is not promoted on its own.
+
+### Verifier compute replay
+
+- Replaying 2,268 K=2 calls showed that neither tau probe ever produced a
+  zero raw prefix, so first-failure early stopping has no useful opportunity at
+  the current threshold and is not implemented.
+- An audited adaptive-K guard remains promising: when tau-50 max residual is
+  below `0.05` and neither the draft nor tau-50 reconstruction contains a
+  gripper switch, K=1 would cover `55.6%` of eligible calls with zero observed
+  tau-100 prefix or phase changes. This is the next speed change after the
+  delayed-error routing pilot passes its quality gate.

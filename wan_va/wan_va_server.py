@@ -3,6 +3,7 @@ import argparse
 import os
 import sys
 import time
+from contextlib import contextmanager
 from functools import partial
 from PIL import Image
 from diffusers.video_processor import VideoProcessor
@@ -36,6 +37,81 @@ from utils import (
     run_async_server_mode,
     save_async,
 )
+from specverify import (
+    action_verify_frame_start,
+    build_verify_action_input,
+    gripper_switch_info,
+    longest_prefix_min_over_k,
+    make_verify_scheduler,
+    normalized_l2_distances,
+    quantize_prefix_to_frame_boundary,
+    sample_verify_noise_like,
+    scheduler_add_noise_batched,
+    scheduler_step_to_final_batched,
+    stitch_action_prefix,
+)
+
+
+@contextmanager
+def _readonly_verify_cache(transformer, source_name, batch_indices,
+                           action_tokens):
+    """Expose a compact batched copy of the reference cache for one forward."""
+
+    blocks = getattr(transformer, 'blocks', None)
+    if blocks is None:
+        yield source_name
+        return
+
+    target_name = f'{source_name}__verify_{id(batch_indices)}'
+    installed = []
+    try:
+        for block in blocks:
+            caches = block.attn1.attn_caches
+            source = caches.get(source_name) if caches is not None else None
+            if source is None:
+                raise RuntimeError(
+                    'action verification requires an initialized reference cache')
+            source_batch = source['k'].shape[0]
+            if not batch_indices or min(batch_indices) < 0 or max(
+                    batch_indices) >= source_batch:
+                raise RuntimeError('verifier cache batch does not match CFG state')
+
+            indices = torch.as_tensor(batch_indices,
+                                      dtype=torch.long,
+                                      device=source['k'].device)
+            valid = source['mask'].nonzero(as_tuple=False).flatten()
+            valid_count = valid.numel()
+            capacity = valid_count + int(action_tokens)
+
+            # ponytail: copy only live slots plus this action query, not the
+            # multi-gigabyte free cache window. The source tensors stay untouched.
+            key = source['k'].new_empty(
+                (len(batch_indices), capacity, *source['k'].shape[2:]))
+            value = source['v'].new_empty(
+                (len(batch_indices), capacity, *source['v'].shape[2:]))
+            ids = source['id'].new_full((capacity, ), -1)
+            mask = source['mask'].new_zeros((capacity, ))
+            is_pred = source['is_pred'].new_zeros((capacity, ))
+            if valid_count:
+                key[:, :valid_count] = source['k'].index_select(
+                    0, indices).index_select(1, valid)
+                value[:, :valid_count] = source['v'].index_select(
+                    0, indices).index_select(1, valid)
+                ids[:valid_count] = source['id'][valid]
+                mask[:valid_count] = True
+                is_pred[:valid_count] = source['is_pred'][valid]
+            caches[target_name] = {
+                'k': key,
+                'v': value,
+                'id': ids,
+                'mask': mask,
+                'is_pred': is_pred,
+            }
+            installed.append(caches)
+        yield target_name
+    finally:
+        for caches in installed:
+            caches.pop(target_name, None)
 
 
 class VA_Server:
@@ -55,6 +131,8 @@ class VA_Server:
             shift=self.job_config.action_snr_shift,
             sigma_min=0.0,
             extra_one_step=True)
+        self.verify_scheduler = make_verify_scheduler(
+            self.job_config.action_snr_shift)
         self.scheduler.set_timesteps(1000, training=True)
         self.action_scheduler.set_timesteps(1000, training=True)
 
@@ -322,6 +400,239 @@ class VA_Server:
                                                           action_mask] *= 0
         return input_dict
 
+    def forward_action_only_verify(self,
+                                   noisy_actions,
+                                   action_timesteps,
+                                   frame_st_id=0,
+                                   cache_name=None):
+        """Run all K teacher action probes in one cache-safe forward."""
+
+        if self.prompt_embeds is None:
+            raise RuntimeError(
+                'forward_action_only_verify requires a prompt cache')
+        if noisy_actions.ndim != 5 or noisy_actions.shape[-1] != 1:
+            raise ValueError(
+                'noisy_actions must have shape [K, C, F, N, 1]')
+
+        cache_name = cache_name or self.cache_name
+        noisy_actions = noisy_actions.to(device=self.device,
+                                         dtype=self.dtype).clone()
+        batch_size = noisy_actions.shape[0]
+        frame_chunk_size = noisy_actions.shape[2]
+        action_timesteps = torch.as_tensor(action_timesteps,
+                                           dtype=torch.float32,
+                                           device=self.device).flatten()
+        if action_timesteps.numel() == 1:
+            action_timesteps = action_timesteps.repeat(batch_size)
+        if action_timesteps.numel() != batch_size:
+            raise ValueError('action_timesteps must be scalar or length K')
+
+        conditioned_frame_count = action_verify_frame_start(frame_st_id)
+        if conditioned_frame_count:
+            noisy_actions[:, :, :conditioned_frame_count] = 0
+        noisy_actions[:, ~self.action_mask] = 0
+
+        grid_id = get_mesh_id(noisy_actions.shape[-3],
+                              noisy_actions.shape[-2],
+                              noisy_actions.shape[-1],
+                              1,
+                              1,
+                              frame_st_id,
+                              action=True).to(self.device)
+        guidance_scale = float(self.job_config.action_guidance_scale)
+        input_dict = build_verify_action_input(
+            noisy_action=noisy_actions,
+            prompt_embeds=self.prompt_embeds,
+            negative_prompt_embeds=self.negative_prompt_embeds,
+            grid_id=grid_id,
+            timesteps=action_timesteps,
+            dtype=self.dtype,
+            conditioned_frame_count=conditioned_frame_count,
+            guidance_scale=guidance_scale,
+        )
+
+        if guidance_scale > 1:
+            cache_batch_indices = [0] * batch_size + [1] * batch_size
+        else:
+            cache_batch_indices = [0] * batch_size
+        with _readonly_verify_cache(
+                self.transformer,
+                cache_name,
+                cache_batch_indices,
+                action_tokens=noisy_actions.shape[2] *
+                noisy_actions.shape[3]) as verify_cache_name:
+            action_noise_pred = self.transformer(
+                input_dict,
+                update_cache=0,
+                cache_name=verify_cache_name,
+                action_mode=True,
+            )
+
+        action_noise_pred = rearrange(action_noise_pred,
+                                      'b (f n) c -> b c f n 1',
+                                      f=frame_chunk_size)
+        if guidance_scale > 1:
+            positive = action_noise_pred[:batch_size]
+            negative = action_noise_pred[batch_size:]
+            action_noise_pred = negative + guidance_scale * (positive -
+                                                               negative)
+        return action_noise_pred[:batch_size]
+
+    def verify_action_chunk(self,
+                            draft_actions,
+                            frame_st_id=0,
+                            tau_timesteps=(50.0, 100.0),
+                            threshold=0.15,
+                            cache_name=None,
+                            verify_noise=None,
+                            verify_seed=None,
+                            previous_gripper=None,
+                            gripper_threshold=0.0):
+        """Verify one normalized draft and return its teacher-tail stitch."""
+
+        if draft_actions.ndim != 5 or draft_actions.shape[0] != 1 or \
+                draft_actions.shape[-1] != 1:
+            raise ValueError(
+                'draft_actions must have shape [1, C, F, N, 1]')
+        if draft_actions.shape[1] <= 29:
+            raise ValueError(
+                'dual-arm verification requires latent gripper channels 28/29')
+
+        tau_timesteps = torch.as_tensor(tau_timesteps,
+                                        dtype=torch.float32,
+                                        device=self.device).flatten()
+        if tau_timesteps.numel() < 1:
+            raise ValueError('tau_timesteps must be non-empty')
+
+        draft = draft_actions.to(device=self.device, dtype=self.dtype).clone()
+        draft[:, ~self.action_mask] = 0
+        batch_size = tau_timesteps.numel()
+        draft_batch = draft.repeat(batch_size, 1, 1, 1, 1)
+        if verify_noise is None:
+            shared_noise = sample_verify_noise_like(draft, verify_seed)
+        else:
+            shared_noise = torch.as_tensor(verify_noise,
+                                           device=self.device,
+                                           dtype=self.dtype)
+            if shared_noise.shape != draft.shape:
+                raise ValueError('verify_noise must match action_latent shape')
+            shared_noise = shared_noise.clone()
+        shared_noise[:, ~self.action_mask] = 0
+        noise_batch = shared_noise.repeat(batch_size, 1, 1, 1, 1)
+
+        conditioned_frame_count = action_verify_frame_start(frame_st_id)
+        if conditioned_frame_count:
+            draft_batch[:, :, :conditioned_frame_count] = 0
+            noise_batch[:, :, :conditioned_frame_count] = 0
+        z_tau = scheduler_add_noise_batched(
+            scheduler=self.verify_scheduler,
+            clean=draft_batch,
+            noise=noise_batch,
+            timesteps=tau_timesteps,
+        )
+        velocity = self.forward_action_only_verify(
+            z_tau,
+            tau_timesteps,
+            frame_st_id=frame_st_id,
+            cache_name=cache_name,
+        )
+        reconstructed = scheduler_step_to_final_batched(
+            scheduler=self.verify_scheduler,
+            model_output=velocity,
+            timesteps=tau_timesteps,
+            sample=z_tau,
+        )
+        reconstructed[:, ~self.action_mask] = 0
+        if conditioned_frame_count:
+            reconstructed[:, :, :conditioned_frame_count] = draft_batch[:, :,
+                                                                          :conditioned_frame_count]
+
+        distances = normalized_l2_distances(reconstructed, draft_batch)
+        valid_distances = distances[:, conditioned_frame_count:, :]
+        raw_valid_prefix, prefix_by_tau, pass_by_step = \
+            longest_prefix_min_over_k(valid_distances, threshold)
+        raw_prefix = conditioned_frame_count * self.action_per_frame + \
+            raw_valid_prefix
+        accepted_before_gripper = quantize_prefix_to_frame_boundary(
+            raw_prefix,
+            action_per_frame=self.action_per_frame,
+            frame_chunk_size=self.job_config.frame_chunk_size,
+        )
+
+        teacher_endpoint = reconstructed.mean(dim=0, keepdim=True)
+        if conditioned_frame_count:
+            teacher_endpoint[:, :, :conditioned_frame_count] = draft[:, :,
+                                                                       :conditioned_frame_count]
+        candidate_stitch = stitch_action_prefix(draft, teacher_endpoint,
+                                                accepted_before_gripper)
+        active_switch = gripper_switch_info(
+            candidate_stitch,
+            max_prefix=accepted_before_gripper,
+            previous=previous_gripper,
+            threshold=gripper_threshold,
+        )
+        accepted_prefix = accepted_before_gripper
+        if active_switch['has_switch']:
+            accepted_prefix = quantize_prefix_to_frame_boundary(
+                active_switch['first_index'],
+                action_per_frame=self.action_per_frame,
+                frame_chunk_size=self.job_config.frame_chunk_size,
+            )
+        stitched_action_latent = stitch_action_prefix(draft, teacher_endpoint,
+                                                      accepted_prefix)
+        reconstructed_switches = [
+            gripper_switch_info(
+                reconstructed[row:row + 1],
+                previous=previous_gripper,
+                threshold=gripper_threshold,
+            )
+            for row in range(batch_size)
+        ]
+        any_reconstructed_switch = any(
+            switch['has_switch'] for switch in reconstructed_switches)
+        if any_reconstructed_switch:
+            accepted_prefix = 0
+            stitched_action_latent = teacher_endpoint
+
+        teacher_endpoint_np = teacher_endpoint.detach().float().cpu().numpy()
+        stitched_action_latent_np = stitched_action_latent.detach().float().cpu(
+        ).numpy()
+        teacher_endpoint_action = self.postprocess_action(
+            teacher_endpoint.detach()).astype(np.float32, copy=False)
+        stitched_action = self.postprocess_action(
+            stitched_action_latent.detach()).astype(np.float32, copy=False)
+        return {
+            'accepted_prefix': accepted_prefix,
+            'accepted_prefix_before_gripper': accepted_before_gripper,
+            'raw_prefix': raw_prefix,
+            'raw_valid_prefix': raw_valid_prefix,
+            'prefix_by_tau': prefix_by_tau.detach().cpu().tolist(),
+            'pass_by_step': pass_by_step.detach().cpu().tolist(),
+            'conditioned_frame_count': conditioned_frame_count,
+            'distances': distances.detach().float().cpu(),
+            'tau_timesteps': tau_timesteps.detach().float().cpu(),
+            'threshold': float(threshold),
+            'continuous_channels': list(range(14)),
+            'gripper_channels': [28, 29],
+            'shared_noise': True,
+            'teacher_endpoint_latent': teacher_endpoint_np,
+            'teacher_endpoint': teacher_endpoint_action,
+            'stitched_action_latent': stitched_action_latent_np,
+            'stitched_action': stitched_action,
+            'gripper_switch': bool(active_switch['has_switch']),
+            'gripper_switch_index': active_switch['first_index'],
+            'gripper_switch_channels': active_switch['channels'],
+            'gripper_switch_indices': active_switch['switch_indices'],
+            'gripper_switch_anywhere': bool(any_reconstructed_switch),
+            'gripper_switch_anywhere_index': min(
+                (switch['first_index'] for switch in reconstructed_switches
+                 if switch['first_index'] is not None),
+                default=None,
+            ),
+            'gripper_force_teacher': bool(any_reconstructed_switch),
+            'fallback_required': accepted_prefix == 0,
+        }
+
     def _encode_obs(self, obs):
         images = obs['obs']
         if not isinstance(images, list):
@@ -561,6 +872,7 @@ class VA_Server:
                 actions[:, :, 0:1] = action_cond if frame_st_id == 0 else actions[:, :, 0:1]
 
         actions[:, ~self.action_mask] *= 0
+        self.last_action_latent = actions.detach().float().cpu().numpy()
 
         save_async(latents, os.path.join(self.exp_save_root, f'latents_{frame_st_id}.pt'))
         save_async(actions, os.path.join(self.exp_save_root, f'actions_{frame_st_id}.pt'))
@@ -608,11 +920,52 @@ class VA_Server:
         reset = obs.get('reset', False)
         prompt = obs.get('prompt', None)
         compute_kv_cache = obs.get('compute_kv_cache', False)
+        verify_action = obs.get('verify_action', False)
+        prime_only = obs.get('prime_only', False)
 
         if reset:
             logger.info(f"******************* Reset server ******************")
             self._reset(prompt=prompt)
             return dict()
+        elif prime_only:
+            if self.frame_st_id != 0:
+                raise RuntimeError('prime_only is valid only before the first cache update')
+            self.init_latent = self._encode_obs(obs)
+            return dict()
+        elif verify_action:
+            logger.info(
+                f"################# Verify Action Chunk #################")
+            draft_action = obs.get('action_latent')
+            if draft_action is None:
+                raise ValueError('verify_action requires action_latent')
+            draft_action = torch.as_tensor(draft_action,
+                                           device=self.device,
+                                           dtype=self.dtype)
+            if draft_action.ndim == 4:
+                draft_action = draft_action.unsqueeze(0)
+            verify_result = self.verify_action_chunk(
+                draft_action,
+                frame_st_id=int(obs.get('frame_st_id', self.frame_st_id)),
+                tau_timesteps=obs.get('tau_timesteps', (50.0, 100.0)),
+                threshold=float(obs.get('threshold', 0.15)),
+                verify_noise=obs.get('verify_noise'),
+                verify_seed=obs.get('verify_seed'),
+                previous_gripper=obs.get('previous_gripper'),
+                gripper_threshold=float(obs.get('gripper_threshold', 0.0)),
+            )
+            distances = verify_result.pop('distances')
+            tau_timesteps = verify_result.pop('tau_timesteps')
+            return {
+                **verify_result,
+                'tau_timesteps': tau_timesteps.numpy().tolist(),
+                'distances': distances.numpy(),
+                'distance_mean': float(distances.mean().item()),
+                'distance_max': float(distances.max().item()),
+                'distance_p95': float(
+                    torch.quantile(distances.flatten(), 0.95).item()),
+                'distance_by_tau_mean': distances.mean(
+                    dim=(1, 2)).numpy().tolist(),
+            }
         elif compute_kv_cache:
             logger.info(
                 f"################# Compute KV Cache #################")
@@ -621,7 +974,10 @@ class VA_Server:
         else:
             logger.info(f"################# Infer One Chunk #################")
             action, _ = self._infer(obs, frame_st_id=self.frame_st_id)
-            return dict(action=action)
+            result = dict(action=action)
+            if obs.get('return_action_latent', False):
+                result['action_latent'] = self.last_action_latent
+            return result
     
     def decode_one_video(self, latents, output_type):
         latents = latents.to(self.vae.dtype)

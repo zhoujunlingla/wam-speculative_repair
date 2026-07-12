@@ -6,7 +6,7 @@ from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
 import cv2
 from pathlib import Path
 
-robowin_root = Path("/path/to/your/robowin")
+robowin_root = Path(os.environ.get("ROBOTWIN_ROOT", "/path/to/your/robowin"))
 if str(robowin_root) not in sys.path:
     sys.path.insert(0, str(robowin_root))
 
@@ -41,6 +41,7 @@ import json
 from pathlib import Path
 
 from evaluation.robotwin.websocket_client_policy import WebsocketClientPolicy
+from evaluation.robotwin.realtime_flash_policy import infer_with_replan
 from evaluation.robotwin.test_render import Sapien_TEST
 
 def write_json(data: dict, fpath: Path) -> None:
@@ -560,7 +561,8 @@ def eval_policy(task_name,
                 observation = TASK_ENV.get_obs()
                 first_obs = format_obs(observation, prompt)
 
-            ret = model.infer(dict(obs=first_obs, prompt=prompt, save_visualization=save_visualization, video_guidance_scale=video_guidance_scale, action_guidance_scale=action_guidance_scale)) #(TASK_ENV, model, observation)
+            action_request = dict(obs=first_obs, prompt=prompt, save_visualization=save_visualization, video_guidance_scale=video_guidance_scale, action_guidance_scale=action_guidance_scale)
+            ret = infer_with_replan(model, action_request) #(TASK_ENV, model, observation)
             action = ret['action']
             if 'video' in ret:
                 imagined_video = ret['video']
@@ -697,4 +699,3 @@ if __name__ == "__main__":
     Sapien_TEST()
     usr_args = parse_args_and_config()
     main(usr_args)
-

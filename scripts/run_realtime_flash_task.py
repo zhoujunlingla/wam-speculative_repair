@@ -1,0 +1,233 @@
+#!/usr/bin/env python3
+"""Run one RoboTwin task against direct or realtime-flash LingBot serving."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shutil
+import socket
+import subprocess
+import sys
+import time
+from datetime import datetime
+from pathlib import Path
+
+
+ROOT = Path("/mnt/afs/intern/manlichen/ivan/zhoujunl")
+CODE = Path(__file__).resolve().parents[1]
+ROBOTWIN = ROOT / "Wam_Speed_up" / "RoboTwin"
+
+
+def runtime_env(gpu: int, *, server: bool) -> dict[str, str]:
+    env = os.environ.copy()
+    env["CUDA_VISIBLE_DEVICES"] = str(gpu)
+    env["ROBOTWIN_ROOT"] = str(ROBOTWIN)
+    paths = []
+    if server:
+        paths.append(str(ROOT / "env" / "torch29_clean_pkgs"))
+    paths.extend([
+        str(CODE),
+        str(ROBOTWIN),
+        str(ROOT / "env" / "curobo-v0.7.8" / "src"),
+        str(ROOT / "env" / "python_pkgs"),
+        env.get("PYTHONPATH", ""),
+    ])
+    env["PYTHONPATH"] = ":".join(path for path in paths if path)
+    env["PATH"] = (
+        f"{ROOT / 'env' / 'ninja-build' / 'extract' / 'usr' / 'bin'}:"
+        f"/usr/local/cuda/bin:{env.get('PATH', '')}"
+    )
+    cuda_lib = "/usr/local/cuda-12.1/targets/x86_64-linux/lib"
+    driver_lib = ROOT / "env" / "nvidia-550.90.07-jammy" / "extract" / "usr" / "lib" / "x86_64-linux-gnu"
+    env["LD_LIBRARY_PATH"] = (
+        f"{driver_lib}:{cuda_lib}:/usr/local/nvidia/lib:/usr/local/nvidia/lib64:"
+        f"{env.get('LD_LIBRARY_PATH', '')}"
+    )
+    env["LIBRARY_PATH"] = f"{cuda_lib}:{env.get('LIBRARY_PATH', '')}"
+    env["TORCH_EXTENSIONS_DIR"] = str(ROOT / "env" / "torch_extensions")
+    env["VK_ICD_FILENAMES"] = str(
+        ROOT / "experiments" / "Wam_Speed_up" / "20260709_acp_eval_entrypoints" / "nvidia_icd_abs_egl.json"
+    )
+    env["__EGL_VENDOR_LIBRARY_FILENAMES"] = str(
+        ROOT / "env" / "python_pkgs" / "sapien" / "vulkan_library" / "10_nvidia.json"
+    )
+    env["SAPIEN_VULKAN_LIBRARY_PATH"] = str(
+        ROOT / "env" / "python_pkgs" / "sapien" / "vulkan_library" / "libvulkan.so.1.3.224"
+    )
+    env["NVIDIA_DRIVER_CAPABILITIES"] = "all"
+    env["MUJOCO_GL"] = "egl"
+    env["PYOPENGL_PLATFORM"] = "egl"
+    env["DIFFUSERS_DISABLE_BITSANDBYTES"] = "1"
+    env["TOKENIZERS_PARALLELISM"] = "false"
+    env["PYTHONWARNINGS"] = "ignore::UserWarning"
+    env["PYTHONUNBUFFERED"] = "1"
+    return env
+
+
+def wait_for_port(port: int, process: subprocess.Popen, timeout: int) -> None:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if process.poll() is not None:
+            raise RuntimeError(f"server exited with rc={process.returncode}")
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=1):
+                return
+        except OSError:
+            time.sleep(2)
+    raise TimeoutError(f"server did not open port {port} in {timeout}s")
+
+
+def read_metric(run_root: Path, task: str) -> dict:
+    path = run_root / "results" / "stseed-10000" / "metrics" / task / "res.json"
+    if not path.exists():
+        return {"task": task, "succ_num": 0, "total_num": 0, "succ_rate": 0.0, "status": "missing"}
+    data = json.loads(path.read_text())
+    return {
+        "task": task,
+        "succ_num": int(data.get("succ_num", 0)),
+        "total_num": int(data.get("total_num", 0)),
+        "succ_rate": float(data.get("succ_rate", 0.0)),
+        "status": "ok",
+    }
+
+
+def source_summary(path: Path) -> dict:
+    counts: dict[str, int] = {}
+    latencies: dict[str, list[float]] = {}
+    if path.exists():
+        for line in path.read_text(errors="replace").splitlines():
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            source = str(row.get("source", "unknown"))
+            counts[source] = counts.get(source, 0) + 1
+            if row.get("elapsed_sec") is not None:
+                latencies.setdefault(source, []).append(float(row["elapsed_sec"]))
+    stats = {}
+    for source, values in latencies.items():
+        values.sort()
+        stats[source] = {
+            "count": len(values),
+            "p50_sec": values[(len(values) - 1) // 2],
+            "p90_sec": values[round((len(values) - 1) * 0.9)],
+        }
+    action_total = counts.get("teacher_full", 0) + counts.get("draft_flash", 0)
+    return {
+        "counts": counts,
+        "latency": stats,
+        "teacher_action_rate": counts.get("teacher_full", 0) / action_total if action_total else None,
+    }
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--mode", choices=("spec", "draft_only", "teacher_only"), default="spec")
+    parser.add_argument("--task", required=True)
+    parser.add_argument("--gpu", type=int, required=True)
+    parser.add_argument("--port", type=int, required=True)
+    parser.add_argument("--test-num", type=int, default=10)
+    parser.add_argument("--run-root", type=Path, required=True)
+    parser.add_argument("--result-root", type=Path, required=True)
+    parser.add_argument("--threshold", type=float, default=0.15)
+    parser.add_argument("--tau", type=float, nargs="+", default=(50.0, 100.0))
+    parser.add_argument("--pf-interval", type=int, default=2)
+    parser.add_argument("--server-timeout", type=int, default=600)
+    args = parser.parse_args()
+
+    for root in (args.run_root, args.result_root):
+        (root / "logs").mkdir(parents=True, exist_ok=True)
+    started = datetime.now().isoformat(timespec="seconds")
+    metrics_log = args.run_root / "logs" / f"specverify_{args.task}.jsonl"
+    server_log_path = args.run_root / "logs" / f"server_{args.task}_g{args.gpu}.log"
+    client_log_path = args.run_root / "logs" / f"client_{args.task}_g{args.gpu}.log"
+    server_cmd = [
+        sys.executable,
+        "wan_va/wan_va_single_spec_server.py",
+        "--mode", args.mode,
+        "--port", str(args.port),
+        "--save-root", str(args.run_root / "server" / args.task),
+        "--threshold", str(args.threshold),
+        "--tau-timesteps", *[str(value) for value in args.tau],
+        "--pf-interval", str(args.pf_interval),
+        "--log-path", str(metrics_log),
+    ]
+    client_cmd = [
+        sys.executable,
+        "-m", "evaluation.robotwin.eval_polict_client_openpi",
+        "--config", "policy/ACT/deploy_policy.yml",
+        "--overrides",
+        "--task_name", args.task,
+        "--task_config", "demo_clean",
+        "--train_config_name", "0",
+        "--model_name", "0",
+        "--ckpt_setting", f"realtime-flash-{args.mode}",
+        "--seed", "0",
+        "--policy_name", "ACT",
+        "--save_root", str(args.run_root / "results"),
+        "--video_guidance_scale", "5",
+        "--action_guidance_scale", "1",
+        "--test_num", str(args.test_num),
+        "--port", str(args.port),
+    ]
+    command = {"server": server_cmd, "client": client_cmd, "started_at": started}
+    (args.result_root / f"command_{args.task}.json").write_text(json.dumps(command, indent=2))
+
+    server_log = server_log_path.open("a", buffering=1)
+    server = subprocess.Popen(
+        server_cmd,
+        cwd=CODE,
+        env=runtime_env(args.gpu, server=True),
+        stdout=server_log,
+        stderr=subprocess.STDOUT,
+    )
+    client_rc = None
+    try:
+        wait_for_port(args.port, server, args.server_timeout)
+        with client_log_path.open("a", buffering=1) as client_log:
+            client = subprocess.run(
+                client_cmd,
+                cwd=CODE,
+                env=runtime_env(args.gpu, server=False),
+                stdout=client_log,
+                stderr=subprocess.STDOUT,
+            )
+        client_rc = client.returncode
+    finally:
+        if server.poll() is None:
+            server.terminate()
+            try:
+                server.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                server.kill()
+                server.wait(timeout=10)
+        server_log.close()
+
+    metric = read_metric(args.run_root, args.task)
+    summary = {
+        "mode": args.mode,
+        "task": args.task,
+        "gpu": args.gpu,
+        "threshold": args.threshold,
+        "tau": args.tau,
+        "pf_interval": args.pf_interval,
+        "started_at": started,
+        "ended_at": datetime.now().isoformat(timespec="seconds"),
+        "client_rc": client_rc,
+        "metric": metric,
+        "policy": source_summary(metrics_log),
+    }
+    for root in (args.run_root, args.result_root):
+        (root / f"summary_{args.task}.json").write_text(json.dumps(summary, indent=2))
+    for path in (server_log_path, client_log_path, metrics_log):
+        if path.exists():
+            shutil.copy2(path, args.result_root / "logs" / path.name)
+    print(json.dumps(summary, indent=2), flush=True)
+    if client_rc != 0 or metric["total_num"] < args.test_num:
+        raise SystemExit(client_rc or 2)
+
+
+if __name__ == "__main__":
+    main()

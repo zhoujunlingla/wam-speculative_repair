@@ -42,7 +42,8 @@ Fixed during review:
 
 ## Risk Assessment
 
-Risk is medium until the repaired long-episode GPU smoke passes.
+Residual quality risk is medium; runtime risk is low after the repaired
+long-episode smoke and 30 completed post-fix trials.
 
 - The new read-only attention path is limited to action verification and must
   be checked for numerical equivalence and exact cache preservation in the
@@ -66,6 +67,8 @@ Risk is medium until the repaired long-episode GPU smoke passes.
 
 ## Decision
 
-Proceed only to remote focused tests and a real long-episode smoke. Resume the
-three incomplete TN=10 tasks only after read-only verification runs without
-cache mutation or rising persistent verifier memory.
+Allowed to proceed. Remote tests passed `15/15`, the 1500-step long smoke and
+30 post-fix trials completed without OOM/cache errors, and the merged quality
+gate passed at `22/40` versus draft `21/40` and teacher `23/40`. Do not claim
+uniform per-task improvement: `hanging_mug` remained `0/10`, and teacher action
+use is still high at `40.81%`.

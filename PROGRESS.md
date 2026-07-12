@@ -38,6 +38,20 @@
   removed compact cache selected positive row zero; the read-only path now
   carries the same explicit CFG-row mapping. No experiment score was produced
   from this failed smoke.
+- The corrected long `open_microwave` smoke ran all 1500 environment steps and
+  48 policy rounds without OOM or cache error. Server and renderer were split
+  across GPUs 7 and 0.
+- Final four-task TN=10 result: `22/40 = 55.0%`, versus the step3000 draft
+  reference `21/40 = 52.5%` and LingBot v2/a4 teacher reference
+  `23/40 = 57.5%`. Per task: `hanging_mug 0/10`, `turn_switch 9/10`,
+  `place_can_basket 9/10`, `open_microwave 4/10`. The predefined quality gate
+  passed: +1 success over draft and one success below teacher.
+- Aggregate teacher action-source was `362/887 = 40.81%`; draft prefixes were
+  503 full 32-step and 22 partial 16-step. Full reasons were 204 periodic, 102
+  teacher gripper switch, 14 zero prefix, 40 initial, and 2 draft gripper
+  switch. Quality is established, but reducing teacher use remains future work.
+- Final artifact:
+  `/mnt/afs/intern/manlichen/ivan/zhoujunl/result/Wam_Speed_up/20260712_rtflash_full_clean4task_tn10_k2d015_pf2_final`.
 
 ### Prior Failure Carried Forward
 

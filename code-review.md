@@ -26,6 +26,9 @@ Fixed during review:
 5. Clean LingBot imported flash-attention even for `attn_mode=torch`. The
    optional import now degrades to `None`; selecting torch remains unchanged,
    while selecting an unavailable flash-attention backend still fails at use.
+6. The first launcher used a raw TCP readiness probe, which produced a false
+   WebSocket handshake error. Readiness now follows the server's explicit log
+   marker and does not touch the socket.
 
 ## Risk Assessment
 

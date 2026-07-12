@@ -15,6 +15,11 @@
 - First remote collection exposed a flash-attention/Torch ABI import failure
   before model construction. Torch attention is the required backend, so the
   optional flash-attention import was made lazy-safe and tests were retried.
+- Remote focused suite: `14 passed`.
+- Real A800 smoke loaded both models, reached `Render Well`, completed the
+  initial teacher full/cache anchor, accepted draft flash rounds, performed a
+  teacher-gripper `L=0` same-observation replan, replayed pending cache updates,
+  and reached periodic refresh without a cache or shape exception.
 
 ### Prior Failure Carried Forward
 

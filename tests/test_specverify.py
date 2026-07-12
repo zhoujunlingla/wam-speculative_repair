@@ -4,9 +4,9 @@ import sys
 import torch
 
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "wan_va"))
 
-from wan_va.specverify import (  # noqa: E402
+from specverify import (  # noqa: E402
     gripper_switch_info,
     longest_prefix_min_over_k,
     normalized_l2_distances,

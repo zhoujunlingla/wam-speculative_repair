@@ -23,6 +23,9 @@ Fixed during review:
 4. Probe defaults were changed from historical WAM `{150,300}` to the official
    Realtime-VLA levels `{50,100}`, equivalent to sigma `{0.05,0.10}` for the
    action scheduler with shift one.
+5. Clean LingBot imported flash-attention even for `attn_mode=torch`. The
+   optional import now degrades to `None`; selecting torch remains unchanged,
+   while selecting an unavailable flash-attention backend still fails at use.
 
 ## Risk Assessment
 
@@ -52,4 +55,3 @@ Proceed only to remote focused tests and one real `hanging_mug` smoke. The
 four-task TN=10 evaluation is allowed only after the smoke emits a full round,
 an accepted flash round or valid zero-prefix replan, and a real cache update
 without exception.
-

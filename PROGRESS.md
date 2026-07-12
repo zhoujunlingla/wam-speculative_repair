@@ -12,6 +12,9 @@
 - Excluded all repair, RiskRouter, world verifier, and Verify++ paths.
 - Local state-machine checks: 11 passed.
 - Next: remote verifier tests, real-model smoke, then matched four-task TN=10.
+- First remote collection exposed a flash-attention/Torch ABI import failure
+  before model construction. Torch attention is the required backend, so the
+  optional flash-attention import was made lazy-safe and tests were retried.
 
 ### Prior Failure Carried Forward
 

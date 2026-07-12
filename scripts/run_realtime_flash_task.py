@@ -132,6 +132,7 @@ def main() -> None:
     parser.add_argument("--threshold", type=float, default=0.15)
     parser.add_argument("--tau", type=float, nargs="+", default=(50.0, 100.0))
     parser.add_argument("--pf-interval", type=int, default=2)
+    parser.add_argument("--flow-budget-threshold", type=float, default=0.0)
     parser.add_argument(
         "--teacher-gripper-fallback",
         action=argparse.BooleanOptionalAction,
@@ -156,6 +157,7 @@ def main() -> None:
         "--threshold", str(args.threshold),
         "--tau-timesteps", *[str(value) for value in args.tau],
         "--pf-interval", str(args.pf_interval),
+        "--flow-budget-threshold", str(args.flow_budget_threshold),
         "--log-path", str(metrics_log),
     ]
     if not args.teacher_gripper_fallback:

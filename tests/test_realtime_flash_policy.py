@@ -211,6 +211,42 @@ def test_zero_pf_disables_periodic_refresh():
     assert second["action_source"] == "draft_flash"
 
 
+def test_cumulative_flow_budget_triggers_next_full_and_resets():
+    distances = np.full((2, 2, 16), 0.04, dtype=np.float32)
+    events = []
+    draft = _FakeModel("draft", events)
+    teacher = _FakeModel(
+        "teacher",
+        events,
+        verify_results=(
+            {"accepted_prefix": 32, "distances": distances},
+            {"accepted_prefix": 32, "distances": distances},
+        ),
+    )
+    policy = RealtimeFlashPolicy(
+        draft,
+        teacher,
+        pf_interval=0,
+        flow_budget_threshold=0.07,
+        rng=np.random.default_rng(7),
+    )
+    policy.infer({"reset": True, "prompt": "test task"})
+    first = policy.infer(_action_request())
+    policy.infer(_cache_request("anchor", first["action"]))
+
+    flash_1 = policy.infer(_action_request())
+    policy.infer(_cache_request("flash-1", flash_1["action"]))
+    flash_2 = policy.infer(_action_request())
+    policy.infer(_cache_request("flash-2", flash_2["action"]))
+    full = policy.infer(_action_request())
+
+    assert flash_1["action_source"] == "draft_flash"
+    assert flash_2["action_source"] == "draft_flash"
+    assert full["action_source"] == "teacher_full"
+    assert full["full_reason"] == "flow_budget"
+    assert policy.flow_error_budget == 0.0
+
+
 def test_teacher_reconstructed_gripper_switch_forces_replan():
     policy, _, _, _ = _anchored_policy(
         pf_interval=10,
@@ -271,6 +307,9 @@ def test_flash_logs_distances_without_changing_acceptance(tmp_path):
             "distances": np.zeros((2, 2, 16), dtype=np.float32),
             "prefix_by_tau": [32, 32],
             "tau_timesteps": [50.0, 100.0],
+            "gripper_switch_indices_by_tau": [None, 7],
+            "gripper_phase_agreement_by_tau": [1.0, 0.75],
+            "draft_gripper_switch_index": 7,
         },),
     )
     log_path = tmp_path / "metrics.jsonl"
@@ -292,6 +331,9 @@ def test_flash_logs_distances_without_changing_acceptance(tmp_path):
     assert record["prefix_by_tau"] == [32, 32]
     assert record["tau_timesteps"] == [50.0, 100.0]
     assert np.asarray(record["verify_distances"]).shape == (2, 2, 16)
+    assert record["gripper_switch_indices_by_tau"] == [None, 7]
+    assert record["gripper_phase_agreement_by_tau"] == [1.0, 0.75]
+    assert record["draft_gripper_switch_index"] == 7
 
 
 def test_zero_prefix_replans_same_observation_without_cache_update():

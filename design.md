@@ -138,6 +138,40 @@ action-source at most `15%`, and no material increase in zero-prefix fallback.
 If it passes, adaptive K and flow-error-budget refresh may be evaluated as the
 next speed improvement.
 
+## Quality Iteration V2: Cumulative Flow-Error Refresh
+
+V1 was stopped after `14/26` trials: increasing PF from 2 to 10 reduced the
+teacher action-source rate to about 29%, but `hanging_mug=0/5` and
+`open_microwave=0/3` showed that isolated refreshes every ten accepted draft
+rounds were too sparse. Per-episode telemetry also showed that failures can
+have small instantaneous endpoint residuals while running for many rounds.
+
+V2 replaces the productive part of periodic refresh with a cumulative flow
+discrepancy budget. For every executed draft prefix, compute the mean over the
+executed steps of the maximum normalized endpoint distance across verifier
+timesteps:
+
+```text
+q_r = mean_{j < L_r} max_k d_{k,j}
+B_{r+1} = B_r + q_r
+```
+
+When `B` reaches a configured threshold, the next action round uses the full
+teacher and resets `B` to zero. A large PF ceiling may remain as a safety net,
+but it is not the primary refresh schedule. This is the smallest WAM analogue
+of bounded-difference adaptive diffusion: repeated low residuals are allowed,
+but their accumulated stale-cache risk is not treated as zero.
+
+V2 does not change gripper routing yet. It only logs, for each verifier probe,
+the reconstructed gripper switch index and whether the probe-wise discrete
+phase sequences agree with the draft. That diagnostic is required before a
+later cross-tau gripper-consensus gate can replace the current blanket decoded
+gripper fallback.
+
+The V2 four-task gate is success at least `22/40`, no new runtime/cache error,
+and fewer teacher actions than the PF2 V0 (`40.81%`). Repair, adaptive K, and
+world-latent signals remain locked.
+
 ### Verifier calibration telemetry
 
 The V1 smoke showed that removing periodic and reconstructed-gripper full paths

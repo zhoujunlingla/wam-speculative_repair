@@ -139,6 +139,7 @@ class RealtimeFlashPolicy:
         gripper_channels: Iterable[int] = (7, 15),
         gripper_threshold: float = 0.5,
         teacher_gripper_fallback: bool = True,
+        flow_budget_threshold: float = 0.0,
         rng: Optional[np.random.Generator] = None,
         log_path: Optional[str] = None,
     ) -> None:
@@ -148,6 +149,8 @@ class RealtimeFlashPolicy:
             raise ValueError("threshold must be non-negative")
         if action_per_frame <= 0:
             raise ValueError("action_per_frame must be positive")
+        if not np.isfinite(flow_budget_threshold) or flow_budget_threshold < 0:
+            raise ValueError("flow_budget_threshold must be non-negative")
         tau_timesteps = tuple(float(timestep) for timestep in tau_timesteps)
         if not tau_timesteps:
             raise ValueError("tau_timesteps must be non-empty")
@@ -161,6 +164,7 @@ class RealtimeFlashPolicy:
         self.gripper_channels = tuple(int(channel) for channel in gripper_channels)
         self.gripper_threshold = float(gripper_threshold)
         self.teacher_gripper_fallback = bool(teacher_gripper_fallback)
+        self.flow_budget_threshold = float(flow_budget_threshold)
         self.rng = rng or np.random.default_rng()
         self.log_path = Path(log_path) if log_path else None
         if self.log_path:
@@ -176,6 +180,7 @@ class RealtimeFlashPolicy:
         self.pending_cache_source = None
         self.pending_teacher_cache_updates = deque()
         self.last_source = None
+        self.flow_error_budget = 0.0
         self._draft_primed = False
 
     def _call(self, model, request: dict) -> dict:
@@ -263,6 +268,7 @@ class RealtimeFlashPolicy:
 
     def _full(self, request: dict, reason: str) -> dict:
         start = time.perf_counter()
+        flow_error_budget = self.flow_error_budget
         replayed = self._replay_teacher_updates()
         if not self._draft_primed:
             prime_request = dict(request)
@@ -276,6 +282,7 @@ class RealtimeFlashPolicy:
         self.pending_cache_source = "full"
         self.last_source = "teacher_full"
         self.flash_rounds_since_full = 0
+        self.flow_error_budget = 0.0
         self.force_full_reason = None
         self.round_id += 1
 
@@ -291,9 +298,21 @@ class RealtimeFlashPolicy:
             full_reason=reason,
             accepted_prefix=horizon,
             replayed_teacher_cache_updates=replayed,
+            flow_error_budget_before_reset=flow_error_budget,
             elapsed_sec=time.perf_counter() - start,
         )
         return response
+
+    @staticmethod
+    def _flow_budget_charge(distances, accepted_prefix: int) -> float:
+        if distances is None or accepted_prefix <= 0:
+            return 0.0
+        distances = np.asarray(distances, dtype=np.float32)
+        if distances.ndim < 2 or distances.shape[0] == 0:
+            raise ValueError("verifier distances must have shape [K, ...steps]")
+        per_step = np.max(distances.reshape(distances.shape[0], -1), axis=0)
+        executed = per_step[: min(int(accepted_prefix), per_step.size)]
+        return float(np.mean(executed)) if executed.size else 0.0
 
     def _accepted_prefix(
         self,
@@ -357,6 +376,15 @@ class RealtimeFlashPolicy:
             "tau_timesteps": verify_response.get("tau_timesteps"),
             "prefix_by_tau": verify_response.get("prefix_by_tau"),
             "verify_distances": verify_distances,
+            "gripper_switch_indices_by_tau": verify_response.get(
+                "gripper_switch_indices_by_tau"
+            ),
+            "gripper_phase_agreement_by_tau": verify_response.get(
+                "gripper_phase_agreement_by_tau"
+            ),
+            "draft_gripper_switch_index": verify_response.get(
+                "draft_gripper_switch_index"
+            ),
         }
 
         teacher_gripper_switch = bool(
@@ -403,6 +431,16 @@ class RealtimeFlashPolicy:
         self.pending_cache_source = "flash"
         self.last_source = "draft_flash"
         self.flash_rounds_since_full += 1
+        flow_budget_charge = self._flow_budget_charge(
+            verify_response.get("distances"), accepted_prefix
+        )
+        self.flow_error_budget += flow_budget_charge
+        if (
+            self.force_full_reason is None
+            and self.flow_budget_threshold > 0
+            and self.flow_error_budget >= self.flow_budget_threshold
+        ):
+            self.force_full_reason = "flow_budget"
         response = {
             "action": slice_action_prefix(action, accepted_prefix),
             "replan": False,
@@ -421,6 +459,8 @@ class RealtimeFlashPolicy:
             accepted_prefix=accepted_prefix,
             verified_prefix=verified_prefix,
             teacher_gripper_switch=teacher_gripper_switch,
+            flow_budget_charge=flow_budget_charge,
+            flow_error_budget=self.flow_error_budget,
             **verify_telemetry,
             elapsed_sec=time.perf_counter() - start,
         )

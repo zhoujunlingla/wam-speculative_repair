@@ -526,6 +526,21 @@ class VA_Server:
         ]
         any_reconstructed_switch = any(
             switch['has_switch'] for switch in reconstructed_switches)
+        draft_switch = gripper_switch_info(
+            draft,
+            previous=previous_gripper,
+            threshold=gripper_threshold,
+        )
+        gripper_channels = (28, 29)
+        draft_gripper_phase = draft_batch[
+            :, gripper_channels, conditioned_frame_count:
+        ] >= gripper_threshold
+        reconstructed_gripper_phase = reconstructed[
+            :, gripper_channels, conditioned_frame_count:
+        ] >= gripper_threshold
+        gripper_phase_agreement_by_tau = (
+            reconstructed_gripper_phase == draft_gripper_phase
+        ).float().reshape(batch_size, -1).mean(dim=1)
         if any_reconstructed_switch:
             accepted_prefix = 0
             stitched_action_latent = teacher_endpoint
@@ -560,6 +575,12 @@ class VA_Server:
             'gripper_switch_channels': active_switch['channels'],
             'gripper_switch_indices': active_switch['switch_indices'],
             'gripper_switch_anywhere': bool(any_reconstructed_switch),
+            'draft_gripper_switch_index': draft_switch['first_index'],
+            'gripper_switch_indices_by_tau': [
+                switch['first_index'] for switch in reconstructed_switches
+            ],
+            'gripper_phase_agreement_by_tau':
+                gripper_phase_agreement_by_tau.detach().float().cpu().tolist(),
             'gripper_switch_anywhere_index': min(
                 (switch['first_index'] for switch in reconstructed_switches
                  if switch['first_index'] is not None),

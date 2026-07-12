@@ -144,3 +144,25 @@ when `teacher_gripper_fallback=False`; force mode remains unchanged.
 
 Remote policy/specverify suite passed `16/16`. The invalid V1 partial run is
 marked STOP and must not be reported as benchmark evidence.
+
+## V2 Cumulative Flow-Error Refresh Review
+
+No blocking correctness finding remains after review.
+
+- Medium experiment risk: cumulative endpoint discrepancy is a stale-cache
+  proxy, not a semantic task-progress certificate. Low residual false accepts
+  remain possible, so the matched quality gate is mandatory.
+- A telemetry bias was fixed during review: cached/conditioned historical
+  frames would inflate gripper agreement. Agreement now uses only future,
+  unconditioned frames.
+- Existing behavior is unchanged when `flow_budget_threshold=0`. The diff does
+  not add repair, adaptive probes, or a new gripper routing decision.
+
+Verification:
+
+- Remote policy/specverify suite: `17 passed`.
+- Local `py_compile` and `git diff --check`: passed.
+
+Decision: allowed to proceed to one RoboTwin smoke. Formal evaluation requires
+nonzero budget telemetry, correct reset after a budget-triggered full round,
+and no cache/reset/render error.

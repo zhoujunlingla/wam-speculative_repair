@@ -10,6 +10,7 @@ from specverify import (  # noqa: E402
     gripper_consensus_prefix,
     gripper_switch_info,
     latent_frame_motion_stats,
+    latent_prediction_error_stats,
     longest_prefix_min_over_k,
     normalized_l2_distances,
     quantize_prefix_to_frame_boundary,
@@ -53,6 +54,20 @@ def test_latent_frame_motion_stats_detects_concentrated_change():
     assert stats["top_mean"] == 2.0
     assert stats["top_concentration"] == 1.0
     assert stats["top_relative"] > 1.0
+
+
+def test_latent_prediction_error_aligns_available_frames():
+    predicted = torch.zeros(1, 4, 2, 2, 2)
+    observed = torch.ones(1, 4, 1, 2, 2)
+
+    stats = latent_prediction_error_stats(predicted, observed, top_fraction=0.25)
+
+    assert stats["compared_latent_frames"] == 1
+    assert stats["latent_rmse"] == 1.0
+    assert stats["latent_nrmse"] == 1.0
+    assert stats["cosine_distance"] == 1.0
+    assert stats["per_frame_rmse"] == [1.0]
+    assert stats["top_patch_rmse"] == 1.0
 
 
 def test_normalized_l2_uses_only_continuous_channels():

@@ -41,6 +41,7 @@ from specverify import (
     build_verify_action_input,
     gripper_consensus_prefix,
     gripper_switch_info,
+    latent_prediction_error_stats,
     longest_prefix_min_over_k,
     latent_frame_motion_stats,
     make_verify_scheduler,
@@ -673,6 +674,8 @@ class VA_Server:
         #### Reset all parameters
         self.frame_st_id = 0
         self.init_latent = None
+        self.pending_video_prediction = None
+        self.pending_video_prediction_frame_st_id = None
         #### clean vae and transformer cache
         self.transformer.clear_cache(self.cache_name)
         self.streaming_vae.clear_cache()
@@ -869,7 +872,25 @@ class VA_Server:
         ### optional async save obs for debug
         self.transformer.clear_pred_cache(self.cache_name)
         save_async(obs['obs'], os.path.join(self.exp_save_root, f'obs_data_{self.frame_st_id}.pt'))
-        latent_model_input = self._encode_obs(obs)
+        observed_latent = self._encode_obs(obs)
+        delayed_video_error = None
+        if obs.get('compare_video_prediction', False):
+            if self.pending_video_prediction is None:
+                raise RuntimeError('draft cache update has no pending video prediction')
+            if self.pending_video_prediction_frame_st_id != self.frame_st_id:
+                raise RuntimeError('video prediction/cache frame ids are misaligned')
+            if observed_latent is None:
+                raise RuntimeError('video prediction comparison requires an observation')
+            delayed_video_error = latent_prediction_error_stats(
+                self.pending_video_prediction, observed_latent)
+            delayed_video_error.update(
+                prediction_frame_st_id=self.pending_video_prediction_frame_st_id,
+                real_frame_st_id=self.frame_st_id,
+            )
+        self.pending_video_prediction = None
+        self.pending_video_prediction_frame_st_id = None
+
+        latent_model_input = observed_latent
         if self.frame_st_id == 0:
             latent_model_input = torch.cat(
                 [self.init_latent, latent_model_input],
@@ -898,6 +919,7 @@ class VA_Server:
                              action_mode=True)
         torch.cuda.empty_cache()
         self.frame_st_id += latent_model_input.shape[2]
+        return delayed_video_error
 
     @torch.no_grad()
     def infer(self, obs):
@@ -954,11 +976,15 @@ class VA_Server:
         elif compute_kv_cache:
             logger.info(
                 f"################# Compute KV Cache #################")
-            self._compute_kv_cache(obs)
-            return dict()
+            delayed_video_error = self._compute_kv_cache(obs)
+            return ({'delayed_video_error': delayed_video_error}
+                    if delayed_video_error is not None else dict())
         else:
             logger.info(f"################# Infer One Chunk #################")
             action, video_latent = self._infer(obs, frame_st_id=self.frame_st_id)
+            if obs.get('track_video_prediction', False):
+                self.pending_video_prediction = video_latent.detach()
+                self.pending_video_prediction_frame_st_id = self.frame_st_id
             result = dict(action=action)
             if obs.get('return_action_latent', False):
                 result['action_latent'] = self.last_action_latent

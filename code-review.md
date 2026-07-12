@@ -276,6 +276,34 @@ preserving speculative-sampling guarantee.
 Verification: remote focused suite `26 passed`; local compile and diff checks
 passed.
 
+## Delayed Video Prediction Error Shadow Review
+
+No blocking correctness finding remains.
+
+- Prediction and observation are compared only inside the draft server, using
+  the same VAE normalization and camera packing.
+- The policy marks comparison only for an actually executed draft prefix.
+  Teacher actions, replans, resets, and abandoned drafts clear or ignore the
+  pending prediction, preventing invalid labels.
+- Frame count is inherited from the existing cache update, so 16/32 executed
+  actions compare one/two latent frames respectively.
+- The implementation adds no model forward, encode, decode, or latent network
+  transfer. One two-frame GPU tensor is retained until the next cache update;
+  only scalar reductions enter JSONL telemetry.
+- Frame-id mismatch and missing prediction are hard errors rather than silently
+  producing misleading research data.
+- The signal is shadow-only and cannot influence acceptance or teacher use.
+
+Risks: temporal alignment still requires a real RoboTwin smoke, and latent
+error is not calibrated across tasks/cameras. It must not route until completed
+episode traces support a conformal threshold at a matched fallback rate.
+
+Verification: local compile/diff checks passed; remote focused suite
+`28 passed`.
+
+Decision: allowed to run one real shadow smoke after an experiment GPU becomes
+free. No routing change is approved.
+
 ## Draft Video Motion Shadow Review
 
 No blocking finding. The statistic reduces the video latent already produced by

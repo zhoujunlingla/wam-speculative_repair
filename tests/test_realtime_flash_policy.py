@@ -64,6 +64,8 @@ class _FakeModel:
         if kind == "cache":
             self.cache.append(request["tag"])
             self.frame_st_id += int(np.asarray(request["state"]).shape[1])
+            if request.get("compare_video_prediction", False):
+                return {"delayed_video_error": {"latent_nrmse": 0.25}}
             return {}
         if kind == "verify":
             result = self.verify_results.popleft() if self.verify_results else 32
@@ -510,6 +512,32 @@ def test_flash_logs_distances_without_changing_acceptance(tmp_path):
     assert record["gripper_phase_agreement_by_tau"] == [1.0, 0.75]
     assert record["draft_gripper_switch_index"] == 7
     assert record["video_motion_stats"]["top_relative"] == 4.0
+
+
+def test_executed_draft_cache_update_logs_delayed_video_error(tmp_path):
+    events = []
+    draft = _FakeModel("draft", events)
+    teacher = _FakeModel("teacher", events)
+    log_path = tmp_path / "metrics.jsonl"
+    policy = RealtimeFlashPolicy(
+        draft,
+        teacher,
+        pf_interval=10,
+        log_path=log_path,
+        rng=np.random.default_rng(7),
+    )
+    policy.infer({"reset": True, "prompt": "test task"})
+    first = policy.infer(_action_request())
+    policy.infer(_cache_request("anchor", first["action"]))
+    flash = policy.infer(_action_request())
+    policy.infer(_cache_request("flash", flash["action"]))
+    record = json.loads(log_path.read_text().splitlines()[-1])
+
+    draft_cache = [call for call in draft.calls if call["kind"] == "cache"][-1]
+    draft_action = [call for call in draft.calls if call["kind"] == "action"][-1]
+    assert draft_action["request"]["track_video_prediction"] is True
+    assert draft_cache["request"]["compare_video_prediction"] is True
+    assert record["delayed_video_error"]["latent_nrmse"] == 0.25
 
 
 def test_zero_prefix_replans_same_observation_without_cache_update():

@@ -43,6 +43,56 @@ def latent_frame_motion_stats(
     }
 
 
+def latent_prediction_error_stats(
+    predicted: torch.Tensor,
+    observed: torch.Tensor,
+    *,
+    top_fraction: float = 0.1,
+) -> dict:
+    """Summarize an action-aligned predicted/observed video latent residual."""
+
+    if predicted.ndim != 5 or observed.ndim != 5:
+        raise ValueError("video latents must have shape [B, C, F, H, W]")
+    if predicted.shape[:2] != observed.shape[:2] or predicted.shape[3:] != observed.shape[3:]:
+        raise ValueError("predicted and observed latent spaces must match")
+    if predicted.shape[0] != 1 or observed.shape[0] != 1:
+        raise ValueError("delayed video error expects one rollout")
+    if not 0 < top_fraction <= 1:
+        raise ValueError("top_fraction must be in (0, 1]")
+
+    frames = min(predicted.shape[2], observed.shape[2])
+    if frames < 1:
+        raise ValueError("at least one aligned latent frame is required")
+    predicted = predicted[:, :, :frames].float()
+    observed = observed[:, :, :frames].float()
+    residual = predicted - observed
+    patch_rmse = residual.square().mean(dim=1).sqrt()
+    flat_patch = patch_rmse.flatten()
+    top_count = max(1, int(math.ceil(flat_patch.numel() * top_fraction)))
+    eps = torch.finfo(torch.float32).eps
+    pred_flat = predicted.flatten()
+    obs_flat = observed.flatten()
+    cosine = torch.nn.functional.cosine_similarity(
+        pred_flat.unsqueeze(0), obs_flat.unsqueeze(0), dim=1, eps=eps
+    )[0]
+
+    return {
+        "compared_latent_frames": frames,
+        "latent_rmse": float(residual.square().mean().sqrt().item()),
+        "latent_nrmse": float(
+            residual.norm().div(observed.norm().clamp_min(eps)).item()
+        ),
+        "cosine_distance": float((1.0 - cosine).item()),
+        "per_frame_rmse": [
+            float(value) for value in residual.square().mean(dim=(0, 1, 3, 4)).sqrt()
+        ],
+        "spatial_p95_rmse": float(torch.quantile(flat_patch, 0.95).item()),
+        "top_patch_rmse": float(flat_patch.topk(top_count).values.mean().item()),
+        "pred_rms": float(predicted.square().mean().sqrt().item()),
+        "real_rms": float(observed.square().mean().sqrt().item()),
+    }
+
+
 def sample_verify_noise_like(clean: torch.Tensor, seed=None) -> torch.Tensor:
     """Sample the one Gaussian probe shared by every verifier timestep."""
 

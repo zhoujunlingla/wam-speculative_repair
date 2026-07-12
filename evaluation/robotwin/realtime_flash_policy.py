@@ -304,7 +304,9 @@ class RealtimeFlashPolicy:
             raise RuntimeError("cache update received without an executed action")
         frame_count = self._cache_frame_count(request)
 
-        self._call(self.draft, dict(request))
+        draft_request = dict(request)
+        draft_request["compare_video_prediction"] = source == "flash"
+        draft_response = self._call(self.draft, draft_request)
         if source == "full":
             self._call(self.teacher, dict(request))
         else:
@@ -318,7 +320,9 @@ class RealtimeFlashPolicy:
         self.pending_cache_source = None
         self._log(
             source=f"{source}_cache_update",
+            cache_frame_count=frame_count,
             pending_teacher_cache_updates=len(self.pending_teacher_cache_updates),
+            delayed_video_error=draft_response.get("delayed_video_error"),
             elapsed_sec=time.perf_counter() - start,
         )
         return {}
@@ -412,6 +416,7 @@ class RealtimeFlashPolicy:
         draft_request = dict(request)
         draft_request["return_action_latent"] = True
         draft_request["return_video_motion_stats"] = True
+        draft_request["track_video_prediction"] = True
         draft_response = self._call(self.draft, draft_request)
         self._draft_primed = True
         action = self._action(draft_response)

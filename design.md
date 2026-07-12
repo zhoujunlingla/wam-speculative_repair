@@ -235,6 +235,29 @@ precision-contact gripper rounds and ordinary gripper rounds before it may
 select `gripper_full_window=2`. It does not change action acceptance, budget,
 teacher use, or repair.
 
+## WAM Shadow Signal: Delayed Video Prediction Error
+
+Raw motion measures how much the imagined video changes, not whether that
+future is correct. The next WAM-specific shadow signal compares an executed
+draft's future video latent with the real observation latent produced by the
+draft server's next mandatory cache update:
+
+```text
+r_t = distance(predicted_video_latent[t], encode(real_observation[t]))
+```
+
+Both tensors stay in the same draft VAE normalization space. A 16-action
+prefix compares one predicted frame and a 32-action prefix compares two. A
+rejected draft, replan, or teacher action must clear/ignore the pending
+prediction. The cache update already performs the VAE encode, so the shadow
+adds no DiT, VAE encode, decode, or network transfer; it stores at most one
+two-frame latent and returns scalar reductions only.
+
+The first version logs RMSE, normalized RMSE, cosine distance, per-frame RMSE,
+and top-patch residual. It cannot route teacher use until completed episodes
+show that it predicts failure better than raw motion at a matched fallback
+rate.
+
 ## Cross-Tau Gripper Consensus
 
 The original migration applies two independent phase fallbacks: the server

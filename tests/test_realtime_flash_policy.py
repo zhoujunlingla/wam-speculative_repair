@@ -304,6 +304,55 @@ def test_second_flow_budget_refresh_runs_two_teacher_rounds():
     assert policy.teacher_burst_rounds_left == 0
 
 
+def test_flow_budget_burst_limit_allows_only_one_episode_burst():
+    distances = np.full((2, 2, 16), 0.04, dtype=np.float32)
+    events = []
+    draft = _FakeModel("draft", events)
+    teacher = _FakeModel(
+        "teacher",
+        events,
+        verify_results=tuple(
+            {"accepted_prefix": 32, "distances": distances} for _ in range(3)
+        ),
+    )
+    policy = RealtimeFlashPolicy(
+        draft,
+        teacher,
+        pf_interval=0,
+        flow_budget_threshold=0.03,
+        flow_budget_burst_after=2,
+        flow_budget_burst_rounds=2,
+        flow_budget_burst_limit=1,
+        rng=np.random.default_rng(7),
+    )
+    policy.infer({"reset": True, "prompt": "test task"})
+    initial = policy.infer(_action_request())
+    policy.infer(_cache_request("anchor", initial["action"]))
+
+    full_reasons = []
+    for crossing in range(3):
+        flash = policy.infer(_action_request())
+        policy.infer(_cache_request(f"flash-{crossing}", flash["action"]))
+        refresh = policy.infer(_action_request())
+        full_reasons.append(refresh["full_reason"])
+        policy.infer(_cache_request(f"refresh-{crossing}", refresh["action"]))
+        if crossing == 1:
+            burst = policy.infer(_action_request())
+            full_reasons.append(burst["full_reason"])
+            policy.infer(_cache_request("burst", burst["action"]))
+
+    after_limit = policy.infer(_action_request())
+
+    assert full_reasons == [
+        "flow_budget",
+        "flow_budget",
+        "flow_budget_burst",
+        "flow_budget",
+    ]
+    assert policy.flow_budget_bursts_used == 1
+    assert after_limit["action_source"] == "draft_flash"
+
+
 def test_teacher_reconstructed_gripper_switch_forces_replan():
     policy, _, _, _ = _anchored_policy(
         pf_interval=10,

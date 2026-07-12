@@ -205,6 +205,12 @@ risk score. It does not alter endpoint acceptance, gripper fallback, repair, or
 video signals. The first test is restricted to `hanging_mug` and
 `open_microwave`; it must improve completed-trial success before replacing V2.
 
+Repeated bursting on every later crossing raises teacher use without rescuing
+long failed episodes. A bounded variant may cap bursts per episode: the first
+crossing remains a single teacher round, one later crossing may schedule a
+two-round recovery burst, and subsequent crossings return to single-round
+refresh. A zero limit preserves the existing unlimited behavior.
+
 ### Phase window parity
 
 Realtime-VLA-FLASH exposes `gripper_full_window`; the initial LingBot migration

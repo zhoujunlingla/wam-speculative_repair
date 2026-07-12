@@ -260,6 +260,22 @@ or unsupported paths. Numbers were read from completed run summaries; no policy
 behavior or experiment command changed. Allowed to commit without an additional
 runtime test beyond the already-passing `25` focused tests.
 
+## Bounded Flow-Budget Burst Review
+
+No blocking finding. A positive `flow_budget_burst_limit` caps only the number
+of burst escalations per episode; every budget crossing still receives its
+ordinary teacher refresh. Limit zero preserves the previous unlimited behavior,
+and reset clears the burst-use counter. The focused state-machine test covers
+three crossings and proves that only the second crossing receives one extra
+teacher round when the limit is one.
+
+Decision: allowed to test `.18`, burst-after-two, two rounds, limit one on
+`hanging_mug`. It remains an empirical recovery policy, not a distribution-
+preserving speculative-sampling guarantee.
+
+Verification: remote focused suite `26 passed`; local compile and diff checks
+passed.
+
 ## Draft Video Motion Shadow Review
 
 No blocking finding. The statistic reduces the video latent already produced by

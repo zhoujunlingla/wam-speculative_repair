@@ -153,6 +153,7 @@ class RealtimeFlashPolicy:
         flow_budget_threshold: float = 0.0,
         flow_budget_burst_after: int = 0,
         flow_budget_burst_rounds: int = 0,
+        flow_budget_burst_limit: int = 0,
         gripper_full_window: int = 1,
         gripper_consensus: bool = False,
         rng: Optional[np.random.Generator] = None,
@@ -166,7 +167,11 @@ class RealtimeFlashPolicy:
             raise ValueError("action_per_frame must be positive")
         if not np.isfinite(flow_budget_threshold) or flow_budget_threshold < 0:
             raise ValueError("flow_budget_threshold must be non-negative")
-        if flow_budget_burst_after < 0 or flow_budget_burst_rounds < 0:
+        if (
+            flow_budget_burst_after < 0
+            or flow_budget_burst_rounds < 0
+            or flow_budget_burst_limit < 0
+        ):
             raise ValueError("flow budget burst values must be non-negative")
         if gripper_full_window < 1:
             raise ValueError("gripper_full_window must be positive")
@@ -188,6 +193,7 @@ class RealtimeFlashPolicy:
         self.flow_budget_threshold = float(flow_budget_threshold)
         self.flow_budget_burst_after = int(flow_budget_burst_after)
         self.flow_budget_burst_rounds = int(flow_budget_burst_rounds)
+        self.flow_budget_burst_limit = int(flow_budget_burst_limit)
         self.gripper_full_window = int(gripper_full_window)
         self.gripper_consensus = bool(gripper_consensus)
         self.rng = rng or np.random.default_rng()
@@ -209,6 +215,7 @@ class RealtimeFlashPolicy:
         self.last_gripper = None
         self.flow_error_budget = 0.0
         self.flow_budget_refresh_count = 0
+        self.flow_budget_bursts_used = 0
         self.teacher_burst_rounds_left = 0
         self.gripper_full_rounds_left = 0
         self._draft_primed = False
@@ -534,8 +541,13 @@ class RealtimeFlashPolicy:
             if (
                 self.flow_budget_burst_after > 0
                 and self.flow_budget_refresh_count >= self.flow_budget_burst_after
+                and (
+                    self.flow_budget_burst_limit == 0
+                    or self.flow_budget_bursts_used < self.flow_budget_burst_limit
+                )
             ):
                 self.teacher_burst_rounds_left = self.flow_budget_burst_rounds
+                self.flow_budget_bursts_used += 1
         executed_action = slice_action_prefix(action, accepted_prefix)
         self._stage_gripper(executed_action)
         response = {

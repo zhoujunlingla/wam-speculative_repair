@@ -229,6 +229,27 @@ precision-contact gripper rounds and ordinary gripper rounds before it may
 select `gripper_full_window=2`. It does not change action acceptance, budget,
 teacher use, or repair.
 
+## Cross-Tau Gripper Consensus
+
+The original migration applies two independent phase fallbacks: the server
+rejects any teacher reconstruction containing a gripper transition, then the
+client truncates any decoded draft transition again. This rejects transitions
+even when the draft and every teacher probe agree on the discrete phase.
+
+An opt-in consensus mode makes the server the single owner of gripper
+acceptance. Within the continuous endpoint prefix, every draft gripper phase
+must equal the reconstructed phase at every configured tau. The first phase
+disagreement bounds the prefix and is floored to the normal 16-action frame
+boundary. A phase transition that all probes reproduce is allowed. In this
+mode the client logs decoded transitions but does not apply a second fallback.
+When disagreement leaves a nonzero safe prefix, the client executes that
+prefix and schedules the configured teacher phase window for the next round;
+it must not resume drafting immediately from the rejected suffix boundary.
+
+The mode requires at least two tau probes, remains disabled by default, and
+cannot enlarge the continuous endpoint prefix. It is tested before any video
+signal is allowed to route teacher phase windows.
+
 ### Verifier calibration telemetry
 
 The V1 smoke showed that removing periodic and reconstructed-gripper full paths

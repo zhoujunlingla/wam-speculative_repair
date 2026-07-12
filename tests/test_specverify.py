@@ -7,12 +7,40 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "wan_va"))
 
 from specverify import (  # noqa: E402
+    gripper_consensus_prefix,
     gripper_switch_info,
     latent_frame_motion_stats,
     longest_prefix_min_over_k,
     normalized_l2_distances,
     quantize_prefix_to_frame_boundary,
 )
+
+
+def test_gripper_consensus_accepts_shared_transition_and_bounds_disagreement():
+    draft = torch.full((1, 30, 2, 16, 1), -1.0)
+    draft[:, 28, 1, 4:] = 1.0
+    reconstructed = draft.repeat(2, 1, 1, 1, 1)
+
+    prefix, failure = gripper_consensus_prefix(
+        reconstructed, draft, max_prefix=32
+    )
+    assert (prefix, failure) == (32, None)
+
+    reconstructed[1, 28, 1, 7, 0] = -1.0
+    prefix, failure = gripper_consensus_prefix(
+        reconstructed, draft, max_prefix=32
+    )
+    assert (prefix, failure) == (23, 23)
+
+
+def test_gripper_consensus_requires_cross_tau_probes():
+    draft = torch.zeros(1, 30, 2, 16, 1)
+    try:
+        gripper_consensus_prefix(draft, draft, max_prefix=32)
+    except ValueError as error:
+        assert "at least two" in str(error)
+    else:
+        raise AssertionError("K=1 must not be treated as cross-tau consensus")
 
 
 def test_latent_frame_motion_stats_detects_concentrated_change():

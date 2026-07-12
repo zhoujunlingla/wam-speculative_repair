@@ -39,6 +39,7 @@ from utils import (
 from specverify import (
     action_verify_frame_start,
     build_verify_action_input,
+    gripper_consensus_prefix,
     gripper_switch_info,
     longest_prefix_min_over_k,
     latent_frame_motion_stats,
@@ -420,7 +421,8 @@ class VA_Server:
                             verify_noise=None,
                             verify_seed=None,
                             previous_gripper=None,
-                            gripper_threshold=0.0):
+                            gripper_threshold=0.0,
+                            gripper_consensus=False):
         """Verify one normalized draft and return its teacher-tail stitch."""
 
         if draft_actions.ndim != 5 or draft_actions.shape[0] != 1 or \
@@ -436,6 +438,8 @@ class VA_Server:
                                         device=self.device).flatten()
         if tau_timesteps.numel() < 1:
             raise ValueError('tau_timesteps must be non-empty')
+        if gripper_consensus and tau_timesteps.numel() < 2:
+            raise ValueError('gripper consensus requires at least two tau probes')
 
         draft = draft_actions.to(device=self.device, dtype=self.dtype).clone()
         draft[:, ~self.action_mask] = 0
@@ -509,7 +513,7 @@ class VA_Server:
             threshold=gripper_threshold,
         )
         accepted_prefix = accepted_before_gripper
-        if active_switch['has_switch']:
+        if active_switch['has_switch'] and not gripper_consensus:
             accepted_prefix = quantize_prefix_to_frame_boundary(
                 active_switch['first_index'],
                 action_per_frame=self.action_per_frame,
@@ -542,7 +546,25 @@ class VA_Server:
         gripper_phase_agreement_by_tau = (
             reconstructed_gripper_phase == draft_gripper_phase
         ).float().reshape(batch_size, -1).mean(dim=1)
-        if any_reconstructed_switch:
+        consensus_prefix = accepted_before_gripper
+        consensus_failure_index = None
+        if gripper_consensus:
+            consensus_raw_prefix, consensus_failure_index = \
+                gripper_consensus_prefix(
+                    reconstructed,
+                    draft,
+                    max_prefix=accepted_before_gripper,
+                    threshold=gripper_threshold,
+                )
+            consensus_prefix = quantize_prefix_to_frame_boundary(
+                consensus_raw_prefix,
+                action_per_frame=self.action_per_frame,
+                frame_chunk_size=self.job_config.frame_chunk_size,
+            )
+            accepted_prefix = min(accepted_before_gripper, consensus_prefix)
+            stitched_action_latent = stitch_action_prefix(
+                draft, teacher_endpoint, accepted_prefix)
+        elif any_reconstructed_switch:
             accepted_prefix = 0
             stitched_action_latent = teacher_endpoint
 
@@ -588,6 +610,8 @@ class VA_Server:
                 default=None,
             ),
             'gripper_force_teacher': bool(any_reconstructed_switch),
+            'gripper_consensus_prefix': consensus_prefix,
+            'gripper_consensus_failure_index': consensus_failure_index,
             'fallback_required': accepted_prefix == 0,
         }
 
@@ -912,6 +936,7 @@ class VA_Server:
                 verify_seed=obs.get('verify_seed'),
                 previous_gripper=obs.get('previous_gripper'),
                 gripper_threshold=float(obs.get('gripper_threshold', 0.0)),
+                gripper_consensus=bool(obs.get('gripper_consensus', False)),
             )
             distances = verify_result.pop('distances')
             tau_timesteps = verify_result.pop('tau_timesteps')

@@ -299,3 +299,37 @@ def gripper_switch_info(
         "channels": first_channels,
         "switch_indices": switch_indices,
     }
+
+
+def gripper_consensus_prefix(
+    reconstructed: torch.Tensor,
+    draft: torch.Tensor,
+    *,
+    max_prefix: int,
+    threshold: float = 0.0,
+    gripper_channels=GRIPPER_CHANNELS,
+) -> tuple[int, int | None]:
+    """Bound a prefix at the first draft/teacher gripper phase disagreement."""
+
+    if reconstructed.ndim != 5 or draft.ndim != 5:
+        raise ValueError("actions must have shape [K, C, F, N, 1]")
+    if draft.shape[0] != 1 or reconstructed.shape[1:] != draft.shape[1:]:
+        raise ValueError("draft must contain one chunk matching every reconstruction")
+    if reconstructed.shape[0] < 2:
+        raise ValueError("cross-tau gripper consensus requires at least two probes")
+    channels = tuple(int(channel) for channel in gripper_channels)
+    if not channels or min(channels) < 0 or max(channels) >= draft.shape[1]:
+        raise ValueError("gripper channel index is outside the action tensor")
+
+    horizon = draft.shape[2] * draft.shape[3]
+    limit = max(0, min(int(max_prefix), horizon))
+    draft_phase = draft[0, channels, :, :, 0].reshape(len(channels), horizon) >= threshold
+    teacher_phase = reconstructed[:, channels, :, :, 0].reshape(
+        reconstructed.shape[0], len(channels), horizon
+    ) >= threshold
+    disagreement = torch.any(
+        teacher_phase[:, :, :limit] != draft_phase[None, :, :limit], dim=(0, 1)
+    )
+    indices = disagreement.nonzero(as_tuple=False).flatten()
+    first = int(indices[0].item()) if indices.numel() else None
+    return (limit if first is None else first), first

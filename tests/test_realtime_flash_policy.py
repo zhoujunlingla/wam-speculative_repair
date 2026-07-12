@@ -353,6 +353,75 @@ def test_teacher_reconstructed_gripper_switch_can_be_diagnostic_only():
     assert accepted["replan"] is False
 
 
+def test_gripper_consensus_partial_prefix_schedules_teacher_window():
+    events = []
+    draft = _FakeModel("draft", events, action=_action(switch_step=20))
+    teacher = _FakeModel(
+        "teacher",
+        events,
+        verify_results=({
+            "accepted_prefix": 16,
+            "gripper_consensus_prefix": 16,
+            "gripper_consensus_failure_index": 20,
+        },),
+    )
+    policy = RealtimeFlashPolicy(
+        draft,
+        teacher,
+        pf_interval=0,
+        gripper_consensus=True,
+        gripper_full_window=2,
+        rng=np.random.default_rng(7),
+    )
+    policy.infer({"reset": True, "prompt": "test task"})
+    first = policy.infer(_action_request())
+    policy.infer(_cache_request("anchor", first["action"]))
+
+    partial = policy.infer(_action_request())
+    policy.infer(_cache_request("partial", partial["action"]))
+    teacher_1 = policy.infer(_action_request())
+    policy.infer(_cache_request("teacher-1", teacher_1["action"]))
+    teacher_2 = policy.infer(_action_request())
+
+    assert partial["accepted_prefix"] == 16
+    assert partial["fallback_reason"] == "gripper_consensus"
+    assert teacher_1["full_reason"] == "gripper_consensus"
+    assert teacher_2["full_reason"] == "gripper_phase_burst"
+
+
+def test_gripper_consensus_makes_server_prefix_authoritative():
+    events = []
+    draft = _FakeModel("draft", events, action=_action(switch_step=20))
+    teacher = _FakeModel(
+        "teacher",
+        events,
+        verify_results=({
+            "accepted_prefix": 32,
+            "gripper_consensus_prefix": 32,
+            "gripper_force_teacher": True,
+        },),
+    )
+    policy = RealtimeFlashPolicy(
+        draft,
+        teacher,
+        pf_interval=10,
+        gripper_consensus=True,
+        rng=np.random.default_rng(7),
+    )
+    policy.infer({"reset": True, "prompt": "test task"})
+    first = policy.infer(_action_request())
+    policy.infer(_cache_request("anchor", first["action"]))
+
+    accepted = policy.infer(_action_request())
+    verify_call = [call for call in teacher.calls if call["kind"] == "verify"][-1]
+
+    assert verify_call["request"]["gripper_consensus"] is True
+    assert accepted["action_source"] == "draft_flash"
+    assert accepted["accepted_prefix"] == 32
+    assert accepted["replan"] is False
+    assert "fallback_reason" not in accepted
+
+
 def test_flash_logs_distances_without_changing_acceptance(tmp_path):
     events = []
     draft = _FakeModel("draft", events)

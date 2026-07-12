@@ -218,6 +218,40 @@ Remote policy/specverify suite passes `20/20`; local compile and diff checks
 pass. Allowed to run `hanging_mug` TN=5 with window two. No consensus acceptance
 or repair is enabled.
 
+## Cross-Tau Gripper Consensus Review
+
+No blocking correctness finding remains after review.
+
+- The server is the sole owner of gripper acceptance in consensus mode; the
+  client no longer applies a second decoded-action truncation.
+- Consensus cannot enlarge the continuous endpoint prefix. It only finds the
+  first step where any teacher probe's discrete gripper phase differs from the
+  draft and floors that bound to the existing frame boundary.
+- A transition reproduced by both tau probes is executable. `K=1` is rejected
+  because it is not cross-tau consensus.
+- The mode is opt-in and defaults off, preserving all completed baselines.
+- Existing `gripper_force_teacher` remains telemetry in consensus mode and no
+  longer overrides the consensus prefix.
+- A consensus-accepted decoded transition is logged as
+  `decoded_gripper_switch_step`; it is not mislabeled as a fallback.
+- A rejected suffix after a nonzero consensus prefix schedules the configured
+  teacher phase window. This closes a smoke-discovered gap where the next round
+  incorrectly resumed drafting immediately after a 16-step prefix.
+
+Risks: exact phase equality can still be conservative around a one-step switch
+boundary, and phase agreement does not certify contact success. This mode must
+first pass a small matched `hanging_mug`/`place_can_basket` evaluation; it is not
+yet evidence for removing teacher phase windows globally.
+
+Verification:
+
+- Remote policy/specverify suite: `25 passed`.
+- Local `py_compile` and `git diff --check`: passed.
+
+Decision: allowed to proceed to a two-task smoke with video-motion routing kept
+disabled. Raw video-motion statistics remain shadow-only because their observed
+AUC is approximately random (`0.52`-`0.58`).
+
 ## Draft Video Motion Shadow Review
 
 No blocking finding. The statistic reduces the video latent already produced by

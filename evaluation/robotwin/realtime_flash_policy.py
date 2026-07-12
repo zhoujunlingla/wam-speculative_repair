@@ -154,6 +154,7 @@ class RealtimeFlashPolicy:
         flow_budget_burst_after: int = 0,
         flow_budget_burst_rounds: int = 0,
         gripper_full_window: int = 1,
+        gripper_consensus: bool = False,
         rng: Optional[np.random.Generator] = None,
         log_path: Optional[str] = None,
     ) -> None:
@@ -172,6 +173,8 @@ class RealtimeFlashPolicy:
         tau_timesteps = tuple(float(timestep) for timestep in tau_timesteps)
         if not tau_timesteps:
             raise ValueError("tau_timesteps must be non-empty")
+        if gripper_consensus and len(tau_timesteps) < 2:
+            raise ValueError("gripper consensus requires at least two tau probes")
 
         self.draft = draft
         self.teacher = teacher
@@ -186,6 +189,7 @@ class RealtimeFlashPolicy:
         self.flow_budget_burst_after = int(flow_budget_burst_after)
         self.flow_budget_burst_rounds = int(flow_budget_burst_rounds)
         self.gripper_full_window = int(gripper_full_window)
+        self.gripper_consensus = bool(gripper_consensus)
         self.rng = rng or np.random.default_rng()
         self.log_path = Path(log_path) if log_path else None
         if self.log_path:
@@ -419,6 +423,7 @@ class RealtimeFlashPolicy:
             threshold=self.threshold,
             tau_timesteps=self.tau_timesteps,
             frame_st_id=self.frame_st_id,
+            gripper_consensus=self.gripper_consensus,
         )
         if self.last_gripper is not None:
             previous_phase = self.last_gripper >= self.gripper_threshold
@@ -444,12 +449,25 @@ class RealtimeFlashPolicy:
                 "draft_gripper_switch_index"
             ),
             "video_motion_stats": video_motion_stats,
+            "gripper_consensus_prefix": verify_response.get(
+                "gripper_consensus_prefix"
+            ),
+            "gripper_consensus_failure_index": verify_response.get(
+                "gripper_consensus_failure_index"
+            ),
         }
 
         teacher_gripper_switch = bool(
             verify_response.get("gripper_force_teacher", False)
         )
-        if teacher_gripper_switch and self.teacher_gripper_fallback:
+        gripper_consensus_failure = verify_response.get(
+            "gripper_consensus_failure_index"
+        )
+        if (
+            teacher_gripper_switch
+            and self.teacher_gripper_fallback
+            and not self.gripper_consensus
+        ):
             verified_prefix = 0
             self.force_full_reason = "teacher_gripper_switch"
             self.gripper_full_rounds_left = self.gripper_full_window
@@ -461,12 +479,19 @@ class RealtimeFlashPolicy:
             previous=self.last_gripper,
         )
         accepted_prefix = verified_prefix
-        if switch_step is not None and verified_prefix > 0:
+        if (
+            switch_step is not None
+            and verified_prefix > 0
+            and not self.gripper_consensus
+        ):
             accepted_prefix = min(
                 accepted_prefix,
                 quantize_prefix(switch_step, self.action_per_frame, horizon),
             )
             self.force_full_reason = "gripper_switch"
+            self.gripper_full_rounds_left = self.gripper_full_window
+        if self.gripper_consensus and gripper_consensus_failure is not None:
+            self.force_full_reason = "gripper_consensus"
             self.gripper_full_rounds_left = self.gripper_full_window
 
         self.round_id += 1
@@ -520,7 +545,12 @@ class RealtimeFlashPolicy:
             "accepted_prefix": accepted_prefix,
             "verified_prefix": verified_prefix,
         }
-        if switch_step is not None:
+        if gripper_consensus_failure is not None:
+            response.update(
+                fallback_reason="gripper_consensus",
+                gripper_consensus_failure_index=gripper_consensus_failure,
+            )
+        elif switch_step is not None and not self.gripper_consensus:
             response.update(
                 fallback_reason="gripper_switch",
                 gripper_switch_step=switch_step,
@@ -531,6 +561,7 @@ class RealtimeFlashPolicy:
             accepted_prefix=accepted_prefix,
             verified_prefix=verified_prefix,
             teacher_gripper_switch=teacher_gripper_switch,
+            decoded_gripper_switch_step=switch_step,
             flow_budget_charge=flow_budget_charge,
             flow_error_budget=self.flow_error_budget,
             flow_budget_refresh_count=self.flow_budget_refresh_count,

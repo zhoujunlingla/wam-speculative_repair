@@ -136,6 +136,7 @@ def main() -> None:
     parser.add_argument("--flow-budget-burst-after", type=int, default=0)
     parser.add_argument("--flow-budget-burst-rounds", type=int, default=0)
     parser.add_argument("--gripper-full-window", type=int, default=1)
+    parser.add_argument("--gripper-consensus", action="store_true")
     parser.add_argument(
         "--teacher-gripper-fallback",
         action=argparse.BooleanOptionalAction,
@@ -166,6 +167,8 @@ def main() -> None:
         "--gripper-full-window", str(args.gripper_full_window),
         "--log-path", str(metrics_log),
     ]
+    if args.gripper_consensus:
+        server_cmd.append("--gripper-consensus")
     if not args.teacher_gripper_fallback:
         server_cmd.append("--no-teacher-gripper-fallback")
     client_cmd = [
@@ -238,6 +241,7 @@ def main() -> None:
         "flow_budget_burst_after": args.flow_budget_burst_after,
         "flow_budget_burst_rounds": args.flow_budget_burst_rounds,
         "gripper_full_window": args.gripper_full_window,
+        "gripper_consensus": args.gripper_consensus,
         "teacher_gripper_fallback": args.teacher_gripper_fallback,
         "started_at": started,
         "ended_at": datetime.now().isoformat(timespec="seconds"),

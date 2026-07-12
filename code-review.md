@@ -128,3 +128,19 @@ It does not feed telemetry back into prefix acceptance or runtime state.
 
 Verification: compileall and diff check passed; remote policy/specverify suite
 passed `16/16`, including exact preservation of the accepted prefix.
+
+## Diagnostic Gripper Prefix Fix Review
+
+The first V1 run proved that the original opt-out was incomplete: the server
+returned `accepted_prefix=0` together with
+`accepted_prefix_before_gripper=32`. The policy now selects the latter only
+when `teacher_gripper_fallback=False`; force mode remains unchanged.
+
+- The continuous endpoint result is still quantized by the existing helper.
+- The decoded action still passes through `first_gripper_switch()` afterward,
+  so a real executable gripper boundary remains a hard fallback.
+- The force-mode and diagnostic-mode tests use the same server-shaped response
+  and prove opposite expected decisions.
+
+Remote policy/specverify suite passed `16/16`. The invalid V1 partial run is
+marked STOP and must not be reported as benchmark evidence.

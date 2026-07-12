@@ -215,7 +215,8 @@ def test_teacher_reconstructed_gripper_switch_forces_replan():
     policy, _, _, _ = _anchored_policy(
         pf_interval=10,
         verify_results=({
-            "accepted_prefix": 32,
+            "accepted_prefix": 0,
+            "accepted_prefix_before_gripper": 32,
             "gripper_force_teacher": True,
         },),
     )
@@ -236,7 +237,8 @@ def test_teacher_reconstructed_gripper_switch_can_be_diagnostic_only():
         "teacher",
         events,
         verify_results=({
-            "accepted_prefix": 32,
+            "accepted_prefix": 0,
+            "accepted_prefix_before_gripper": 32,
             "gripper_force_teacher": True,
         },),
     )

@@ -301,7 +301,10 @@ class RealtimeFlashPolicy:
         verify_response: dict,
         horizon: int,
     ) -> int:
-        if "accepted_prefix" in verify_response:
+        if not self.teacher_gripper_fallback and \
+                "accepted_prefix_before_gripper" in verify_response:
+            raw_prefix = int(verify_response["accepted_prefix_before_gripper"])
+        elif "accepted_prefix" in verify_response:
             raw_prefix = int(verify_response["accepted_prefix"])
         elif "raw_valid_prefix" in verify_response:
             raw_prefix = int(verify_response["raw_valid_prefix"])

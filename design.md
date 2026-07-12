@@ -122,6 +122,14 @@ unchanged, while testing two evidence-backed policy changes together:
    hard fallback, while keeping the decoded draft gripper phase boundary as a
    hard fallback.
 
+The first V1 launch exposed a call-boundary bug: the teacher server had already
+zeroed `accepted_prefix` before returning `gripper_force_teacher`, so ignoring
+only the boolean in the policy did not make the signal diagnostic-only. In
+diagnostic mode the policy must consume `accepted_prefix_before_gripper`, which
+is the continuous endpoint-verifier result, and then independently apply the
+decoded draft gripper boundary. The invalid partial run is marked STOP and is
+not benchmark evidence.
+
 This iteration does not add repair, risk prediction, adaptive K, world latent
 signals, or endpoint correction. It may proceed only if unit tests preserve
 the original default behavior and a real smoke has no cache/reset/runtime

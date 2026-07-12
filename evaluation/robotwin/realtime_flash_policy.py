@@ -400,6 +400,7 @@ class RealtimeFlashPolicy:
         start = time.perf_counter()
         draft_request = dict(request)
         draft_request["return_action_latent"] = True
+        draft_request["return_video_motion_stats"] = True
         draft_response = self._call(self.draft, draft_request)
         self._draft_primed = True
         action = self._action(draft_response)
@@ -407,6 +408,7 @@ class RealtimeFlashPolicy:
         if action_latent is None:
             raise RuntimeError("draft inference did not return action_latent")
         action_latent = np.asarray(action_latent)
+        video_motion_stats = draft_response.get("video_motion_stats")
         horizon = action.shape[1] * action.shape[2]
 
         verify_request = dict(request)
@@ -441,6 +443,7 @@ class RealtimeFlashPolicy:
             "draft_gripper_switch_index": verify_response.get(
                 "draft_gripper_switch_index"
             ),
+            "video_motion_stats": video_motion_stats,
         }
 
         teacher_gripper_switch = bool(

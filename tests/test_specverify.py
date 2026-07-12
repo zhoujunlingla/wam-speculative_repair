@@ -8,10 +8,23 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "wan_va"))
 
 from specverify import (  # noqa: E402
     gripper_switch_info,
+    latent_frame_motion_stats,
     longest_prefix_min_over_k,
     normalized_l2_distances,
     quantize_prefix_to_frame_boundary,
 )
+
+
+def test_latent_frame_motion_stats_detects_concentrated_change():
+    latents = torch.zeros(1, 4, 2, 2, 2)
+    latents[:, :, 1, 0, 0] = 2
+
+    stats = latent_frame_motion_stats(latents, top_fraction=0.25)
+
+    assert stats["global_mean"] == 0.5
+    assert stats["top_mean"] == 2.0
+    assert stats["top_concentration"] == 1.0
+    assert stats["top_relative"] > 1.0
 
 
 def test_normalized_l2_uses_only_continuous_channels():

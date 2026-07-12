@@ -215,6 +215,20 @@ test therefore changes only `gripper_full_window` from one to two: a detected
 decoded or teacher gripper boundary schedules two consecutive teacher action
 rounds. The default remains one and reproduces the existing path.
 
+## WAM Shadow Signal: Draft Video Motion Concentration
+
+The two-round phase window can recover `hanging_mug`, but early trials use the
+teacher for roughly 70% of action rounds. Before routing on video, expose a
+zero-extra-forward statistic from the future video latent that FlashWAM already
+generates. For adjacent latent frames, compute the per-patch channel RMS motion,
+then log its global mean, top-10% mean, top/median ratio, and top-10%
+concentration. No latent is copied to the client and no image is decoded.
+
+This first version is shadow-only. It must demonstrate separation between
+precision-contact gripper rounds and ordinary gripper rounds before it may
+select `gripper_full_window=2`. It does not change action acceptance, budget,
+teacher use, or repair.
+
 ### Verifier calibration telemetry
 
 The V1 smoke showed that removing periodic and reconstructed-gripper full paths

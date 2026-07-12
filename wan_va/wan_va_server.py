@@ -41,6 +41,7 @@ from specverify import (
     build_verify_action_input,
     gripper_switch_info,
     longest_prefix_min_over_k,
+    latent_frame_motion_stats,
     make_verify_scheduler,
     normalized_l2_distances,
     quantize_prefix_to_frame_boundary,
@@ -932,10 +933,13 @@ class VA_Server:
             return dict()
         else:
             logger.info(f"################# Infer One Chunk #################")
-            action, _ = self._infer(obs, frame_st_id=self.frame_st_id)
+            action, video_latent = self._infer(obs, frame_st_id=self.frame_st_id)
             result = dict(action=action)
             if obs.get('return_action_latent', False):
                 result['action_latent'] = self.last_action_latent
+            if obs.get('return_video_motion_stats', False):
+                result['video_motion_stats'] = latent_frame_motion_stats(
+                    video_latent)
             return result
     
     def decode_one_video(self, latents, output_type):

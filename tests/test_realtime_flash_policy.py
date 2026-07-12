@@ -71,6 +71,14 @@ class _FakeModel:
         response = {"action": self.action.copy()}
         if self.role == "draft":
             response["action_latent"] = self.action_latent.copy()
+            if request.get("return_video_motion_stats", False):
+                response["video_motion_stats"] = {
+                    "global_mean": 0.1,
+                    "median": 0.05,
+                    "top_mean": 0.2,
+                    "top_relative": 4.0,
+                    "top_concentration": 0.5,
+                }
         return response
 
 
@@ -383,6 +391,7 @@ def test_flash_logs_distances_without_changing_acceptance(tmp_path):
     assert record["gripper_switch_indices_by_tau"] == [None, 7]
     assert record["gripper_phase_agreement_by_tau"] == [1.0, 0.75]
     assert record["draft_gripper_switch_index"] == 7
+    assert record["video_motion_stats"]["top_relative"] == 4.0
 
 
 def test_zero_prefix_replans_same_observation_without_cache_update():

@@ -217,3 +217,19 @@ The new test covers a 16-step safe prefix followed by two teacher rounds.
 Remote policy/specverify suite passes `20/20`; local compile and diff checks
 pass. Allowed to run `hanging_mug` TN=5 with window two. No consensus acceptance
 or repair is enabled.
+
+## Draft Video Motion Shadow Review
+
+No blocking finding. The statistic reduces the video latent already produced by
+the draft; it adds no DiT/VAE forward, decode, model, or dependency. Only five
+Python floats cross the local adapter boundary. Motion is non-negative channel
+RMS, and top-k count is bounded to at least one patch.
+
+The initial chunk compares a conditioned frame with a future frame, while later
+chunks compare two predicted future frames. `frame_st_id` is already logged, so
+calibration must stratify or exclude the initial case before routing. The signal
+is shadow-only and cannot change current actions.
+
+Remote policy/specverify suite passes `21/21`; local compile and diff checks
+pass. Allowed to run matched shadow collection; not allowed to gate teacher use
+until separation is demonstrated.

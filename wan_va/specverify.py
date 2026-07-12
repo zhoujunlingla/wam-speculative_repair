@@ -15,6 +15,34 @@ CONTINUOUS_CHANNELS = tuple(range(14))
 GRIPPER_CHANNELS = (28, 29)
 
 
+def latent_frame_motion_stats(
+    latents: torch.Tensor,
+    top_fraction: float = 0.1,
+) -> dict[str, float]:
+    """Summarize adjacent-frame motion already present in a video latent."""
+
+    if latents.ndim != 5 or latents.shape[2] < 2:
+        raise ValueError("latents must have shape [B,C,F,H,W] with F >= 2")
+    if not math.isfinite(float(top_fraction)) or not 0 < top_fraction <= 1:
+        raise ValueError("top_fraction must be in (0, 1]")
+    delta = latents[:, :, 1:] - latents[:, :, :-1]
+    motion = torch.linalg.vector_norm(delta.float(), ord=2, dim=1) / math.sqrt(
+        latents.shape[1]
+    )
+    flat = motion.flatten()
+    top_count = max(1, math.ceil(flat.numel() * float(top_fraction)))
+    top = torch.topk(flat, top_count).values
+    eps = torch.finfo(flat.dtype).eps
+    median = torch.quantile(flat, 0.5)
+    return {
+        "global_mean": float(flat.mean().item()),
+        "median": float(median.item()),
+        "top_mean": float(top.mean().item()),
+        "top_relative": float((top.mean() / median.clamp_min(eps)).item()),
+        "top_concentration": float((top.sum() / flat.sum().clamp_min(eps)).item()),
+    }
+
+
 def sample_verify_noise_like(clean: torch.Tensor, seed=None) -> torch.Tensor:
     """Sample the one Gaussian probe shared by every verifier timestep."""
 

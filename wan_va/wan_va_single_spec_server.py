@@ -79,6 +79,7 @@ def build_policy(args: argparse.Namespace):
         flow_budget_threshold=args.flow_budget_threshold,
         flow_budget_burst_after=args.flow_budget_burst_after,
         flow_budget_burst_rounds=args.flow_budget_burst_rounds,
+        gripper_full_window=args.gripper_full_window,
         rng=None if args.seed is None else np.random.default_rng(args.seed),
         log_path=args.log_path,
     )
@@ -109,6 +110,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--flow-budget-threshold", type=float, default=0.0)
     parser.add_argument("--flow-budget-burst-after", type=int, default=0)
     parser.add_argument("--flow-budget-burst-rounds", type=int, default=0)
+    parser.add_argument("--gripper-full-window", type=int, default=1)
     parser.add_argument(
         "--tau-timesteps", type=float, nargs="+", default=(50.0, 100.0)
     )

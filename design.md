@@ -205,6 +205,16 @@ risk score. It does not alter endpoint acceptance, gripper fallback, repair, or
 video signals. The first test is restricted to `hanging_mug` and
 `open_microwave`; it must improve completed-trial success before replacing V2.
 
+### Phase window parity
+
+Realtime-VLA-FLASH exposes `gripper_full_window`; the initial LingBot migration
+implemented only its default one-round behavior. `hanging_mug` remains poor even
+when repeated flow-budget refreshes are added, indicating that refresh after
+drift is too late for a precision contact transition. The next matched hanging
+test therefore changes only `gripper_full_window` from one to two: a detected
+decoded or teacher gripper boundary schedules two consecutive teacher action
+rounds. The default remains one and reproduces the existing path.
+
 ### Verifier calibration telemetry
 
 The V1 smoke showed that removing periodic and reconstructed-gripper full paths

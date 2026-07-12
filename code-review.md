@@ -204,3 +204,16 @@ unchanged.
 Remote policy/specverify suite passes `19/19`; local compile and diff checks
 pass. Allowed to run a two-task (`hanging_mug`, `open_microwave`) TN=5
 comparison while the non-burst V2 run finishes.
+
+## Gripper Full Window Review
+
+No blocking finding. The change exposes the existing Realtime-VLA-FLASH phase
+window parameter without altering its default. Window one still schedules only
+the already-existing next teacher round; window two adds exactly one contiguous
+teacher round after it. The counter advances only on a returned full action and
+survives the required cache acknowledgement.
+
+The new test covers a 16-step safe prefix followed by two teacher rounds.
+Remote policy/specverify suite passes `20/20`; local compile and diff checks
+pass. Allowed to run `hanging_mug` TN=5 with window two. No consensus acceptance
+or repair is enabled.

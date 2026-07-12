@@ -132,6 +132,11 @@ def main() -> None:
     parser.add_argument("--threshold", type=float, default=0.15)
     parser.add_argument("--tau", type=float, nargs="+", default=(50.0, 100.0))
     parser.add_argument("--pf-interval", type=int, default=2)
+    parser.add_argument(
+        "--teacher-gripper-fallback",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
     parser.add_argument("--server-timeout", type=int, default=600)
     args = parser.parse_args()
     client_gpu = args.gpu if args.client_gpu is None else args.client_gpu
@@ -153,6 +158,8 @@ def main() -> None:
         "--pf-interval", str(args.pf_interval),
         "--log-path", str(metrics_log),
     ]
+    if not args.teacher_gripper_fallback:
+        server_cmd.append("--no-teacher-gripper-fallback")
     client_cmd = [
         sys.executable,
         "-m", "evaluation.robotwin.eval_polict_client_openpi",
@@ -219,6 +226,7 @@ def main() -> None:
         "threshold": args.threshold,
         "tau": args.tau,
         "pf_interval": args.pf_interval,
+        "teacher_gripper_fallback": args.teacher_gripper_fallback,
         "started_at": started,
         "ended_at": datetime.now().isoformat(timespec="seconds"),
         "client_rc": client_rc,

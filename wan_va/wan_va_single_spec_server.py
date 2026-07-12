@@ -75,6 +75,7 @@ def build_policy(args: argparse.Namespace):
         pf_interval=args.pf_interval,
         threshold=args.threshold,
         tau_timesteps=args.tau_timesteps,
+        teacher_gripper_fallback=args.teacher_gripper_fallback,
         rng=None if args.seed is None else np.random.default_rng(args.seed),
         log_path=args.log_path,
     )
@@ -96,6 +97,11 @@ def parse_args() -> argparse.Namespace:
         "--local-rank", type=int, default=int(os.environ.get("LOCAL_RANK", 0))
     )
     parser.add_argument("--pf-interval", type=int, default=2)
+    parser.add_argument(
+        "--teacher-gripper-fallback",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
     parser.add_argument("--threshold", type=float, default=0.15)
     parser.add_argument(
         "--tau-timesteps", type=float, nargs="+", default=(50.0, 100.0)

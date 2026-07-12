@@ -228,6 +228,35 @@ def test_teacher_reconstructed_gripper_switch_forces_replan():
     assert full["full_reason"] == "teacher_gripper_switch"
 
 
+def test_teacher_reconstructed_gripper_switch_can_be_diagnostic_only():
+    events = []
+    draft = _FakeModel("draft", events)
+    teacher = _FakeModel(
+        "teacher",
+        events,
+        verify_results=({
+            "accepted_prefix": 32,
+            "gripper_force_teacher": True,
+        },),
+    )
+    policy = RealtimeFlashPolicy(
+        draft,
+        teacher,
+        pf_interval=10,
+        teacher_gripper_fallback=False,
+        rng=np.random.default_rng(7),
+    )
+    policy.infer({"reset": True, "prompt": "test task"})
+    first = policy.infer(_action_request())
+    policy.infer(_cache_request("anchor", first["action"]))
+
+    accepted = policy.infer(_action_request())
+
+    assert accepted["action_source"] == "draft_flash"
+    assert accepted["accepted_prefix"] == 32
+    assert accepted["replan"] is False
+
+
 def test_zero_prefix_replans_same_observation_without_cache_update():
     policy, draft, teacher, _ = _anchored_policy(verify_results=(0,))
     request = _action_request()

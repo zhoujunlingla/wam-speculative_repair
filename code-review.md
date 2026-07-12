@@ -72,3 +72,44 @@ Allowed to proceed. Remote tests passed `15/15`, the 1500-step long smoke and
 gate passed at `22/40` versus draft `21/40` and teacher `23/40`. Do not claim
 uniform per-task improvement: `hanging_mug` remained `0/10`, and teacher action
 use is still high at `40.81%`.
+# Speed Iteration V1 Review
+
+## Scope
+
+- Raise the experiment refresh ceiling from PF=2 to PF=10 through the existing
+  launcher argument.
+- Add an opt-out for reconstructed teacher-latent gripper hard fallback while
+  retaining its diagnostic log and the decoded draft gripper boundary.
+- Preserve the original defaults for baseline reproduction.
+
+## Findings
+
+No blocking correctness finding in the diff.
+
+- **Low risk:** `teacher_gripper_fallback=True` remains the default, so existing
+  commands and the reproduced Realtime-VLA-FLASH behavior are unchanged.
+- **Low risk:** diagnostic-only mode changes policy behavior only when the
+  continuous endpoint verifier accepted the chunk and a reconstructed latent
+  gripper crossed zero. The decoded action still passes through
+  `first_gripper_switch()` and retains the hard phase fallback.
+- **Low risk:** cache replay, frame indices, action slicing, K, tau, delta, and
+  same-observation replan are untouched.
+- **Experiment risk:** disabling the latent gripper fallback may admit a bad
+  discrete transition. The four-task matched run must therefore meet the
+  existing quality gate before this behavior is retained.
+
+## Verification
+
+- `python3 -m compileall`: passed.
+- `git diff --check`: passed.
+- Remote `pytest -q tests/test_realtime_flash_policy.py tests/test_specverify.py`:
+  15 passed.
+- The full read-only-cache test requires the serving environment with
+  `diffusers`; it was not runnable from the host's default Python. The change
+  does not touch the attention/cache implementation.
+
+## Decision
+
+Allowed to proceed to one real smoke with `--pf-interval 10` and
+`--no-teacher-gripper-fallback`. A matched four-task evaluation is allowed only
+if the smoke has no cache, reset, render, or action-shape failure.

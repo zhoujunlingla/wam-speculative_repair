@@ -101,6 +101,35 @@ Threshold and periodic-refresh tuning may begin only after the implementation
 passes unit tests and a real episode smoke. Repair remains locked until this
 gate passes.
 
+## Speed Iteration V1: Remove Unproductive Full Paths
+
+The matched four-task run passed the quality gate at `22/40`, versus draft
+`21/40` and teacher `23/40`, but used teacher actions in `40.81%` of policy
+rounds. The full-path reasons show two dominant costs that are not endpoint
+verification failures:
+
+- `periodic`: 204 calls under `PF=2`;
+- `teacher_gripper_switch`: 102 calls caused by any reconstructed latent
+  gripper crossing zero at either verifier timestep.
+
+Only 14 calls came from a zero endpoint prefix. The first speed iteration
+therefore keeps the verified-prefix algorithm, `K=2`, tau values, threshold,
+cache replay, decoded-action gripper boundary, and same-observation fallback
+unchanged, while testing two evidence-backed policy changes together:
+
+1. increase the hard refresh ceiling from `PF=2` to `PF=10`;
+2. retain reconstructed teacher gripper switches as diagnostics rather than a
+   hard fallback, while keeping the decoded draft gripper phase boundary as a
+   hard fallback.
+
+This iteration does not add repair, risk prediction, adaptive K, world latent
+signals, or endpoint correction. It may proceed only if unit tests preserve
+the original default behavior and a real smoke has no cache/reset/runtime
+error. Its matched four-task gate is success at least `22/40`, teacher
+action-source at most `15%`, and no material increase in zero-prefix fallback.
+If it passes, adaptive K and flow-error-budget refresh may be evaluated as the
+next speed improvement.
+
 ## Verification Plan
 
 - Unit-test shared-noise K verification and min-over-K prefix acceptance.

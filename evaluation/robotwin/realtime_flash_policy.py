@@ -138,6 +138,7 @@ class RealtimeFlashPolicy:
         action_per_frame: int = 16,
         gripper_channels: Iterable[int] = (7, 15),
         gripper_threshold: float = 0.5,
+        teacher_gripper_fallback: bool = True,
         rng: Optional[np.random.Generator] = None,
         log_path: Optional[str] = None,
     ) -> None:
@@ -159,6 +160,7 @@ class RealtimeFlashPolicy:
         self.action_per_frame = int(action_per_frame)
         self.gripper_channels = tuple(int(channel) for channel in gripper_channels)
         self.gripper_threshold = float(gripper_threshold)
+        self.teacher_gripper_fallback = bool(teacher_gripper_fallback)
         self.rng = rng or np.random.default_rng()
         self.log_path = Path(log_path) if log_path else None
         if self.log_path:
@@ -346,7 +348,10 @@ class RealtimeFlashPolicy:
         verify_response = self._call(self.teacher, verify_request)
         verified_prefix = self._accepted_prefix(action_latent, verify_response, horizon)
 
-        if bool(verify_response.get("gripper_force_teacher", False)):
+        teacher_gripper_switch = bool(
+            verify_response.get("gripper_force_teacher", False)
+        )
+        if teacher_gripper_switch and self.teacher_gripper_fallback:
             verified_prefix = 0
             self.force_full_reason = "teacher_gripper_switch"
 
@@ -378,6 +383,7 @@ class RealtimeFlashPolicy:
                 fallback_reason=reason,
                 accepted_prefix=0,
                 verified_prefix=verified_prefix,
+                teacher_gripper_switch=teacher_gripper_switch,
                 elapsed_sec=time.perf_counter() - start,
             )
             return response
@@ -402,6 +408,7 @@ class RealtimeFlashPolicy:
             fallback_reason=response.get("fallback_reason"),
             accepted_prefix=accepted_prefix,
             verified_prefix=verified_prefix,
+            teacher_gripper_switch=teacher_gripper_switch,
             elapsed_sec=time.perf_counter() - start,
         )
         return response

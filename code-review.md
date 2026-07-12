@@ -304,6 +304,21 @@ Verification: local compile/diff checks passed; remote focused suite
 Decision: allowed to run one real shadow smoke after an experiment GPU becomes
 free. No routing change is approved.
 
+## TCP Server Readiness Review
+
+No blocking finding. The previous launcher waited for one exact log message;
+real delayed-shadow servers were already listening while their clients remained
+blocked because that message was absent. The shared readiness helper now checks
+both server liveness and localhost TCP connectivity. It uses only the standard
+library, has a bounded one-second connect timeout, and preserves the overall
+launcher timeout. Tests cover a live listener and an exited child process.
+
+Decision: allowed to restart only the delayed-shadow runs that produced no
+client/trial. Existing benchmark processes are untouched.
+
+Verification: remote focused suite including launcher readiness tests
+`30 passed`; local compile and diff checks passed.
+
 ## Draft Video Motion Shadow Review
 
 No blocking finding. The statistic reduces the video latent already produced by

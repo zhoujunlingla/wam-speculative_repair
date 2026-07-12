@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 import shutil
+import socket
 import subprocess
 import sys
 import time
@@ -65,13 +66,16 @@ def runtime_env(gpu: int, *, server: bool) -> dict[str, str]:
     return env
 
 
-def wait_for_server(log_path: Path, process: subprocess.Popen, timeout: int) -> None:
+def wait_for_server(process: subprocess.Popen, port: int, timeout: int) -> None:
     deadline = time.time() + timeout
     while time.time() < deadline:
         if process.poll() is not None:
             raise RuntimeError(f"server exited with rc={process.returncode}")
-        if log_path.exists() and "serving realtime-flash policy" in log_path.read_text(errors="replace"):
-            return
+        try:
+            with socket.create_connection(("127.0.0.1", int(port)), timeout=1):
+                return
+        except OSError:
+            pass
         time.sleep(2)
     raise TimeoutError(f"server was not ready in {timeout}s")
 
@@ -210,7 +214,7 @@ def main() -> None:
     )
     client_rc = None
     try:
-        wait_for_server(server_log_path, server, args.server_timeout)
+        wait_for_server(server, args.port, args.server_timeout)
         with client_log_path.open("a", buffering=1) as client_log:
             client = subprocess.run(
                 client_cmd,

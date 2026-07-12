@@ -101,6 +101,10 @@ Threshold and periodic-refresh tuning may begin only after the implementation
 passes unit tests and a real episode smoke. Repair remains locked until this
 gate passes.
 
+Launcher readiness is determined by a successful localhost TCP connection and
+a live server process. Log text is diagnostic only; model/server logging may be
+buffered or configured differently and cannot be the synchronization primitive.
+
 ## Speed Iteration V1: Remove Unproductive Full Paths
 
 The matched four-task run passed the quality gate at `22/40`, versus draft

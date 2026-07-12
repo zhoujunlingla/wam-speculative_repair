@@ -347,6 +347,14 @@ class RealtimeFlashPolicy:
         )
         verify_response = self._call(self.teacher, verify_request)
         verified_prefix = self._accepted_prefix(action_latent, verify_response, horizon)
+        verify_distances = verify_response.get("distances")
+        if verify_distances is not None:
+            verify_distances = np.asarray(verify_distances).tolist()
+        verify_telemetry = {
+            "tau_timesteps": verify_response.get("tau_timesteps"),
+            "prefix_by_tau": verify_response.get("prefix_by_tau"),
+            "verify_distances": verify_distances,
+        }
 
         teacher_gripper_switch = bool(
             verify_response.get("gripper_force_teacher", False)
@@ -384,6 +392,7 @@ class RealtimeFlashPolicy:
                 accepted_prefix=0,
                 verified_prefix=verified_prefix,
                 teacher_gripper_switch=teacher_gripper_switch,
+                **verify_telemetry,
                 elapsed_sec=time.perf_counter() - start,
             )
             return response
@@ -409,6 +418,7 @@ class RealtimeFlashPolicy:
             accepted_prefix=accepted_prefix,
             verified_prefix=verified_prefix,
             teacher_gripper_switch=teacher_gripper_switch,
+            **verify_telemetry,
             elapsed_sec=time.perf_counter() - start,
         )
         return response

@@ -130,6 +130,16 @@ action-source at most `15%`, and no material increase in zero-prefix fallback.
 If it passes, adaptive K and flow-error-budget refresh may be evaluated as the
 next speed improvement.
 
+### Verifier calibration telemetry
+
+The V1 smoke showed that removing periodic and reconstructed-gripper full paths
+does not by itself bound teacher use: contact-heavy rounds can still produce a
+continuous endpoint prefix of zero. Before changing `delta` or `K`, every flash
+round must log the existing verifier distances, per-tau prefixes, and tau values.
+This is diagnostic-only and must not change acceptance. The resulting traces
+support exact offline replay of candidate thresholds and identify whether the
+first or second tau is responsible for each rejected prefix.
+
 ## Verification Plan
 
 - Unit-test shared-noise K verification and min-over-K prefix acceptance.

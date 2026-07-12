@@ -113,3 +113,18 @@ No blocking correctness finding in the diff.
 Allowed to proceed to one real smoke with `--pf-interval 10` and
 `--no-teacher-gripper-fallback`. A matched four-task evaluation is allowed only
 if the smoke has no cache, reset, render, or action-shape failure.
+
+## Calibration Telemetry Review
+
+No blocking finding. The change serializes values already returned by the
+teacher verifier and writes them only through the existing policy metrics log.
+It does not feed telemetry back into prefix acceptance or runtime state.
+
+- Risk: each flash record gains 64 distance scalars for K=2/F=2/N=16. This is
+  small for RoboTwin evaluation and bounded by the fixed action horizon.
+- `np.asarray(...).tolist()` makes both NumPy arrays and Python lists JSON-safe.
+- Missing telemetry remains represented as `null`, preserving compatibility
+  with fake or alternate verifier adapters.
+
+Verification: compileall and diff check passed; remote policy/specverify suite
+passed `16/16`, including exact preservation of the accepted prefix.

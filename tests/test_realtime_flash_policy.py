@@ -1,4 +1,5 @@
 from collections import deque
+import json
 from pathlib import Path
 import sys
 
@@ -255,6 +256,40 @@ def test_teacher_reconstructed_gripper_switch_can_be_diagnostic_only():
     assert accepted["action_source"] == "draft_flash"
     assert accepted["accepted_prefix"] == 32
     assert accepted["replan"] is False
+
+
+def test_flash_logs_distances_without_changing_acceptance(tmp_path):
+    events = []
+    draft = _FakeModel("draft", events)
+    teacher = _FakeModel(
+        "teacher",
+        events,
+        verify_results=({
+            "accepted_prefix": 32,
+            "distances": np.zeros((2, 2, 16), dtype=np.float32),
+            "prefix_by_tau": [32, 32],
+            "tau_timesteps": [50.0, 100.0],
+        },),
+    )
+    log_path = tmp_path / "metrics.jsonl"
+    policy = RealtimeFlashPolicy(
+        draft,
+        teacher,
+        pf_interval=10,
+        log_path=log_path,
+        rng=np.random.default_rng(7),
+    )
+    policy.infer({"reset": True, "prompt": "test task"})
+    first = policy.infer(_action_request())
+    policy.infer(_cache_request("anchor", first["action"]))
+
+    accepted = policy.infer(_action_request())
+    record = json.loads(log_path.read_text().splitlines()[-1])
+
+    assert accepted["accepted_prefix"] == 32
+    assert record["prefix_by_tau"] == [32, 32]
+    assert record["tau_timesteps"] == [50.0, 100.0]
+    assert np.asarray(record["verify_distances"]).shape == (2, 2, 16)
 
 
 def test_zero_prefix_replans_same_observation_without_cache_update():

@@ -35,6 +35,7 @@ def first_gripper_switch(
     action: np.ndarray,
     channels: Iterable[int] = (7, 15),
     threshold: float = 0.5,
+    previous=None,
 ) -> Optional[int]:
     """Return the first low-level step entering a new gripper phase."""
 
@@ -45,9 +46,19 @@ def first_gripper_switch(
     if not channels:
         return None
     steps = action.transpose(1, 2, 0).reshape(-1, action.shape[0])
-    if len(steps) < 2:
+    if len(steps) == 0:
         return None
     phase = steps[:, channels] >= threshold
+    if previous is not None:
+        previous = np.asarray(previous).reshape(-1)
+        if previous.size == action.shape[0]:
+            previous = previous[list(channels)]
+        elif previous.size != len(channels):
+            raise ValueError("previous must contain every action or gripper channel")
+        if np.any(phase[0] != (previous >= threshold)):
+            return 0
+    if len(steps) < 2:
+        return None
     switches = np.flatnonzero(np.any(phase[1:] != phase[:-1], axis=1))
     return None if switches.size == 0 else int(switches[0] + 1)
 
@@ -178,8 +189,10 @@ class RealtimeFlashPolicy:
         self.teacher_anchor_frame_st_id = None
         self.force_full_reason = None
         self.pending_cache_source = None
+        self.pending_gripper = None
         self.pending_teacher_cache_updates = deque()
         self.last_source = None
+        self.last_gripper = None
         self.flow_error_budget = 0.0
         self._draft_primed = False
 
@@ -215,6 +228,20 @@ class RealtimeFlashPolicy:
         if action.ndim != 3:
             raise ValueError("model action must have shape [C, F, H]")
         return action
+
+    def _stage_gripper(self, action: np.ndarray) -> None:
+        action = np.asarray(action)
+        channels = tuple(
+            channel for channel in self.gripper_channels
+            if 0 <= channel < action.shape[0]
+        )
+        if not channels:
+            self.pending_gripper = None
+            return
+        steps = action.transpose(1, 2, 0).reshape(-1, action.shape[0])
+        if len(steps) == 0:
+            raise ValueError("executed action prefix must be non-empty")
+        self.pending_gripper = steps[-1, channels].astype(np.float32, copy=True)
 
     def _full_reason(self) -> Optional[str]:
         if self.teacher_anchor_frame_st_id is None:
@@ -258,6 +285,8 @@ class RealtimeFlashPolicy:
         self.frame_st_id += frame_count
         if source == "full":
             self.teacher_anchor_frame_st_id = self.frame_st_id
+        self.last_gripper = self.pending_gripper
+        self.pending_gripper = None
         self.pending_cache_source = None
         self._log(
             source=f"{source}_cache_update",
@@ -280,6 +309,7 @@ class RealtimeFlashPolicy:
         action = self._action(teacher_response)
         horizon = action.shape[1] * action.shape[2]
         self.pending_cache_source = "full"
+        self._stage_gripper(action)
         self.last_source = "teacher_full"
         self.flash_rounds_since_full = 0
         self.flow_error_budget = 0.0
@@ -367,6 +397,11 @@ class RealtimeFlashPolicy:
             tau_timesteps=self.tau_timesteps,
             frame_st_id=self.frame_st_id,
         )
+        if self.last_gripper is not None:
+            previous_phase = self.last_gripper >= self.gripper_threshold
+            verify_request["previous_gripper"] = np.where(
+                previous_phase, 1.0, -1.0
+            ).astype(np.float32)
         verify_response = self._call(self.teacher, verify_request)
         verified_prefix = self._accepted_prefix(action_latent, verify_response, horizon)
         verify_distances = verify_response.get("distances")
@@ -395,7 +430,10 @@ class RealtimeFlashPolicy:
             self.force_full_reason = "teacher_gripper_switch"
 
         switch_step = first_gripper_switch(
-            action, self.gripper_channels, self.gripper_threshold
+            action,
+            self.gripper_channels,
+            self.gripper_threshold,
+            previous=self.last_gripper,
         )
         accepted_prefix = verified_prefix
         if switch_step is not None and verified_prefix > 0:
@@ -441,8 +479,10 @@ class RealtimeFlashPolicy:
             and self.flow_error_budget >= self.flow_budget_threshold
         ):
             self.force_full_reason = "flow_budget"
+        executed_action = slice_action_prefix(action, accepted_prefix)
+        self._stage_gripper(executed_action)
         response = {
-            "action": slice_action_prefix(action, accepted_prefix),
+            "action": executed_action,
             "replan": False,
             "action_source": self.last_source,
             "accepted_prefix": accepted_prefix,

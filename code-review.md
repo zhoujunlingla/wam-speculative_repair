@@ -166,3 +166,24 @@ Verification:
 Decision: allowed to proceed to one RoboTwin smoke. Formal evaluation requires
 nonzero budget telemetry, correct reset after a budget-triggered full round,
 and no cache/reset/render error.
+
+## Previous-Gripper State Parity Fix Review
+
+The audit found a blocking migration gap: the reference Realtime-VLA-FLASH
+tracks the last executed gripper phase, while the LingBot policy only inspected
+adjacent steps inside each new chunk. This made step-zero phase changes
+invisible. The partial V2 run is therefore invalid benchmark evidence.
+
+The fix stages the final gripper value from the exact returned action prefix and
+commits it only after the matching cache-update acknowledgement. Replans and
+unexecuted tails cannot update the committed phase. The committed decoded phase
+is converted to the teacher latent sign convention and sent through the
+already-supported `previous_gripper` request field; the decoded gate uses the
+same committed state.
+
+No blocking finding remains. Reset, first-full, full/partial prefix, and cache
+ordering follow the existing state machine. Remote policy/specverify tests pass
+`18/18`; local compile and diff checks pass.
+
+Decision: allowed to proceed to a real step-zero switch smoke. Consensus-based
+gripper acceptance remains disabled.

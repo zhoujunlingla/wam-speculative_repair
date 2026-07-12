@@ -127,6 +127,12 @@ def test_gripper_switch_finds_first_transition_not_only_endpoints():
     assert first_gripper_switch(action) == 4
 
 
+def test_gripper_switch_detects_chunk_boundary_against_executed_phase():
+    action = _action()
+
+    assert first_gripper_switch(action, previous=np.array([1.0, 0.0])) == 0
+
+
 def test_first_round_is_full_and_full_cache_update_becomes_anchor():
     events = []
     draft = _FakeModel("draft", events)
@@ -161,6 +167,7 @@ def test_every_flash_verifies_against_last_full_and_queues_teacher_update():
     assert first_verify["frame_before"] == 2
     assert first_verify["request"]["frame_st_id"] == 2
     assert first_verify["request"]["tau_timesteps"] == (50.0, 100.0)
+    assert first_verify["request"]["previous_gripper"].tolist() == [-1.0, -1.0]
     assert first_verify["request"]["verify_noise"].shape == (1, 30, 2, 16, 1)
     assert teacher.cache == ["anchor"]
     assert teacher.frame_st_id == 2
@@ -409,5 +416,7 @@ def test_reset_clears_pending_updates_and_restores_first_full():
     response = policy.infer(_action_request())
 
     assert not policy.pending_teacher_cache_updates
+    assert policy.last_gripper is None
+    assert policy.pending_gripper is not None
     assert response["action_source"] == "teacher_full"
     assert response["full_reason"] == "initial"

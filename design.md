@@ -172,6 +172,24 @@ The V2 four-task gate is success at least `22/40`, no new runtime/cache error,
 and fewer teacher actions than the PF2 V0 (`40.81%`). Repair, adaptive K, and
 world-latent signals remain locked.
 
+### Required phase-state parity fix
+
+The first V2 launch exposed a missing piece of the Realtime-VLA-FLASH state
+machine: the reference implementation advances `last_gripper` using the action
+steps actually executed by the client, then includes that phase when checking
+the next chunk. The LingBot migration only compared adjacent steps inside the
+new chunk. It therefore could not detect a switch at action step zero.
+
+The policy must stage the last decoded gripper values when returning an action,
+commit them only after the corresponding cache-update acknowledgement, and
+pass their discrete phase to the teacher verifier. Both latent and decoded
+phase checks must compare the first proposed step against that committed phase.
+Reset clears it; unexecuted tails and rejected/replanned drafts never update it.
+
+The partial V2 run before this fix is marked invalid. No consensus-based phase
+acceptance may be enabled until this state parity fix passes unit tests and a
+real smoke.
+
 ### Verifier calibration telemetry
 
 The V1 smoke showed that removing periodic and reconstructed-gripper full paths

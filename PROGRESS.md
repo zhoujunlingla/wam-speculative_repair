@@ -61,3 +61,36 @@ first round executed draft after a shadow prime, low-risk chunks bypassed
 verification, teacher cache was synchronized every round, phase handling only
 tightened a threshold, and the verifier used MAE including gripper channels.
 Do not compare the new implementation to V31 as if only the threshold changed.
+
+## 2026-07-13 - Speed/Quality Iteration Evidence
+
+- PF10 plus diagnostic-only teacher gripper checks was stopped at `14/26`:
+  `hanging_mug 0/5` and `open_microwave 0/3` showed that sparse periodic
+  refresh alone loses contact-stage quality.
+- The corrected cumulative-flow-budget run completed at `20/40 = 50.0%` with
+  about `31.7%` teacher actions. It was worse than both the matched draft
+  (`21/40`) and the faithful PF2 migration (`22/40`), so cumulative residual
+  budget is not retained as the primary router.
+- Escalating repeated budget crossings to two teacher rounds improved the first
+  five `open_microwave` trials from `2/5` to `5/5`, but did not rescue
+  `hanging_mug`. This is task-dependent recovery, not a general verifier.
+- A two-round hard gripper window reached `hanging_mug 3/5 = 60%`, but required
+  `62.5%` teacher actions. It is useful evidence that contact transitions need
+  contiguous teacher control, but its blanket cost violates the speed target.
+- Draft future-video latent motion shadow completed at `6/12`. Its
+  `global_mean`, `top_relative`, and `top_concentration` signals overlap heavily
+  between phase-window and ordinary rounds (AUC about `0.52`-`0.58`). Raw motion
+  statistics must remain telemetry and must not gate teacher use.
+- Offline replay of 682 K=2 verifier calls found that when the tau-50 maximum
+  residual is below `0.05`, skipping tau-100 would cover about `65%` of calls
+  and changed zero observed `{0,16,32}` prefixes. This supports a later audited
+  adaptive-K path after phase routing passes its quality gate.
+- Cross-tau gripper consensus was added so a discrete transition is executable
+  only when every teacher probe reproduces the draft phase. The first smoke
+  found and fixed a state-machine gap: a 16-step consensus prefix must schedule
+  teacher takeover rather than resume drafting at the rejected suffix.
+
+Current experiments compare two forms on four matched tasks: consensus with
+the old flow budget, and consensus with no flow budget plus a two-round teacher
+window only on phase disagreement. Repair remains locked until one form matches
+teacher quality with materially lower teacher use.

@@ -252,6 +252,14 @@ Decision: allowed to proceed to a two-task smoke with video-motion routing kept
 disabled. Raw video-motion statistics remain shadow-only because their observed
 AUC is approximately random (`0.52`-`0.58`).
 
+## Progress Evidence Update Review
+
+Documentation-only update. It records completed artifacts and explicitly marks
+PF10-only routing, cumulative flow budget, and raw video-motion gating as failed
+or unsupported paths. Numbers were read from completed run summaries; no policy
+behavior or experiment command changed. Allowed to commit without an additional
+runtime test beyond the already-passing `25` focused tests.
+
 ## Draft Video Motion Shadow Review
 
 No blocking finding. The statistic reduces the video latent already produced by

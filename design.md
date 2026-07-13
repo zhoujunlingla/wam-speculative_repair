@@ -355,6 +355,12 @@ else:
 The immediate motion gate at 1.2 remains unchanged. The low-motion ceiling is
 disabled at zero and does not change the existing flow-budget default.
 
+The low-motion pilot was early-stopped at `2/6`; it could no longer beat the
+motion-only `8/12` even under a perfect remaining outcome. It is not promoted.
+Because TN=3 task outcomes have varied substantially across identical controls,
+the next decision uses four tasks x 10 trials with the motion-only policy. No
+additional router or verifier change is stacked into that run.
+
 ## Cross-Tau Gripper Consensus
 
 The original migration applies two independent phase fallbacks: the server

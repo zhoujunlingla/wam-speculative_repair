@@ -160,3 +160,13 @@ teacher quality with materially lower teacher use.
   not monotonically safer when refresh timing changes the closed-loop policy.
 - Offline replay supports a regime-conditioned budget instead: reset whenever
   global motion exceeds 0.5 and use threshold 0.4 during sustained low motion.
+
+### Low-motion budget early stop
+
+- The conditioned budget was stopped after `2/6` valid outcomes
+  (`hanging_mug 1/2`, `place_can_basket 1/3`, `open_microwave 0/1`). Even six
+  remaining successes could only tie the promoted motion-only `8/12`, so the
+  branch had no possible improvement outcome.
+- The feature remains default-off for future analysis, but it is not promoted.
+  Four-task TN=10 now evaluates the motion-only policy before any further
+  routing or adaptive-K change.

@@ -824,3 +824,34 @@ modified and can be re-summarized from their JSONL logs after completion.
 
 Decision: approved as reporting-only instrumentation. It does not authorize an
 online routing change.
+
+## Motion V4 late-gripper deferral review (2026-07-14)
+
+### Findings
+
+- Resolved P1: when gripper consensus is active, the server's consensus-bounded
+  `accepted_prefix` is authoritative even if `teacher_gripper_fallback` is
+  disabled. A returned `accepted_prefix_before_gripper=32` can no longer restore
+  a server-capped prefix of 16.
+- Resolved P1 defense-in-depth: a deferred late conflict is additionally capped
+  at the quantized boundary preceding its reported failure index.
+- Resolved P2: `late_gripper_deferral` now fails configuration validation unless
+  gripper consensus is enabled, avoiding a logged-but-inactive experiment.
+- Corrected the design metric label: `728/3366` is the historical Teacher-full
+  round rate, not the Teacher-executed action-step rate.
+
+No unresolved correctness finding remains in the diff. The change is opt-in and
+does not affect the active uncensored shadow runs.
+
+### Verification
+
+- Local `git diff --check`: passed.
+- Local Python compilation: passed.
+- Isolated A800 focused pytest: `65 passed in 1.45s`.
+- Regression coverage includes the three-flag case `gripper_consensus=true`,
+  `teacher_gripper_fallback=false`, and `late_gripper_deferral=true` with a
+  continuous prefix of 32 but a consensus prefix of 16.
+
+Decision: implementation is approved for a dedicated smoke after the
+uncensored shadow freezes the motion rule. It is not yet evidence that live
+deferral preserves Low10 success.

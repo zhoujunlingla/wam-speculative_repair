@@ -240,6 +240,7 @@ class RealtimeFlashPolicy:
         motion_selective_verify: bool = False,
         gripper_full_window: int = 1,
         gripper_consensus: bool = False,
+        late_gripper_deferral: bool = False,
         gripper_tiebreak_shadow: bool = False,
         repair_shadow: bool = False,
         repair_strength: float = 0.5,
@@ -291,6 +292,8 @@ class RealtimeFlashPolicy:
             raise ValueError("tau_timesteps must be non-empty")
         if gripper_consensus and len(tau_timesteps) < 2:
             raise ValueError("gripper consensus requires at least two tau probes")
+        if late_gripper_deferral and not gripper_consensus:
+            raise ValueError("late gripper deferral requires gripper consensus")
         if gripper_tiebreak_shadow and not gripper_consensus:
             raise ValueError("gripper tiebreak shadow requires gripper consensus")
         if motion_selective_verify and len(tau_timesteps) != 2:
@@ -317,6 +320,7 @@ class RealtimeFlashPolicy:
         self.motion_selective_verify = bool(motion_selective_verify)
         self.gripper_full_window = int(gripper_full_window)
         self.gripper_consensus = bool(gripper_consensus)
+        self.late_gripper_deferral = bool(late_gripper_deferral)
         self.gripper_tiebreak_shadow = bool(gripper_tiebreak_shadow)
         self.repair_shadow = bool(repair_shadow)
         self.repair_strength = float(repair_strength)
@@ -600,7 +604,9 @@ class RealtimeFlashPolicy:
         verify_response: dict,
         horizon: int,
     ) -> int:
-        if not self.teacher_gripper_fallback and \
+        if self.gripper_consensus and "accepted_prefix" in verify_response:
+            raw_prefix = int(verify_response["accepted_prefix"])
+        elif not self.teacher_gripper_fallback and \
                 "accepted_prefix_before_gripper" in verify_response:
             raw_prefix = int(verify_response["accepted_prefix_before_gripper"])
         elif "accepted_prefix" in verify_response:
@@ -912,7 +918,27 @@ class RealtimeFlashPolicy:
             )
             self.force_full_reason = "gripper_switch"
             self.gripper_full_rounds_left = self.gripper_full_window
-        if active_gripper_consensus and gripper_consensus_failure is not None:
+        late_gripper_deferred = bool(
+            active_gripper_consensus
+            and self.late_gripper_deferral
+            and gripper_consensus_failure is not None
+            and int(gripper_consensus_failure) >= self.action_per_frame
+            and accepted_prefix >= self.action_per_frame
+        )
+        if late_gripper_deferred:
+            accepted_prefix = min(
+                accepted_prefix,
+                quantize_prefix(
+                    int(gripper_consensus_failure),
+                    self.action_per_frame,
+                    horizon,
+                ),
+            )
+        if (
+            active_gripper_consensus
+            and gripper_consensus_failure is not None
+            and not late_gripper_deferred
+        ):
             self.force_full_reason = "gripper_consensus"
             self.gripper_full_rounds_left = self.gripper_full_window
 
@@ -927,6 +953,8 @@ class RealtimeFlashPolicy:
             accepted_prefix_before_motion_cap=accepted_prefix_before_motion_cap,
             motion_prefix_cap_applied=motion_prefix_cap_applied,
             motion_high_prefix_cap=self.action_per_frame,
+            late_gripper_deferral_enabled=self.late_gripper_deferral,
+            late_gripper_deferred=late_gripper_deferred,
         )
 
         repair_shadow = None
@@ -1028,7 +1056,11 @@ class RealtimeFlashPolicy:
         }
         if active_gripper_consensus and gripper_consensus_failure is not None:
             response.update(
-                fallback_reason="gripper_consensus",
+                fallback_reason=(
+                    "gripper_consensus_deferred"
+                    if late_gripper_deferred
+                    else "gripper_consensus"
+                ),
                 gripper_consensus_failure_index=gripper_consensus_failure,
             )
         elif switch_step is not None and not active_gripper_consensus:

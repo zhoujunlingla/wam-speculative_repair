@@ -312,3 +312,20 @@ hard-motion baseline. Completed B1 tasks were `turn_switch 12/20` and
 so B1 is unsuitable for fitting Motion Gate V3. The remaining B1 queue is
 stopped and retained as negative evidence. The next collection leaves motion
 fully shadow-only and preserves the action verifier's prefix.
+
+### Motion V4 late-gripper deferral code gate (2026-07-14)
+
+- Added an opt-in policy that executes only the consensus-safe prefix when a
+  gripper disagreement begins at or after action 16, then reobserves without
+  scheduling a Teacher phase window.
+- Code review caught and fixed a consensus bypass where disabling the legacy
+  Teacher gripper fallback could restore `accepted_prefix_before_gripper=32`
+  after the server had capped the prefix at 16.
+- The feature now requires gripper consensus at configuration time and also
+  caps the executed prefix at the quantized failure boundary.
+- Corrected `728/3366 = 21.63%` to Teacher-full rounds per action-producing
+  round; action-step rate remains a separate summary metric.
+
+Verification: local diff/compile passed; isolated A800 focused tests passed
+`65/65`. No active shadow process was changed. Live evaluation remains gated on
+the complete uncensored Motion V3 analysis.

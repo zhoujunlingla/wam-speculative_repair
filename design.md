@@ -681,6 +681,53 @@ first or second tau is responsible for each rejected prefix.
 
 ## Verification Plan
 
+### Motion-conditioned compute router V4
+
+The hard-motion low10 x 20 run is the quality reference: `146/200 = 73.0%`
+success with `728/3366 = 21.63%` Teacher full rounds per action-producing
+round. Motion must no longer be interpreted as evidence that a draft action is
+wrong. It is a world-transition complexity signal that may allocate verifier compute, while
+continuous endpoint and discrete phase agreement remain the acceptance
+certificate.
+
+V4 removes two interventions from the live routing path:
+
+- high motion does not directly request a Teacher action;
+- high motion does not shorten a K=2-verified 32-action prefix to 16.
+
+The first opt-in live change is late-gripper deferral. If cross-tau gripper
+consensus first fails at or after action 16 and the continuous verifier already
+admits at least 16 actions, execute the verified 16-action prefix and reobserve
+without scheduling a Teacher phase window. Continuous zero prefixes, failures
+inside the first 16 actions, invalid cache state, initial Teacher anchoring, and
+periodic refresh remain fail-closed. The existing logs contain 81 such late
+conflicts, corresponding to a fixed-denominator saving of about 2.41 Teacher
+percentage points.
+
+After the uncensored shadow freezes a task-held-out motion rule, a separate
+adaptive-K flag may use motion only as a veto on a strict one-probe fast path:
+
+```text
+green = motion is below the held-out threshold
+        and tau-50 verifies the full prefix
+        and tau-50 max continuous residual < 0.05
+        and neither draft nor reconstruction changes gripper phase
+
+green -> accept K=1, except deterministic K=2 audit rounds
+other -> run tau=100 with the same Gaussian noise and use min-over-K
+```
+
+The audit interval is deterministic so enabling telemetry does not perturb the
+verifier noise stream. Audit decisions use K=2 live output and log whether the
+second probe changed prefix or phase. Adaptive K reduces Teacher verification
+NFE; it is reported separately from Teacher action-source. It must remain
+disabled until whole-task replay bounds the false-safe rate below 1%.
+
+The conditional tau-75 early-phase tie-break remains shadow-only. It may be
+promoted only after it safely rescues at least 35 of the historical 224 early
+conflicts, the estimated minimum needed to move Teacher action-source below
+15% after motion hard-fallback removal and late-gripper deferral.
+
 - Unit-test shared-noise K verification and min-over-K prefix acceptance.
 - Unit-test continuous-channel RMS and gripper exclusion.
 - Unit-test first-full, periodic refresh, L=0 replan, and gripper fallback.

@@ -666,6 +666,7 @@ def test_gripper_consensus_partial_prefix_schedules_teacher_window():
         events,
         verify_results=({
             "accepted_prefix": 16,
+            "accepted_prefix_before_gripper": 32,
             "gripper_consensus_prefix": 16,
             "gripper_consensus_failure_index": 20,
         },),
@@ -692,6 +693,83 @@ def test_gripper_consensus_partial_prefix_schedules_teacher_window():
     assert partial["fallback_reason"] == "gripper_consensus"
     assert teacher_1["full_reason"] == "gripper_consensus"
     assert teacher_2["full_reason"] == "gripper_phase_burst"
+
+
+def test_late_gripper_deferral_executes_verified_prefix_without_teacher_window(
+    tmp_path,
+):
+    events = []
+    draft = _FakeModel("draft", events, action=_action(switch_step=20))
+    teacher = _FakeModel(
+        "teacher",
+        events,
+        verify_results=({
+            "accepted_prefix": 16,
+            "accepted_prefix_before_gripper": 32,
+            "gripper_consensus_prefix": 16,
+            "gripper_consensus_failure_index": 20,
+        }, {
+            "accepted_prefix": 32,
+        }),
+    )
+    log_path = tmp_path / "metrics.jsonl"
+    policy = RealtimeFlashPolicy(
+        draft,
+        teacher,
+        pf_interval=0,
+        gripper_consensus=True,
+        late_gripper_deferral=True,
+        teacher_gripper_fallback=False,
+        gripper_full_window=2,
+        log_path=log_path,
+        rng=np.random.default_rng(7),
+    )
+    policy.infer({"reset": True, "prompt": "test task"})
+    first = policy.infer(_action_request())
+    policy.infer(_cache_request("anchor", first["action"]))
+
+    partial = policy.infer(_action_request())
+    policy.infer(_cache_request("partial", partial["action"]))
+    next_action = policy.infer(_action_request())
+    records = [json.loads(line) for line in log_path.read_text().splitlines()]
+    record = next(item for item in records if item.get("late_gripper_deferred"))
+
+    assert partial["accepted_prefix"] == 16
+    assert partial["fallback_reason"] == "gripper_consensus_deferred"
+    assert next_action["action_source"] == "draft_flash"
+    assert policy.gripper_full_rounds_left == 0
+    assert record["late_gripper_deferred"] is True
+
+
+def test_early_gripper_conflict_is_not_deferred():
+    events = []
+    draft = _FakeModel("draft", events, action=_action(switch_step=4))
+    teacher = _FakeModel(
+        "teacher",
+        events,
+        verify_results=({
+            "accepted_prefix": 0,
+            "gripper_consensus_prefix": 0,
+            "gripper_consensus_failure_index": 4,
+        },),
+    )
+    policy = RealtimeFlashPolicy(
+        draft,
+        teacher,
+        pf_interval=0,
+        gripper_consensus=True,
+        late_gripper_deferral=True,
+        rng=np.random.default_rng(7),
+    )
+    policy.infer({"reset": True, "prompt": "test task"})
+    first = policy.infer(_action_request())
+    policy.infer(_cache_request("anchor", first["action"]))
+
+    rejected = policy.infer(_action_request())
+
+    assert rejected["replan"] is True
+    assert rejected["fallback_reason"] == "gripper_consensus"
+    assert policy.gripper_full_rounds_left == 1
 
 
 def test_gripper_consensus_makes_server_prefix_authoritative():
@@ -1104,6 +1182,15 @@ def test_gripper_tiebreak_shadow_requires_consensus():
             _FakeModel("draft", []),
             _FakeModel("teacher", []),
             gripper_tiebreak_shadow=True,
+        )
+
+
+def test_late_gripper_deferral_requires_consensus():
+    with pytest.raises(ValueError, match="requires gripper consensus"):
+        RealtimeFlashPolicy(
+            _FakeModel("draft", []),
+            _FakeModel("teacher", []),
+            late_gripper_deferral=True,
         )
 
 

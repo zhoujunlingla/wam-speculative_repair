@@ -802,3 +802,25 @@ comparison because episode-first rows lack it non-randomly.
 
 Decision: allowed to analyze the uncensored shadow logs after task completion.
 No online motion policy is approved by this tooling change.
+
+## Teacher compute accounting review (2026-07-14)
+
+### Findings
+
+No blocking issue remains. The summary preserves the historical full-round
+rate and adds source-resolved executed steps, Teacher action-step rate,
+Teacher verifier forwards per 100 executed actions, and profiled Teacher model
+milliseconds per 100 actions. Teacher compute includes generation, verification,
+cache update, and cache replay component names beginning with `teacher_`.
+
+Normal non-profiled runs correctly report zero Teacher model milliseconds;
+they are not used to make a model-speed claim. Existing active runs are not
+modified and can be re-summarized from their JSONL logs after completion.
+
+### Verification
+
+- Local compile, direct accounting assertions, and `git diff --check`: passed.
+- Isolated A800 focused pytest: `62 passed in 1.35s`.
+
+Decision: approved as reporting-only instrumentation. It does not authorize an
+online routing change.

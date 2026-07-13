@@ -72,6 +72,13 @@ def test_source_summary_aggregates_motion_selective_metrics(tmp_path):
     summary = source_summary(path)
 
     assert summary["verify_k_counts"] == {"2": 2}
+    assert summary["action_steps_by_source"] == {
+        "draft_flash": 16,
+        "teacher_full": 32,
+    }
+    assert summary["teacher_action_step_rate"] == 2 / 3
+    assert summary["teacher_verify_forwards_per_100_actions"] == 100.0 / 24.0
+    assert summary["teacher_model_ms_per_100_actions"] == 875.0 / 3.0
     assert summary["motion_selective"] == {
         "high_proposals": 2,
         "high_accepts": 1,

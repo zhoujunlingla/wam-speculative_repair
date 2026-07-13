@@ -99,6 +99,7 @@ def source_summary(path: Path) -> dict:
     latencies: dict[str, list[float]] = {}
     model_components_ms: dict[str, float] = {}
     model_forward_counts: dict[str, int] = {}
+    action_steps_by_source: dict[str, int] = {}
     executed_action_steps = 0
     verify_k_counts: dict[str, int] = {}
     motion = {
@@ -125,7 +126,12 @@ def source_summary(path: Path) -> dict:
                 model_forward_counts[name] = (
                     model_forward_counts.get(name, 0) + int(value)
                 )
-            executed_action_steps += int(row.get("executed_action_steps", 0))
+            action_steps = int(row.get("executed_action_steps", 0))
+            executed_action_steps += action_steps
+            if action_steps:
+                action_steps_by_source[source] = (
+                    action_steps_by_source.get(source, 0) + action_steps
+                )
             active_tau = row.get("active_tau_timesteps")
             if active_tau:
                 key = str(len(active_tau))
@@ -152,10 +158,42 @@ def source_summary(path: Path) -> dict:
         if motion["high_proposals"] else None
     )
     model_only_total_ms = sum(model_components_ms.values())
+    teacher_action_steps = sum(
+        action_steps_by_source.get(source, 0)
+        for source in ("teacher_full", "teacher_generation")
+    )
+    draft_action_steps = sum(
+        action_steps_by_source.get(source, 0)
+        for source in ("draft_flash", "draft_generation")
+    )
+    action_source_steps = teacher_action_steps + draft_action_steps
+    teacher_verify_forward_count = sum(
+        count
+        for name, count in model_forward_counts.items()
+        if "teacher_action_verify" in name
+    )
+    teacher_model_ms = sum(
+        value
+        for name, value in model_components_ms.items()
+        if name.startswith("teacher_")
+    )
     return {
         "counts": counts,
         "latency": stats,
         "teacher_action_rate": counts.get("teacher_full", 0) / action_total if action_total else None,
+        "action_steps_by_source": action_steps_by_source,
+        "teacher_action_step_rate": (
+            teacher_action_steps / action_source_steps
+            if action_source_steps else None
+        ),
+        "teacher_verify_forwards_per_100_actions": (
+            100.0 * teacher_verify_forward_count / executed_action_steps
+            if executed_action_steps else None
+        ),
+        "teacher_model_ms_per_100_actions": (
+            100.0 * teacher_model_ms / executed_action_steps
+            if executed_action_steps else None
+        ),
         "verify_k_counts": verify_k_counts,
         "motion_selective": motion,
         "model_only": {

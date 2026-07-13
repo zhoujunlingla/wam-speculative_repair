@@ -641,6 +641,13 @@ time into them.  Summaries report total model milliseconds, low-level executed
 actions per model second, and the component breakdown.  The existing
 `elapsed_sec` field remains a wall-time diagnostic and is not relabeled.
 
+Teacher use is reported with three separate denominators: Teacher full rounds
+over action-producing rounds, Teacher-executed steps over all executed steps,
+and Teacher verifier forwards per 100 executed steps. When model profiling is
+enabled, summaries additionally report Teacher model milliseconds per 100
+executed steps. A lower full-round rate is not treated as a speed improvement
+unless verifier forwards and model milliseconds also decrease.
+
 ## Cross-Tau Gripper Consensus
 
 The original migration applies two independent phase fallbacks: the server

@@ -597,6 +597,27 @@ The policy keeps strict shape validation so a future server regression fails
 immediately. The server owns the one-time conversion at serialization; the
 policy does not silently accept both layouts.
 
+### Uncensored Motion Gate V3 shadow
+
+The selective-motion experiment is not a valid calibration source for a new
+motion score: the current score changes a verified 32-action prefix to 16,
+then the delayed latent error observes only that shorter execution. This mixes
+the feature being evaluated with its own intervention.
+
+The calibration run therefore keeps motion telemetry fully shadow-only:
+
+- draft inference still returns global, regional V2, and saliency V3 motion;
+- no motion threshold triggers a Teacher action or caps an accepted prefix;
+- the existing K=2 action verifier and gripper consensus remain unchanged;
+- delayed error is paired only after an actually executed draft and matching
+  cache acknowledgement;
+- results are stratified by executed prefix 16/32.
+
+Model selection uses leave-one-task-out folds. Trigger budget is frozen from
+training tasks only; held-out task scores cannot set their own threshold or
+top-k budget. A deployable V3 score must beat `global_mean` in macro task AP
+and precision at the frozen budget before it can affect online routing.
+
 ### Model-only latency profiling
 
 Closed-loop wall time is not the speed metric for the motion-gate comparison:

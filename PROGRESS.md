@@ -302,3 +302,13 @@ serialized internal `[K,2,F,N,1]` phase tensors unchanged, while the policy
 contract is `[K,2,F,N]`. The run is invalid benchmark evidence. The root fix
 removes the latent-only singleton at the server response boundary; the policy
 keeps strict validation so the same interface regression cannot pass silently.
+
+### Selective-motion B1 stopped (2026-07-14)
+
+The valid B1 `hanging_mug` shard completed `2/20`, versus `8/20` for the
+hard-motion baseline. Completed B1 tasks were `turn_switch 12/20` and
+`open_microwave 11/20`; they do not offset the contact-task regression. The
+32-to-16 high-motion cap also changes the horizon used by delayed-error labels,
+so B1 is unsuitable for fitting Motion Gate V3. The remaining B1 queue is
+stopped and retained as negative evidence. The next collection leaves motion
+fully shadow-only and preserves the action verifier's prefix.

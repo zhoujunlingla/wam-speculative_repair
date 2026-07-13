@@ -755,3 +755,26 @@ decision. No sibling response field uses this phase payload.
 
 Decision: allowed to restart the V3 shadow under a new run root. Online routing
 remains unchanged and unapproved.
+
+## Uncensored Motion Gate V3 shadow launch review (2026-07-14)
+
+### Findings
+
+The current selective-motion configuration cannot calibrate V3: its score
+determines a 16/32 execution horizon, which then determines the delayed-error
+label. The existing leave-one-task-out analysis also lets the held-out score
+distribution influence trigger budget and computes AP in a tie-order-dependent
+way.
+
+### Launch decision
+
+The next run changes configuration only: motion thresholds and selective cap
+are disabled, while motion telemetry, K=2 action verification, and gripper
+consensus remain active. This removes score-dependent censoring without
+changing model weights or verifier semantics. Online V3 routing remains
+blocked until the analysis implementation is fixed and task-held-out gates
+pass.
+
+Decision: allowed to stop the failed B1 queues and launch uncensored shadow
+collection under new run roots. No completed experiment notification is sent
+for the partial B1 result.

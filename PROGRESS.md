@@ -218,6 +218,20 @@ teacher quality with materially lower teacher use.
   routing, model calls, RNG, cache state, or the accepted prefix. The active
   remote B1 process was not modified or restarted.
 
+### Motion Gate V3 shadow telemetry
+
+- Added a saliency-weighted regional motion statistic using channel variance
+  from the draft future video latent. It adds no VAE, DiT, decode, or network
+  transfer and remains absent from online routing.
+- Offline audit derives history innovation only across consecutive executed
+  draft proposals with aligned cache acknowledgements. Teacher actions,
+  replans, resets, malformed labels, and frame mismatches break the chain.
+- The active MCSV-B1 run remains unchanged. This telemetry is intended for the
+  next shadow collection after B1 completes; it cannot retroactively appear in
+  the current logs.
+- Isolated A800 verification passed `15/15` focused tests. Local Python
+  compilation and `git diff --check` also passed.
+
 Verification: isolated A800 review copy passed `40/40` focused tests; local
 Python compilation and `git diff --check` passed. Formal routing conclusions
 remain locked until B1 low10 x 20 completes.

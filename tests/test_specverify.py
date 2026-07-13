@@ -70,8 +70,9 @@ def test_latent_frame_motion_stats_robotwin_regions():
         "head",
     }
     assert stats["motion_v2_score"] >= 0
+    assert stats["motion_v3_saliency_score"] >= 0
     assert all(
-        region["dense_median"] > 0
+        region["dense_median"] > 0 and region["saliency_weighted"] > 0
         for region in stats["motion_v2_regions"].values()
     )
 

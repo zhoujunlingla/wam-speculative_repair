@@ -500,6 +500,43 @@ The telemetry change must not alter routing, RNG, model calls, cache state, or
 the accepted prefix. Missing or malformed distance tensors remain visible in
 the audit rather than being silently treated as strong evidence.
 
+### Motion Gate V3 shadow features
+
+The first V3 change remains telemetry-only. It does not replace
+`global_mean`, release the 16-action motion cap, alter verifier probes, or
+route a Teacher action. The draft server augments each existing RoboTwin
+region with a saliency-weighted motion statistic computed from the same future
+video latent:
+
+```text
+patch_motion = RMS_channel(z[f+1] - z[f]) / RMS(z_region)
+patch_saliency = normalized channel variance of z at the patch
+region_salient_motion = weighted_mean(patch_motion, 1 + patch_saliency)
+```
+
+This follows the content-aware allocation principle of video diffusion cache
+methods while keeping the statistic explicitly a proxy rather than an object
+or contact label. No image is decoded and no model forward is added.
+
+History innovation is derived offline from consecutive *executed* draft rows
+whose cache acknowledgements are present. Rejected proposals, replans, and
+Teacher actions break the history chain. This avoids adding speculative state
+to the live policy before task-held-out calibration demonstrates value.
+
+The offline comparison keeps task as the outer holdout and compares, at a
+matched trigger budget:
+
+- deployed `global_mean`;
+- existing energy-normalized regional `motion_v2`;
+- saliency-weighted regional motion;
+- regional motion plus executed-history innovation;
+- the above combined with verifier tail sensitivity/margin.
+
+These scores remain shadow-only until a whole-task holdout improves precision
+and AUPRC over `global_mean`, followed by a matched closed-loop low10 x 20 run.
+Motion never overrides a continuous zero prefix or a discrete gripper-phase
+disagreement.
+
 ## Cross-Tau Gripper Consensus
 
 The original migration applies two independent phase fallbacks: the server

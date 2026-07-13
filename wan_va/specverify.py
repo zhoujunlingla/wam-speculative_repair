@@ -63,6 +63,14 @@ def latent_frame_motion_stats(
         region_latent = latents[..., height_slice, width_slice].float()
         latent_rms = region_latent.square().mean().sqrt().clamp_min(eps)
         normalized = region_motion / latent_rms
+        channel_variance = region_latent.var(dim=1, unbiased=False)
+        adjacent_saliency = 0.5 * (
+            channel_variance[:, 1:] + channel_variance[:, :-1]
+        )
+        saliency_min = adjacent_saliency.amin()
+        saliency_range = adjacent_saliency.amax() - saliency_min
+        saliency = (adjacent_saliency - saliency_min) / saliency_range.clamp_min(eps)
+        saliency_weights = 1.0 + saliency.flatten()
         weights = normalized / normalized.sum().clamp_min(eps)
         entropy = -(weights * weights.clamp_min(eps).log()).sum()
         if normalized.numel() > 1:
@@ -77,11 +85,17 @@ def latent_frame_motion_stats(
             "p95": float(p95.item()),
             "spatial_entropy": float(entropy.item()),
             "dense_diffuse": float((dense * entropy).item()),
+            "saliency_weighted": float(
+                ((normalized * saliency_weights).sum() / saliency_weights.sum()).item()
+            ),
         }
 
     stats["motion_v2_regions"] = region_stats
     stats["motion_v2_score"] = max(
         region["dense_diffuse"] for region in region_stats.values()
+    )
+    stats["motion_v3_saliency_score"] = max(
+        region["saliency_weighted"] for region in region_stats.values()
     )
     return stats
 

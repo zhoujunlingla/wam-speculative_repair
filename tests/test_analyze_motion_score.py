@@ -90,6 +90,66 @@ def test_audit_keeps_pair_when_verifier_margin_is_missing(tmp_path):
     assert audit["missing_verifier_margin"] == 1
 
 
+def test_audit_history_uses_only_contiguous_executed_drafts(tmp_path):
+    log = tmp_path / "specverify_task.jsonl"
+
+    def motion(left, right, head):
+        return {
+            "global_mean": 0.4,
+            "median": 0.2,
+            "motion_v3_saliency_score": max(left, right, head),
+            "motion_v2_regions": {
+                "left_wrist": {"saliency_weighted": left},
+                "right_wrist": {"saliency_weighted": right},
+                "head": {"saliency_weighted": head},
+            },
+        }
+
+    records = [{"source": "reset", "round_id": 0}]
+    for round_id, stats in ((1, motion(1.0, 2.0, 3.0)), (2, motion(2.0, 2.0, 3.0))):
+        records.extend(
+            [
+                {
+                    "source": "draft_flash",
+                    "round_id": round_id,
+                    "accepted_prefix": 16,
+                    "video_motion_stats": stats,
+                },
+                {
+                    "source": "flash_cache_update",
+                    "round_id": round_id,
+                    "cache_frame_count": 1,
+                    "delayed_video_error": {"latent_nrmse": 0.2},
+                },
+            ]
+        )
+    records.extend(
+        [
+            {"source": "replan", "round_id": 3},
+            {
+                "source": "draft_flash",
+                "round_id": 4,
+                "accepted_prefix": 16,
+                "video_motion_stats": motion(3.0, 2.0, 3.0),
+            },
+            {
+                "source": "flash_cache_update",
+                "round_id": 4,
+                "cache_frame_count": 1,
+                "delayed_video_error": {"latent_nrmse": 0.2},
+            },
+        ]
+    )
+    _write(log, records)
+
+    rows, audit = audit_log(log, run_name="run")
+
+    assert "motion_v3_history_innovation" not in rows[0]
+    assert abs(rows[1]["motion_v3_history_innovation"] - 1.0 / 3.0) < 1e-8
+    assert "motion_v3_history_innovation" not in rows[2]
+    assert audit["included_motion_v3_history"] == 1
+
+
 def test_audit_rejects_empty_verifier_margin_without_dropping_pair(tmp_path):
     log = tmp_path / "specverify_task.jsonl"
     _write(

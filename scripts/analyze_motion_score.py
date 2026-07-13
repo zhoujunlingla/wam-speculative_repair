@@ -37,6 +37,7 @@ def audit_log(
     pending: dict[int, dict] = {}
     rows: list[dict] = []
     audit = Counter()
+    previous_saliency: dict[str, float] | None = None
 
     with path.open(encoding="utf-8") as stream:
         for line_number, line in enumerate(stream, 1):
@@ -49,8 +50,12 @@ def audit_log(
                     audit["excluded_missing_cache_update"] += 1
                     proposal["exclusion_reason"] = "episode_reset_before_cache_update"
                 pending.clear()
+                previous_saliency = None
                 episode += 1
                 continue
+
+            if source in {"teacher_full", "full_cache_update", "replan"}:
+                previous_saliency = None
 
             motion = record.get("video_motion_stats")
             if motion is not None:
@@ -96,11 +101,13 @@ def audit_log(
             delayed = record.get("delayed_video_error")
             if delayed is None:
                 audit["excluded_missing_delayed_error"] += 1
+                previous_saliency = None
                 continue
             expected_frames = math.ceil(proposal["accepted_prefix"] / 16)
             actual_frames = int(record.get("cache_frame_count", -1))
             if actual_frames != expected_frames:
                 audit["excluded_frame_alignment_mismatch"] += 1
+                previous_saliency = None
                 continue
 
             proposal.update(
@@ -110,11 +117,49 @@ def audit_log(
                 high_delayed_error=float(delayed["latent_nrmse"])
                 > HIGH_ERROR_THRESHOLD,
             )
+            current_saliency = _region_saliency(proposal)
+            if current_saliency is None:
+                previous_saliency = None
+                audit["missing_motion_v3_saliency"] += 1
+            else:
+                if (
+                    previous_saliency is not None
+                    and current_saliency.keys() == previous_saliency.keys()
+                ):
+                    proposal["motion_v3_history_innovation"] = max(
+                        abs(current_saliency[name] - previous_saliency[name])
+                        / (
+                            abs(current_saliency[name])
+                            + abs(previous_saliency[name])
+                            + 1e-8
+                        )
+                        for name in current_saliency
+                    )
+                    audit["included_motion_v3_history"] += 1
+                elif previous_saliency is not None:
+                    audit["motion_v3_region_mismatch"] += 1
+                previous_saliency = current_saliency
             rows.append(proposal)
             audit["included_pair"] += 1
 
     audit["excluded_missing_cache_update"] += len(pending)
     return rows, audit
+
+
+def _region_saliency(proposal: dict) -> dict[str, float] | None:
+    regions = proposal.get("motion_v2_regions")
+    if not isinstance(regions, dict) or not regions:
+        return None
+    try:
+        values = {
+            str(name): float(stats["saliency_weighted"])
+            for name, stats in regions.items()
+        }
+    except (KeyError, TypeError, ValueError):
+        return None
+    if any(not math.isfinite(value) for value in values.values()):
+        return None
+    return values
 
 
 def _add_verifier_margin(proposal: dict, audit: Counter) -> None:

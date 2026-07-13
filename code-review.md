@@ -570,3 +570,31 @@ but a matched closed-loop low10 x 20 run remains mandatory.
 
 Decision: telemetry and offline analysis are approved. Motion-v2 remains
 shadow-only and no cap-release policy is approved yet.
+# Motion Gate V3 Shadow Telemetry Review (2026-07-14)
+
+## Findings
+
+No blocking correctness finding after review.
+
+- Risk: low. The server adds only reductions over the video latent already
+  produced by draft inference. It does not change action tensors, RNG, cache
+  contents, verifier inputs, or policy decisions.
+- The saliency value is deliberately a channel-variance proxy. It is not
+  treated as an object, contact, or physical-importance label.
+- History innovation is computed offline only after an executed draft receives
+  its aligned cache acknowledgement. Reset, replan, Teacher execution, missing
+  delayed labels, and frame-alignment failures break the chain.
+- Legacy logs remain valid: missing V3 saliency is counted explicitly and does
+  not remove an otherwise valid delayed-error pair.
+
+## Verification
+
+- Isolated A800 review root:
+  `/mnt/afs/intern/manlichen/ivan/zhoujunl/tmp/motion_v3_shadow_review`
+- `/usr/bin/python -m pytest -q tests/test_specverify.py tests/test_analyze_motion_score.py`
+  -> `15 passed`
+- Local `python3 -m py_compile` passed for implementation and tests.
+- `git diff --check` passed.
+
+Decision: allowed to proceed as shadow telemetry only. Online routing remains
+locked until whole-task holdout calibration and a matched Low10 x 20 run pass.

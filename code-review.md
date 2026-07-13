@@ -751,6 +751,7 @@ decision. No sibling response field uses this phase payload.
 
 - Local `python3 -m py_compile`: passed.
 - Local `git diff --check`: passed.
-- Focused A800 pytest: pending before restart.
+- Focused A800 pytest: `58 passed in 1.43s`.
 
-Decision: do not restart the V3 shadow until the focused A800 suite passes.
+Decision: allowed to restart the V3 shadow under a new run root. Online routing
+remains unchanged and unapproved.

@@ -12,10 +12,40 @@ from evaluation.robotwin.realtime_flash_policy import (
     RealtimeFlashPolicy,
     bounded_endpoint_repair,
     first_gripper_switch,
+    gripper_phase_majority_matches_draft,
     infer_with_replan,
     longest_safe_prefix,
     normalized_l2_step_distances,
 )
+
+
+def test_gripper_phase_majority_matches_draft_uses_three_tau_vote():
+    draft = np.zeros((2, 2, 16), dtype=bool)
+    primary = np.zeros((2, 2, 2, 16), dtype=bool)
+    primary[1, 0, 0, 0] = True
+    tiebreak = np.zeros((1, 2, 2, 16), dtype=bool)
+
+    matches, first = gripper_phase_majority_matches_draft(
+        primary, tiebreak, draft, prefix_len=16
+    )
+
+    assert matches is True
+    assert first is None
+
+
+def test_gripper_phase_majority_reports_first_persistent_disagreement():
+    draft = np.zeros((2, 2, 16), dtype=bool)
+    primary = np.zeros((2, 2, 2, 16), dtype=bool)
+    tiebreak = np.zeros((1, 2, 2, 16), dtype=bool)
+    primary[:, 0, 0, 3] = True
+    tiebreak[:, 0, 0, 3] = True
+
+    matches, first = gripper_phase_majority_matches_draft(
+        primary, tiebreak, draft, prefix_len=16
+    )
+
+    assert matches is False
+    assert first == 3
 
 
 def _action(switch_step=None, value=0.0):
@@ -1006,6 +1036,74 @@ def test_motion_selective_verify_requires_exactly_two_tau_probes():
             tau_timesteps=(50.0,),
             video_motion_gate_threshold=1.2,
             motion_selective_verify=True,
+        )
+
+
+def test_gripper_tiebreak_shadow_logs_rescue_without_changing_replan(tmp_path):
+    events = []
+    draft = _FakeModel("draft", events)
+    draft_phase = np.zeros((2, 2, 16), dtype=bool)
+    primary_phase = np.zeros((2, 2, 2, 16), dtype=bool)
+    primary_phase[1, 0, 0, 0] = True
+    tiebreak_phase = np.zeros((1, 2, 2, 16), dtype=bool)
+    teacher = _FakeModel(
+        "teacher",
+        events,
+        verify_results=(
+            {
+                "accepted_prefix": 0,
+                "accepted_prefix_before_gripper": 32,
+                "gripper_consensus_failure_index": 0,
+                "gripper_phase_by_tau": primary_phase.tolist(),
+                "draft_gripper_phase": draft_phase.tolist(),
+            },
+            {
+                "accepted_prefix": 32,
+                "accepted_prefix_before_gripper": 32,
+                "gripper_phase_by_tau": tiebreak_phase.tolist(),
+                "draft_gripper_phase": draft_phase.tolist(),
+            },
+        ),
+    )
+    log_path = tmp_path / "metrics.jsonl"
+    policy = RealtimeFlashPolicy(
+        draft,
+        teacher,
+        pf_interval=20,
+        tau_timesteps=(50.0, 100.0),
+        gripper_consensus=True,
+        gripper_tiebreak_shadow=True,
+        log_path=log_path,
+        rng=np.random.default_rng(7),
+    )
+    policy.infer({"reset": True, "prompt": "test task"})
+    initial = policy.infer(_action_request())
+    policy.infer(_cache_request("anchor", initial["action"]))
+
+    response = policy.infer(_action_request())
+
+    verify_calls = [call for call in teacher.calls if call["kind"] == "verify"]
+    record = json.loads(log_path.read_text().splitlines()[-1])
+    assert response["replan"] is True
+    assert response["fallback_reason"] == "gripper_consensus"
+    assert len(verify_calls) == 2
+    assert verify_calls[0]["request"]["return_gripper_phase"] is True
+    assert verify_calls[1]["request"]["return_gripper_phase"] is True
+    assert tuple(verify_calls[1]["request"]["tau_timesteps"]) == (75.0,)
+    np.testing.assert_array_equal(
+        verify_calls[0]["request"]["verify_noise"],
+        verify_calls[1]["request"]["verify_noise"],
+    )
+    assert record["gripper_tiebreak_shadow_eligible"] is True
+    assert record["gripper_tiebreak_shadow_rescue"] is True
+
+
+def test_gripper_tiebreak_shadow_requires_consensus():
+    with pytest.raises(ValueError, match="requires gripper consensus"):
+        RealtimeFlashPolicy(
+            _FakeModel("draft", []),
+            _FakeModel("teacher", []),
+            gripper_tiebreak_shadow=True,
         )
 
 

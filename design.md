@@ -574,6 +574,15 @@ requires a two-of-three phase majority matching the draft.  It must not average
 continuous gripper values or accept merely because switch indices are close.
 Independent noise is reserved for the later repair holdout verifier.
 
+The first implementation is shadow-only.  With
+`--gripper-tiebreak-shadow`, the primary verifier explicitly requests the
+per-step gripper phase for `tau=50/100`; only a disagreement triggers one
+read-only `tau=75` verification with the same action noise.  Logs record the
+first majority mismatch, both continuous prefixes, the counterfactual rescue
+decision, and the extra model-forward timing.  The live prefix, replan, cache,
+and Teacher scheduling paths remain byte-for-byte unchanged.  The phase tensor
+is omitted from normal verifier responses when the flag is disabled.
+
 ### Model-only latency profiling
 
 Closed-loop wall time is not the speed metric for the motion-gate comparison:

@@ -196,6 +196,7 @@ def main() -> None:
     parser.add_argument("--motion-selective-verify", action="store_true")
     parser.add_argument("--gripper-full-window", type=int, default=1)
     parser.add_argument("--gripper-consensus", action="store_true")
+    parser.add_argument("--gripper-tiebreak-shadow", action="store_true")
     parser.add_argument("--repair-shadow", action="store_true")
     parser.add_argument("--repair-strength", type=float, default=0.5)
     parser.add_argument("--repair-max-step-rms", type=float, default=0.15)
@@ -239,6 +240,8 @@ def main() -> None:
     ]
     if args.gripper_consensus:
         server_cmd.append("--gripper-consensus")
+    if args.gripper_tiebreak_shadow:
+        server_cmd.append("--gripper-tiebreak-shadow")
     if args.motion_selective_verify:
         server_cmd.append("--motion-selective-verify")
     if args.repair_shadow:
@@ -330,6 +333,7 @@ def main() -> None:
         "motion_selective_verify": args.motion_selective_verify,
         "gripper_full_window": args.gripper_full_window,
         "gripper_consensus": args.gripper_consensus,
+        "gripper_tiebreak_shadow": args.gripper_tiebreak_shadow,
         "repair_shadow": args.repair_shadow,
         "repair_strength": args.repair_strength,
         "repair_max_step_rms": args.repair_max_step_rms,

@@ -668,3 +668,43 @@ conditional phase tie-break.
 
 Decision: allowed to proceed to shadow design only. No online gripper policy
 is approved from this documentation evidence alone.
+
+## Conditional Gripper Tie-Break Shadow Review (2026-07-14)
+
+### Findings
+
+No blocking correctness finding remains after review.
+
+- The feature is opt-in and requires existing K=2 gripper consensus.  With the
+  flag disabled, the server does not return phase tensors and no extra Teacher
+  forward is issued.
+- The `tau=75` request reuses the exact primary action latent, frame id,
+  previous gripper state, and Gaussian noise.  Its only changed verifier input
+  is the flow timestep and `gripper_consensus=False`, which is required for a
+  single probe.
+- The 2-of-3 vote is performed per gripper channel and per action step over the
+  first 16 actions.  Counterfactual rescue additionally requires both the
+  primary and tie-break continuous prefixes to cover all 16 actions.
+- Shadow telemetry is merged into model-only profiling, but the live accepted
+  prefix, replan reason, Teacher scheduling, cache state, and RNG state are not
+  changed.
+
+### Residual Risk
+
+- This probe measures cross-timestep phase stability, not true contact or
+  task success.  It may be promoted only after complete task-held-out shadow
+  coverage and matched closed-loop validation.
+- Shadow runs include the extra conditional forward and cannot be used as the
+  final speculative speed number.  Formal speed must be measured with the
+  promoted policy or with the shadow cost reported separately.
+
+### Verification
+
+- Local `python3 -m py_compile` and `git diff --check`: passed.
+- Isolated A800 review root:
+  `/mnt/afs/intern/manlichen/ivan/zhoujunl/tmp/gripper_tiebreak_shadow_review`.
+- `/usr/bin/python -m pytest -q tests/test_realtime_flash_policy.py tests/test_run_realtime_flash_task.py tests/test_specverify.py tests/test_analyze_motion_score.py`
+  -> `58 passed in 1.43s`.
+
+Decision: allowed for shadow telemetry only.  Online tie-break execution is not
+approved.

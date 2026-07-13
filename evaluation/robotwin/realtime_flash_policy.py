@@ -180,6 +180,39 @@ def bounded_endpoint_repair(
     return candidate, float(np.max(np.sqrt(np.mean(np.square(flat), axis=-1))))
 
 
+def gripper_phase_majority_matches_draft(
+    primary_phases,
+    tiebreak_phases,
+    draft_phase,
+    *,
+    prefix_len: int,
+) -> tuple[bool, int | None]:
+    """Check a 2-of-3 cross-tau gripper phase vote against the draft."""
+
+    primary = np.asarray(primary_phases, dtype=bool)
+    tiebreak = np.asarray(tiebreak_phases, dtype=bool)
+    draft = np.asarray(draft_phase, dtype=bool)
+    if primary.ndim != 4 or primary.shape[0] != 2:
+        raise ValueError("primary gripper phases must have shape [2, C, F, N]")
+    if tiebreak.shape != (1, *primary.shape[1:]):
+        raise ValueError("tiebreak gripper phases must add one matching tau probe")
+    if draft.shape != primary.shape[1:]:
+        raise ValueError("draft gripper phase must match one tau probe")
+    horizon = int(np.prod(draft.shape[1:]))
+    limit = max(0, min(int(prefix_len), horizon))
+    if limit == 0:
+        return False, 0
+    probes = np.concatenate((primary, tiebreak), axis=0).reshape(
+        3, primary.shape[1], horizon
+    )
+    draft = draft.reshape(draft.shape[0], horizon)
+    majority = probes.sum(axis=0) >= 2
+    disagreement = np.any(majority[:, :limit] != draft[:, :limit], axis=0)
+    indices = np.flatnonzero(disagreement)
+    first = int(indices[0]) if indices.size else None
+    return first is None, first
+
+
 class RealtimeFlashPolicy:
     """First-full speculative policy with a last-full teacher reference."""
 
@@ -207,6 +240,7 @@ class RealtimeFlashPolicy:
         motion_selective_verify: bool = False,
         gripper_full_window: int = 1,
         gripper_consensus: bool = False,
+        gripper_tiebreak_shadow: bool = False,
         repair_shadow: bool = False,
         repair_strength: float = 0.5,
         repair_max_step_rms: float = 0.15,
@@ -257,6 +291,8 @@ class RealtimeFlashPolicy:
             raise ValueError("tau_timesteps must be non-empty")
         if gripper_consensus and len(tau_timesteps) < 2:
             raise ValueError("gripper consensus requires at least two tau probes")
+        if gripper_tiebreak_shadow and not gripper_consensus:
+            raise ValueError("gripper tiebreak shadow requires gripper consensus")
         if motion_selective_verify and len(tau_timesteps) != 2:
             raise ValueError("motion selective verification requires exactly two tau probes")
 
@@ -281,6 +317,7 @@ class RealtimeFlashPolicy:
         self.motion_selective_verify = bool(motion_selective_verify)
         self.gripper_full_window = int(gripper_full_window)
         self.gripper_consensus = bool(gripper_consensus)
+        self.gripper_tiebreak_shadow = bool(gripper_tiebreak_shadow)
         self.repair_shadow = bool(repair_shadow)
         self.repair_strength = float(repair_strength)
         self.repair_max_step_rms = float(repair_max_step_rms)
@@ -588,6 +625,53 @@ class RealtimeFlashPolicy:
             raise RuntimeError("teacher verification did not return a prefix or distances")
         return quantize_prefix(raw_prefix, self.action_per_frame, horizon)
 
+    def _shadow_gripper_tiebreak(
+        self,
+        verify_request: dict,
+        primary_response: dict,
+        horizon: int,
+    ) -> dict:
+        """Probe tau=75 without changing the live gripper decision."""
+
+        request = dict(verify_request)
+        request["tau_timesteps"] = (75.0,)
+        request["gripper_consensus"] = False
+        response = self._call(self.teacher, request)
+        prefix_len = min(self.action_per_frame, int(horizon))
+        majority_matches, first_failure = gripper_phase_majority_matches_draft(
+            primary_response.get("gripper_phase_by_tau"),
+            response.get("gripper_phase_by_tau"),
+            primary_response.get("draft_gripper_phase"),
+            prefix_len=prefix_len,
+        )
+        primary_continuous_prefix = int(
+            primary_response.get("accepted_prefix_before_gripper", 0)
+        )
+        tiebreak_continuous_prefix = int(
+            response.get("accepted_prefix_before_gripper", 0)
+        )
+        rescue = bool(
+            majority_matches
+            and primary_continuous_prefix >= prefix_len
+            and tiebreak_continuous_prefix >= prefix_len
+        )
+        return {
+            "gripper_tiebreak_shadow_tau": 75.0,
+            "gripper_tiebreak_shadow_majority_matches": majority_matches,
+            "gripper_tiebreak_shadow_first_failure": first_failure,
+            "gripper_tiebreak_shadow_primary_continuous_prefix":
+                primary_continuous_prefix,
+            "gripper_tiebreak_shadow_continuous_prefix":
+                tiebreak_continuous_prefix,
+            "gripper_tiebreak_shadow_rescue": rescue,
+            "gripper_tiebreak_shadow_model_timing_ms": response.get(
+                "model_timing_ms", {}
+            ),
+            "gripper_tiebreak_shadow_model_forward_counts": response.get(
+                "model_forward_counts", {}
+            ),
+        }
+
     def _shadow_repair_probe(
         self,
         request: dict,
@@ -730,6 +814,7 @@ class RealtimeFlashPolicy:
             tau_timesteps=active_tau_timesteps,
             frame_st_id=self.frame_st_id,
             gripper_consensus=active_gripper_consensus,
+            return_gripper_phase=self.gripper_tiebreak_shadow,
         )
         if self.last_gripper is not None:
             previous_phase = self.last_gripper >= self.gripper_threshold
@@ -780,6 +865,32 @@ class RealtimeFlashPolicy:
         gripper_consensus_failure = verify_response.get(
             "gripper_consensus_failure_index"
         )
+        verify_telemetry["gripper_tiebreak_shadow_enabled"] = (
+            self.gripper_tiebreak_shadow
+        )
+        verify_telemetry["gripper_tiebreak_shadow_eligible"] = bool(
+            self.gripper_tiebreak_shadow
+            and gripper_consensus_failure is not None
+        )
+        if verify_telemetry["gripper_tiebreak_shadow_eligible"]:
+            tiebreak_shadow = self._shadow_gripper_tiebreak(
+                verify_request, verify_response, horizon
+            )
+            tiebreak_profile = {
+                "model_timing_ms": tiebreak_shadow.pop(
+                    "gripper_tiebreak_shadow_model_timing_ms", {}
+                ),
+                "model_forward_counts": tiebreak_shadow.pop(
+                    "gripper_tiebreak_shadow_model_forward_counts", {}
+                ),
+            }
+            self._merge_model_profile(
+                model_timing_ms,
+                model_forward_counts,
+                tiebreak_profile,
+                "teacher_verify_gripper_tiebreak_shadow",
+            )
+            verify_telemetry.update(tiebreak_shadow)
         if (
             teacher_gripper_switch
             and self.teacher_gripper_fallback

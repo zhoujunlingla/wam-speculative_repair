@@ -27,7 +27,13 @@ def _action(switch_step=None, value=0.0):
 
 class _FakeModel:
     def __init__(
-        self, role, events, action=None, verify_results=(), delayed_errors=()
+        self,
+        role,
+        events,
+        action=None,
+        verify_results=(),
+        delayed_errors=(),
+        video_motion_global=0.1,
     ):
         self.role = role
         self.events = events
@@ -35,6 +41,7 @@ class _FakeModel:
         self.action_latent = np.zeros((1, 30, 2, 16, 1), dtype=np.float32)
         self.verify_results = deque(verify_results)
         self.delayed_errors = deque(delayed_errors)
+        self.video_motion_global = float(video_motion_global)
         self.calls = []
         self.cache = []
         self.frame_st_id = 0
@@ -81,7 +88,7 @@ class _FakeModel:
             response["action_latent"] = self.action_latent.copy()
             if request.get("return_video_motion_stats", False):
                 response["video_motion_stats"] = {
-                    "global_mean": 0.1,
+                    "global_mean": self.video_motion_global,
                     "median": 0.05,
                     "top_mean": 0.2,
                     "top_relative": 4.0,
@@ -644,6 +651,55 @@ def test_delayed_recovery_includes_an_already_scheduled_flow_refresh():
     assert full_1["full_reason"] == "flow_budget"
     assert full_2["full_reason"] == "delayed_video_error_burst"
     assert next_action["action_source"] == "draft_flash"
+
+
+def test_video_motion_gate_replans_before_action_verification(tmp_path):
+    events = []
+    draft = _FakeModel("draft", events, video_motion_global=1.3)
+    teacher = _FakeModel("teacher", events)
+    log_path = tmp_path / "metrics.jsonl"
+    policy = RealtimeFlashPolicy(
+        draft,
+        teacher,
+        pf_interval=20,
+        video_motion_gate_threshold=1.2,
+        log_path=log_path,
+        rng=np.random.default_rng(7),
+    )
+    policy.infer({"reset": True, "prompt": "test task"})
+    initial = policy.infer(_action_request())
+    policy.infer(_cache_request("anchor", initial["action"]))
+
+    response = infer_with_replan(policy, _action_request())
+
+    teacher_verifies = [call for call in teacher.calls if call["kind"] == "verify"]
+    record = json.loads(log_path.read_text().splitlines()[-2])
+    assert not teacher_verifies
+    assert record["source"] == "replan"
+    assert record["fallback_reason"] == "video_motion_risk"
+    assert record["video_motion_stats"]["global_mean"] == 1.3
+    assert response["action_source"] == "teacher_full"
+    assert response["full_reason"] == "video_motion_risk"
+
+
+def test_video_motion_gate_default_off_still_verifies():
+    events = []
+    draft = _FakeModel("draft", events, video_motion_global=2.0)
+    teacher = _FakeModel("teacher", events)
+    policy = RealtimeFlashPolicy(
+        draft,
+        teacher,
+        pf_interval=20,
+        rng=np.random.default_rng(7),
+    )
+    policy.infer({"reset": True, "prompt": "test task"})
+    initial = policy.infer(_action_request())
+    policy.infer(_cache_request("anchor", initial["action"]))
+
+    response = policy.infer(_action_request())
+
+    assert response["action_source"] == "draft_flash"
+    assert [call for call in teacher.calls if call["kind"] == "verify"]
 
 
 def test_zero_prefix_replans_same_observation_without_cache_update():

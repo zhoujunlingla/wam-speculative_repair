@@ -366,3 +366,31 @@ was unchanged and had passed in its configured model environment previously.
 Decision: allowed to proceed to a four-task TN=3 pilot with delayed threshold
 0.55, two consecutive high-error updates, two teacher recovery rounds, and a
 0.18 single flow refresh. Repair and adaptive K remain disabled.
+
+## Pre-Execution Video-Motion Gate Review
+
+No blocking correctness finding remains after independent review.
+
+- The gate runs after draft video/action generation but before teacher action
+  verification. A gated draft is never executed and never receives a cache
+  acknowledgement.
+- It does not stage gripper state, add a teacher replay update, increment flash
+  age, or charge the flow budget. The existing same-observation replan protocol
+  runs teacher full after replaying only previously executed draft updates.
+- The real draft server clears the gated pending video prediction on the full
+  teacher action's cache acknowledgement without comparing it, so no false
+  delayed-error label crosses the new teacher anchor.
+- Threshold zero preserves K=2 verification. CLI forwarding and run-summary
+  recording are complete.
+
+Residual risks: the fake model does not directly model the GPU pending-video
+tensor, and callers must continue using the existing `infer_with_replan`
+protocol. These are covered by the unchanged real-server clear path and client
+wrapper, but must be observed in the real smoke.
+
+Verification: remote policy/launcher/specverify suite `35 passed`; local
+`py_compile` and `git diff --check` passed.
+
+Decision: allowed to run a four-task TN=3 pilot with motion threshold 1.2,
+flow-budget disabled, delayed recovery disabled, and delayed-error telemetry,
+K=2 endpoint verification, PF=20, and gripper consensus retained.

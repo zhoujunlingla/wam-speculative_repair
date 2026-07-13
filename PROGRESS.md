@@ -125,3 +125,16 @@ teacher quality with materially lower teacher use.
   gripper switch, K=1 would cover `55.6%` of eligible calls with zero observed
   tau-100 prefix or phase changes. This is the next speed change after the
   delayed-error routing pilot passes its quality gate.
+
+### Persistent delayed recovery pilot
+
+- The pilot scored `8/12 = 66.7%`: `hanging_mug 0/3`, `turn_switch 3/3`,
+  `place_can_basket 2/3`, and `open_microwave 3/3`.
+- Teacher action-source fell from 36.36% in the shadow policy to 28.77%, but
+  all six delayed triggers occurred in episodes that ultimately failed and no
+  trigger rescued an episode. The mechanism is rejected as a recovery policy.
+- Pairing pre-execution telemetry with the following delayed latent error found
+  that draft future-video global motion predicts `latent_nrmse > 0.55` at AUC
+  0.867. A threshold of 1.2 selects 6.7% of draft rounds at 83.3% precision.
+  The next pilot gates these drafts before execution and disables blind flow-
+  budget refresh; delayed error remains shadow-only.

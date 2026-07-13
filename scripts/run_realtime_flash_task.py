@@ -143,6 +143,7 @@ def main() -> None:
     parser.add_argument("--delayed-error-threshold", type=float, default=0.0)
     parser.add_argument("--delayed-error-consecutive", type=int, default=2)
     parser.add_argument("--delayed-error-teacher-rounds", type=int, default=2)
+    parser.add_argument("--video-motion-gate-threshold", type=float, default=0.0)
     parser.add_argument("--gripper-full-window", type=int, default=1)
     parser.add_argument("--gripper-consensus", action="store_true")
     parser.add_argument(
@@ -176,6 +177,7 @@ def main() -> None:
         "--delayed-error-threshold", str(args.delayed_error_threshold),
         "--delayed-error-consecutive", str(args.delayed_error_consecutive),
         "--delayed-error-teacher-rounds", str(args.delayed_error_teacher_rounds),
+        "--video-motion-gate-threshold", str(args.video_motion_gate_threshold),
         "--gripper-full-window", str(args.gripper_full_window),
         "--log-path", str(metrics_log),
     ]
@@ -256,6 +258,7 @@ def main() -> None:
         "delayed_error_threshold": args.delayed_error_threshold,
         "delayed_error_consecutive": args.delayed_error_consecutive,
         "delayed_error_teacher_rounds": args.delayed_error_teacher_rounds,
+        "video_motion_gate_threshold": args.video_motion_gate_threshold,
         "gripper_full_window": args.gripper_full_window,
         "gripper_consensus": args.gripper_consensus,
         "teacher_gripper_fallback": args.teacher_gripper_fallback,

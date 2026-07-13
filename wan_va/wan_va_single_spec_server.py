@@ -83,6 +83,7 @@ def build_policy(args: argparse.Namespace):
         delayed_error_threshold=args.delayed_error_threshold,
         delayed_error_consecutive=args.delayed_error_consecutive,
         delayed_error_teacher_rounds=args.delayed_error_teacher_rounds,
+        video_motion_gate_threshold=args.video_motion_gate_threshold,
         gripper_full_window=args.gripper_full_window,
         gripper_consensus=args.gripper_consensus,
         rng=None if args.seed is None else np.random.default_rng(args.seed),
@@ -119,6 +120,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--delayed-error-threshold", type=float, default=0.0)
     parser.add_argument("--delayed-error-consecutive", type=int, default=2)
     parser.add_argument("--delayed-error-teacher-rounds", type=int, default=2)
+    parser.add_argument("--video-motion-gate-threshold", type=float, default=0.0)
     parser.add_argument("--gripper-full-window", type=int, default=1)
     parser.add_argument("--gripper-consensus", action="store_true")
     parser.add_argument(

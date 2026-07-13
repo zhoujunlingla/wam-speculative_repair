@@ -157,6 +157,7 @@ class RealtimeFlashPolicy:
         delayed_error_threshold: float = 0.0,
         delayed_error_consecutive: int = 2,
         delayed_error_teacher_rounds: int = 2,
+        video_motion_gate_threshold: float = 0.0,
         gripper_full_window: int = 1,
         gripper_consensus: bool = False,
         rng: Optional[np.random.Generator] = None,
@@ -180,6 +181,8 @@ class RealtimeFlashPolicy:
             raise ValueError("delayed_error_threshold must be non-negative")
         if delayed_error_consecutive < 1 or delayed_error_teacher_rounds < 1:
             raise ValueError("delayed-error recovery values must be positive")
+        if not np.isfinite(video_motion_gate_threshold) or video_motion_gate_threshold < 0:
+            raise ValueError("video_motion_gate_threshold must be non-negative")
         if gripper_full_window < 1:
             raise ValueError("gripper_full_window must be positive")
         tau_timesteps = tuple(float(timestep) for timestep in tau_timesteps)
@@ -204,6 +207,7 @@ class RealtimeFlashPolicy:
         self.delayed_error_threshold = float(delayed_error_threshold)
         self.delayed_error_consecutive = int(delayed_error_consecutive)
         self.delayed_error_teacher_rounds = int(delayed_error_teacher_rounds)
+        self.video_motion_gate_threshold = float(video_motion_gate_threshold)
         self.gripper_full_window = int(gripper_full_window)
         self.gripper_consensus = bool(gripper_consensus)
         self.rng = rng or np.random.default_rng()
@@ -471,6 +475,34 @@ class RealtimeFlashPolicy:
         action_latent = np.asarray(action_latent)
         video_motion_stats = draft_response.get("video_motion_stats")
         horizon = action.shape[1] * action.shape[2]
+
+        if self.video_motion_gate_threshold > 0:
+            if video_motion_stats is None or "global_mean" not in video_motion_stats:
+                raise RuntimeError("video motion gate requires draft global_mean")
+            global_motion = float(video_motion_stats["global_mean"])
+            if not np.isfinite(global_motion):
+                raise ValueError("draft global video motion must be finite")
+            if global_motion >= self.video_motion_gate_threshold:
+                self.force_full_reason = "video_motion_risk"
+                self.last_source = "replan"
+                self.round_id += 1
+                response = {
+                    "replan": True,
+                    "action_source": self.last_source,
+                    "fallback_reason": self.force_full_reason,
+                    "accepted_prefix": 0,
+                    "verified_prefix": None,
+                }
+                self._log(
+                    source=self.last_source,
+                    fallback_reason=self.force_full_reason,
+                    accepted_prefix=0,
+                    verified_prefix=None,
+                    video_motion_stats=video_motion_stats,
+                    video_motion_gate_threshold=self.video_motion_gate_threshold,
+                    elapsed_sec=time.perf_counter() - start,
+                )
+                return response
 
         verify_request = dict(request)
         verify_request.update(

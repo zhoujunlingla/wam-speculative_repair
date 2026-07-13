@@ -290,6 +290,39 @@ adding teacher calls. The go gate is better `hanging_mug` success than the
 0/3 shadow result, no regression on the other three tasks, and lower teacher
 action-source rate than 36.36%.
 
+The pilot reached `8/12` and reduced teacher use to 28.77%, but all six delayed
+triggers occurred in failed episodes and none rescued the episode. Delayed
+error is therefore retained as a supervision/calibration label, not promoted
+as a post-hoc recovery controller.
+
+### Pre-execution video-motion risk gate
+
+Pairing each executed draft with its next delayed-error label produced 268
+samples. The draft future-video global motion available before execution
+predicted `latent_nrmse > 0.55` with AUC 0.867, versus 0.73-0.76 for endpoint
+residual features. A conservative global-motion threshold of 1.2 selected
+18/268 draft rounds (6.7%), and 15/18 selected rounds produced high delayed
+error. This relationship also held within `hanging_mug`, `place_can_basket`,
+and `open_microwave`; `turn_switch` had one false-positive selected round.
+
+The next pilot uses this statistic before teacher action verification:
+
+```text
+draft action + future video latent
+if global_video_motion >= 1.2:
+    discard the unexecuted draft and replan the same observation with teacher
+else:
+    run the unchanged K=2 action verifier
+```
+
+This is an immediate safety gate, not repair: no draft action or cache update
+is committed before the teacher replan. It skips the now-unnecessary action
+verifier on gated rounds. The first pilot disables flow-budget and delayed-
+error routing while retaining delayed-error shadow telemetry, cross-tau
+gripper consensus, and the PF=20 ceiling. This tests whether a sparse WAM-
+specific pre-execution gate can replace blind teacher refreshes. The gate is
+disabled by threshold zero.
+
 ## Cross-Tau Gripper Consensus
 
 The original migration applies two independent phase fallbacks: the server

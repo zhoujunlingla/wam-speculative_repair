@@ -432,3 +432,465 @@ Verification: remote focused suite `37 passed`; local `py_compile` and
 Decision: allowed to run four-task TN=3 with immediate motion threshold 1.2,
 flow threshold 0.4, low-motion ceiling 0.5, no delayed recovery/burst, PF20,
 K=2 endpoint verification, and gripper consensus.
+
+## Motion-Score E0-E3 Review
+
+No blocking correctness finding remains for audit or shadow telemetry.
+
+- Pairing is tied to the policy state machine: only an executed positive draft
+  prefix can open a pair, and only its same-round cache acknowledgement can
+  close it. Frame-count alignment prevents a delayed label from being assigned
+  to the wrong action horizon.
+- The analysis never randomly splits rounds. It reports task-wise rankings,
+  task-balanced matched-budget metrics, and thresholds calibrated with one
+  whole task held out.
+- Existing `global_mean`, `median`, and top-patch fields are unchanged. The new
+  RoboTwin score is emitted only as telemetry and has no policy caller, CLI
+  flag, threshold, or action-side effect.
+- The T-shaped split matches the encoder layout: wrist cameras occupy the top
+  third split across width and the head camera occupies the lower two thirds.
+  Each region is normalized by its own latent RMS before robust median and
+  entropy statistics are computed.
+
+Residual risks: region-wise RMS normalization can amplify a nearly empty
+camera region, and `max(region)` may be sensitive to one noisy camera. These
+are acceptable only in shadow mode; E3 must reject the score if its matched
+precision, AUPRC, or task-held-out behavior is worse than `global_mean`.
+Current historical logs do not contain motion-v2, so they cannot be used to
+claim an improvement.
+
+Verification: `git diff --check` and Python compilation passed locally. The
+A800 focused suite passed `41/41`, covering audit pairing, frame mismatch,
+matched trigger budgets, regional motion telemetry, verifier behavior, and
+policy state transitions. Replaying the frozen logs produced 276/276 aligned
+pairs and 20 explicit unexecuted exclusions.
+
+Decision: E0/E1 evidence may be recorded; motion-v2 may proceed to E3 shadow
+collection only. It is not allowed to route or alter teacher usage. E2 must
+compare motion off versus `global_mean >= 1.2` on one matched low10 x 20
+manifest before any causal benefit is claimed.
+
+## Repair Counterfactual Shadow Review
+
+Scope: shadow-only bounded endpoint repair for pure continuous zero-prefix
+rejections. It must not alter the executed action, fallback decision, primary
+verifier RNG, or cache state.
+
+No blocking correctness finding remains after finite-value validation was
+added. The mean endpoint can overfit the primary probe, so it is evaluated only
+with an independent Gaussian holdout from a dedicated RNG. Continuous endpoint
+agreement cannot certify contact; motion, gripper, phase, and refresh fallbacks
+are therefore ineligible, and repair remains non-executable.
+
+Verification: local `py_compile` and `git diff --check` passed. The A800 focused
+suite passed `39/39`, covering continuous-prefix-only modification, exact
+gripper/suffix preservation, RMS clipping, independent noise, unchanged
+replan, and absence of pending cache state. A real-model smoke reached
+`Render Well` without OOM or cache mutation.
+
+Decision: allowed to run a four-task TN=5 counterfactual audit. Do not enable
+execution unless independent holdout prefix recovery has useful episode-level
+predictive value.
+
+## Motion-Conditioned Selective Verification Review
+
+Scope: replace the high-video-motion hard Teacher fallback with the existing
+two-probe action verifier. A verified high-motion chunk may execute at most one
+16-action observation interval; a zero prefix still replans the same
+observation with Teacher. Normal-motion verification, initial Teacher anchor,
+PF=20, gripper consensus, cache replay, and repair behavior are unchanged.
+
+The independent review initially found three contract gaps, all fixed before
+benchmark launch:
+
+1. Selective mode now requires exactly two tau probes; it cannot silently run
+   an uncalibrated K=1 or K>2 policy.
+2. The high-motion cap is fixed to `action_per_frame`, rather than exposed as
+   another experiment hyperparameter.
+3. Telemetry separates the raw continuous verifier prefix, the gripper-adjusted
+   prefix before the motion cap, and the final executed prefix. Run summaries
+   aggregate K counts, high-motion proposals, accepts, rejects, and cap events.
+
+The proposed low-motion K=1 optimization is explicitly rejected. Frozen logs
+contain 1306 low-motion rounds that passed tau 50 without a decoded gripper
+switch; 49 (3.75%) were rejected by tau 100 or cross-tau phase consensus, and
+`hanging_mug` missed 18/130 (13.85%). Reducing K would therefore trade away
+task quality instead of safely reducing Teacher use.
+
+Verification:
+
+- Remote focused suite: `44 passed`.
+- Local Python compilation and `git diff --check`: passed.
+- Real-model smoke reached `Render Well`, completed cache updates, and entered
+  repeated K=2 action verification without shape, reset, or cache-state errors.
+  Formal success/latency evidence still comes from the matched low10 x 20 run.
+
+Risk is medium and experimental rather than structural. Motion magnitude does
+not certify correctness; the verifier remains the sole accept/reject signal,
+and the 16-step cap limits high-motion open-loop exposure. Promotion requires
+success statistically compatible with the 73.0% hard-gate baseline, Teacher
+action-source below 21.63%, and lower model-forward latency.
+
+Decision: allowed to proceed to one matched low10 x 20 run with repair disabled.
+
+## Motion/verifier-margin telemetry review
+
+Scope: diagnostic-only logging and offline pairing support for a possible
+region-motion plus verifier-margin cap-release rule. No live routing rule is
+added.
+
+The first review found one blocking parser edge case: an empty distance tensor
+could divide by zero rather than remain visible as malformed telemetry. The
+parser now validates a non-empty list, finite positive threshold, finite
+distances, and at least 32 action entries per tau before deriving the tail
+margin. Missing, malformed, and short telemetry use separate audit counters and
+never remove an otherwise valid motion/delayed-error pair.
+
+No blocking finding remains:
+
+- the policy adds one scalar log field and does not alter inference control
+  flow, RNG, cache state, or response data;
+- legacy logs use a threshold only when the caller explicitly supplies
+  `--verify-threshold`;
+- the derived tail maximum is the maximum over actions 16:32 across every tau,
+  matching the verifier's `[K, 2, 16]` temporal order;
+- the analysis keeps task/run/episode identity and does not introduce a random
+  split or an online motion-v2 threshold;
+- missing or malformed verifier data cannot be misclassified as a strong
+  margin.
+
+Verification: an isolated copy on A800 passed `40/40` focused pytest cases.
+Local `py_compile` and `git diff --check` passed. Partial replay of 426 aligned
+B1 pairs completed with 427 valid margin records and one still-pending cache
+acknowledgement.
+
+Residual risk: delayed error after a 16-action cap cannot establish safety of
+the unexecuted second 16 actions. Offline margin analysis may nominate a rule,
+but a matched closed-loop low10 x 20 run remains mandatory.
+
+Decision: telemetry and offline analysis are approved. Motion-v2 remains
+shadow-only and no cap-release policy is approved yet.
+# Motion Gate V3 Shadow Telemetry Review (2026-07-14)
+
+## Findings
+
+No blocking correctness finding after review.
+
+- Risk: low. The server adds only reductions over the video latent already
+  produced by draft inference. It does not change action tensors, RNG, cache
+  contents, verifier inputs, or policy decisions.
+- The saliency value is deliberately a channel-variance proxy. It is not
+  treated as an object, contact, or physical-importance label.
+- History innovation is computed offline only after an executed draft receives
+  its aligned cache acknowledgement. Reset, replan, Teacher execution, missing
+  delayed labels, and frame-alignment failures break the chain.
+- Legacy logs remain valid: missing V3 saliency is counted explicitly and does
+  not remove an otherwise valid delayed-error pair.
+
+## Verification
+
+- Isolated A800 review root:
+  `/mnt/afs/intern/manlichen/ivan/zhoujunl/tmp/motion_v3_shadow_review`
+- `/usr/bin/python -m pytest -q tests/test_specverify.py tests/test_analyze_motion_score.py`
+  -> `15 passed`
+- Local `python3 -m py_compile` passed for implementation and tests.
+- `git diff --check` passed.
+
+Decision: allowed to proceed as shadow telemetry only. Online routing remains
+locked until whole-task holdout calibration and a matched Low10 x 20 run pass.
+
+## Model-Only Latency Profiling Review (2026-07-14)
+
+### Findings
+
+No blocking correctness finding remains after review.
+
+- The profiler is opt-in. With `profile_model_time` disabled, no CUDA event,
+  synchronization, response telemetry, or routing behavior is added.
+- Timings cover only model-side VAE encode, video/action DiT generation,
+  teacher action verification, and video/action cache-transformer forwards.
+  RPC, client, rendering, environment stepping, JSON, and queue time are not
+  included in `model_timing_ms`.
+- Speculative aggregation retains failed draft/replan cost, teacher cache
+  replay, repair holdout verification, initial draft priming, and teacher
+  generation. Role-prefixed keys prevent draft, verifier, and cache work from
+  being conflated.
+- The initial Teacher response reports 16 executed low-level actions rather
+  than the generated 32 because the RoboTwin client skips the conditioned
+  first frame. Later full chunks report 32. This closes the original action-Hz
+  overcount.
+- VAE camera inputs are transferred and encoded sequentially. The temporary
+  high-camera CUDA tensor is explicitly released before wrist-camera transfer,
+  preserving the default peak-memory behavior.
+
+### Residual Risk
+
+- CUDA-event timing and action Hz still require an exclusive-GPU real-model
+  smoke. Shared-GPU results are diagnostic only and cannot support a benchmark
+  claim.
+- The direct-only adapter is covered by the same response schema but not by a
+  dedicated unit test; the exclusive-GPU smoke must verify first-round 16 and
+  later-round 32 executed-action accounting.
+
+### Verification
+
+- Local `git diff --check`: passed.
+- Local `python3 -m py_compile`: passed for implementation and focused tests.
+- Isolated A800 review root:
+  `/mnt/afs/intern/manlichen/ivan/zhoujunl/tmp/model_profile_review`.
+- `/usr/bin/python -m pytest -q tests/test_realtime_flash_policy.py tests/test_run_realtime_flash_task.py tests/test_specverify.py tests/test_analyze_motion_score.py`
+  -> `54 passed in 1.35s`.
+
+Decision: allowed to proceed to an exclusive-GPU speed smoke. It is not yet
+approved as formal v1/a2, v2/a4, or speculative throughput evidence.
+
+## Motion Gate V3 Budget Evidence Review (2026-07-14)
+
+### Findings
+
+No code finding. This documentation change records a read-only replay of the
+completed hard-gate low10 x 20 logs: 305 gripper disagreements split into 224
+failures before action 16 and 81 at or after action 16.
+
+Risk is low because no runtime behavior, threshold, model call, or experiment
+command changes. The projected Teacher savings are explicitly fixed-denominator
+estimates and cannot be reported as an achieved online rate. The design keeps
+motion from overriding a continuous zero prefix and treats `tau=75` only as a
+conditional phase tie-break.
+
+### Verification
+
+- Inspected `git diff -- design.md`.
+- Replayed all ten `specverify_*.jsonl` files under
+  `20260713_130446_rtflash_gripfallback_low10_tn20`: 305 total, 224 early,
+  81 late. Every early row is a zero-prefix replan and every late row executes
+  a 16-action draft prefix.
+
+Decision: allowed to proceed to shadow design only. No online gripper policy
+is approved from this documentation evidence alone.
+
+## Conditional Gripper Tie-Break Shadow Review (2026-07-14)
+
+### Findings
+
+No blocking correctness finding remains after review.
+
+- The feature is opt-in and requires existing K=2 gripper consensus.  With the
+  flag disabled, the server does not return phase tensors and no extra Teacher
+  forward is issued.
+- The `tau=75` request reuses the exact primary action latent, frame id,
+  previous gripper state, and Gaussian noise.  Its only changed verifier input
+  is the flow timestep and `gripper_consensus=False`, which is required for a
+  single probe.
+- The 2-of-3 vote is performed per gripper channel and per action step over the
+  first 16 actions.  Counterfactual rescue additionally requires both the
+  primary and tie-break continuous prefixes to cover all 16 actions.
+- Shadow telemetry is merged into model-only profiling, but the live accepted
+  prefix, replan reason, Teacher scheduling, cache state, and RNG state are not
+  changed.
+
+### Residual Risk
+
+- This probe measures cross-timestep phase stability, not true contact or
+  task success.  It may be promoted only after complete task-held-out shadow
+  coverage and matched closed-loop validation.
+- Shadow runs include the extra conditional forward and cannot be used as the
+  final speculative speed number.  Formal speed must be measured with the
+  promoted policy or with the shadow cost reported separately.
+
+### Verification
+
+- Local `python3 -m py_compile` and `git diff --check`: passed.
+- Isolated A800 review root:
+  `/mnt/afs/intern/manlichen/ivan/zhoujunl/tmp/gripper_tiebreak_shadow_review`.
+- `/usr/bin/python -m pytest -q tests/test_realtime_flash_policy.py tests/test_run_realtime_flash_task.py tests/test_specverify.py tests/test_analyze_motion_score.py`
+  -> `58 passed in 1.43s`.
+
+Decision: allowed for shadow telemetry only.  Online tie-break execution is not
+approved.
+
+## Model-only profiler evidence review (2026-07-14)
+
+### Findings
+
+No runtime code changed in this review.  The exclusive-GPU smoke completed and
+showed `draft=36.79`, `Teacher=36.05`, and `speculative=13.36` model-only
+action Hz.  The speculative result contradicts any claim that reducing only
+full-Teacher action rounds is sufficient for draft-like speed: unconditional
+K=2 verification, duplicate VAE/cache work, and extra short-prefix rounds must
+also be addressed.
+
+The TN=1 trajectories executed different action counts, so their aggregate Hz
+is diagnostic rather than a final matched throughput claim.  Component timing
+and forward counts are authoritative for locating the bottleneck; final speed
+still requires a fixed-workload or completed matched benchmark.
+
+### Decision
+
+Motion Gate V3 may proceed to telemetry-only shadow collection.  Online routing
+is not approved until the incomplete MCSV-B1 benchmark is closed and the
+shadow gates in `design.md` pass.
+
+## Gripper phase response contract fix (2026-07-14)
+
+### Finding
+
+The first V3 shadow run crashed on its first conditional tie-break because the
+server returned latent-layout phase tensors with a trailing singleton:
+`[K,2,F,N,1]` and `[2,F,N,1]`. The policy correctly enforces the documented
+transport contract `[K,2,F,N]` and `[2,F,N]`.
+
+### Review
+
+The fix is at the shared server serialization boundary and removes only the
+latent-only final dimension. It does not relax policy validation, change the
+phase values, alter verification, mutate caches, or change any live routing
+decision. No sibling response field uses this phase payload.
+
+### Verification
+
+- Local `python3 -m py_compile`: passed.
+- Local `git diff --check`: passed.
+- Focused A800 pytest: `58 passed in 1.43s`.
+
+Decision: allowed to restart the V3 shadow under a new run root. Online routing
+remains unchanged and unapproved.
+
+## Uncensored Motion Gate V3 shadow launch review (2026-07-14)
+
+### Findings
+
+The current selective-motion configuration cannot calibrate V3: its score
+determines a 16/32 execution horizon, which then determines the delayed-error
+label. The existing leave-one-task-out analysis also lets the held-out score
+distribution influence trigger budget and computes AP in a tie-order-dependent
+way.
+
+### Launch decision
+
+The next run changes configuration only: motion thresholds and selective cap
+are disabled, while motion telemetry, K=2 action verification, and gripper
+consensus remain active. This removes score-dependent censoring without
+changing model weights or verifier semantics. Online V3 routing remains
+blocked until the analysis implementation is fixed and task-held-out gates
+pass.
+
+Decision: allowed to stop the failed B1 queues and launch uncensored shadow
+collection under new run roots. No completed experiment notification is sent
+for the partial B1 result.
+
+## Motion score held-out analysis fix (2026-07-14)
+
+### Findings
+
+No blocking issue remains. The analysis now freezes a 6.7% target budget
+independently of the legacy `global_mean >= 1.2` trigger count, derives each
+deployable threshold from training tasks only, allocates descriptive task
+budgets using task sizes rather than labels/scores, evaluates tied scores as a
+single threshold group, and includes the complete V3 saliency field.
+
+The task-balanced top-k table remains a ranking diagnostic, not a deployable
+held-out threshold. History innovation is deliberately excluded from the first
+comparison because episode-first rows lack it non-randomly.
+
+### Verification
+
+- Local `python3 -m py_compile`: passed.
+- Local direct tie/budget assertions: passed.
+- Local `git diff --check`: passed.
+- Isolated A800 focused pytest: `62 passed in 1.44s`.
+
+Decision: allowed to analyze the uncensored shadow logs after task completion.
+No online motion policy is approved by this tooling change.
+
+## Teacher compute accounting review (2026-07-14)
+
+### Findings
+
+No blocking issue remains. The summary preserves the historical full-round
+rate and adds source-resolved executed steps, Teacher action-step rate,
+Teacher verifier forwards per 100 executed actions, and profiled Teacher model
+milliseconds per 100 actions. Teacher compute includes generation, verification,
+cache update, and cache replay component names beginning with `teacher_`.
+
+Normal non-profiled runs correctly report zero Teacher model milliseconds;
+they are not used to make a model-speed claim. Existing active runs are not
+modified and can be re-summarized from their JSONL logs after completion.
+
+### Verification
+
+- Local compile, direct accounting assertions, and `git diff --check`: passed.
+- Isolated A800 focused pytest: `62 passed in 1.35s`.
+
+Decision: approved as reporting-only instrumentation. It does not authorize an
+online routing change.
+
+## Motion V4 late-gripper deferral review (2026-07-14)
+
+### Findings
+
+- Resolved P1: when gripper consensus is active, the server's consensus-bounded
+  `accepted_prefix` is authoritative even if `teacher_gripper_fallback` is
+  disabled. A returned `accepted_prefix_before_gripper=32` can no longer restore
+  a server-capped prefix of 16.
+- Resolved P1 defense-in-depth: a deferred late conflict is additionally capped
+  at the quantized boundary preceding its reported failure index.
+- Resolved P2: `late_gripper_deferral` now fails configuration validation unless
+  gripper consensus is enabled, avoiding a logged-but-inactive experiment.
+- Corrected the design metric label: `728/3366` is the historical Teacher-full
+  round rate, not the Teacher-executed action-step rate.
+
+No unresolved correctness finding remains in the diff. The change is opt-in and
+does not affect the active uncensored shadow runs.
+
+### Verification
+
+- Local `git diff --check`: passed.
+- Local Python compilation: passed.
+- Isolated A800 focused pytest: `65 passed in 1.45s`.
+- Regression coverage includes the three-flag case `gripper_consensus=true`,
+  `teacher_gripper_fallback=false`, and `late_gripper_deferral=true` with a
+  continuous prefix of 32 but a consensus prefix of 16.
+
+Decision: implementation is approved for a dedicated smoke after the
+uncensored shadow freezes the motion rule. It is not yet evidence that live
+deferral preserves Low10 success.
+
+## 2026-07-14: Adaptive-K offline audit
+
+Risk level: low for runtime behavior, medium for statistical interpretation.
+The change is offline-only and cannot alter actions, caches, model RNG, or
+Teacher scheduling.
+
+Findings fixed before approval:
+
+1. Proposal rounds within one episode are correlated. The safety report now
+   clusters misses by `(run, task, episode)` and uses an exact one-sided 95%
+   Clopper-Pearson upper bound.
+2. A training fold with no second-probe restriction previously implied no
+   observed boundary. It now abstains instead of selecting all held-out rows.
+3. Full gripper agreement with the draft does not imply no phase transition.
+   The strict tau50 fast-path audit now requires both draft and tau50
+   reconstruction switch indices to be absent.
+4. Missing motion and malformed/nonstandard K2 telemetry are explicit audit
+   counters. Duplicate run/task/episode/round identities fail closed.
+5. The K2 audit can run without delayed-error pairs, so rejected proposals do
+   not depend on the executed-draft survivor set.
+
+Checks run:
+
+```text
+python3 -m py_compile scripts/analyze_motion_score.py \
+  tests/test_analyze_motion_score.py
+git diff --check
+python3 -m pytest -q \
+  tests/test_realtime_flash_policy.py \
+  tests/test_run_realtime_flash_task.py \
+  tests/test_specverify.py \
+  tests/test_analyze_motion_score.py
+70 passed
+```
+
+Decision: allowed to proceed as offline/shadow analysis only. Adaptive K is not
+approved online until a frozen rule has enough independent episode coverage;
+with zero misses, an exact upper bound below 1% requires at least 299 episodes.

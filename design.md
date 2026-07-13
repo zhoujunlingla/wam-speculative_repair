@@ -15,6 +15,33 @@ The first experiment contains no repair, risk router, world verifier, or
 Verify++ signal. The verifier is useful only if matched four-task success is
 better than direct draft and close to direct teacher.
 
+## Repair Counterfactual Audit
+
+The promoted four-task configuration reached `24/40`, versus matched draft
+`21/40` and teacher `23/40`, with `17.67%` teacher action rounds. Repair is not
+allowed to execute yet: 18 of the 20 zero-prefix events occurred in failed
+episodes, and earlier endpoint-repair variants often passed a reused verifier
+probe without improving task success.
+
+The first repair experiment is therefore shadow-only. It runs only for a pure
+continuous zero-prefix rejection, never for video-motion, gripper, phase, or
+periodic-refresh fallbacks. It:
+
+1. moves only the first 16 steps of the 14 continuous action-latent channels
+   toward the mean teacher endpoint returned by the primary verifier;
+2. freezes both gripper channels and the remaining 16-step suffix;
+3. caps the per-step correction norm;
+4. reverifies with an independent Gaussian probe from a dedicated repair RNG;
+5. logs the original and holdout prefixes, correction norm, and eligibility;
+6. still executes the existing teacher fallback regardless of the shadow
+   result.
+
+This is a counterfactual audit, not a claimed rescue mechanism. Execution may
+be enabled only in a later change if the holdout prefix reaches at least 16,
+the candidate remains phase-safe, and accepted shadow candidates correlate
+with episode recovery. The dedicated RNG is required so enabling shadow mode
+does not alter the primary verifier noise stream or baseline actions.
+
 ## Runtime State Machine
 
 1. Reset both model caches and all speculative state.
@@ -239,6 +266,44 @@ precision-contact gripper rounds and ordinary gripper rounds before it may
 select `gripper_full_window=2`. It does not change action acceptance, budget,
 teacher use, or repair.
 
+### Motion-score evidence protocol
+
+Motion routing is promoted only after four separate gates. E0 audits every
+motion/delayed-error pair and includes a row only when the draft proposal was
+actually executed and its next acknowledged draft cache update carries the
+matching delayed prediction label. Replans, teacher actions, unmatched labels,
+and overwritten proposals are retained in the audit report with an exclusion
+reason. The frozen E0 table is the only input to E1.
+
+E1 compares `global_mean`, `median`, and a structured motion score with task as
+the outer holdout unit; rounds from the same task are never split randomly.
+Scores are compared at the same 6.7% trigger budget using AUPRC, precision, and
+recall. The structured score remains shadow-only unless its held-out precision
+and AUPRC improve over `global_mean`.
+
+The structured score uses the RoboTwin T-shaped latent layout rather than
+flattening all cameras. For each head, left-wrist, and right-wrist region it
+computes latent-energy-normalized adjacent-frame patch motion, its median,
+95th percentile, and normalized spatial entropy. The candidate risk is a
+monotone calibration of dense and spatially diffuse motion:
+
+`motion_v2 = max_region(median(normalized_patch_motion) * spatial_entropy)`.
+
+The maximum keeps a risky wrist or head camera from being averaged away.
+Localized motion remains diagnostic rather than automatically risky because
+prior telemetry shows that `top_relative` and `top_concentration` do not
+positively predict delayed error. This formula is shadow telemetry, not a
+routing threshold; its scale and calibration are decided only after E3.
+
+E2 is a matched low10 x 20 comparison between motion disabled and the frozen
+`global_mean >= 1.2` gate. Checkpoints, episode manifest, verifier, refresh,
+and gripper settings remain identical. Promotion requires a positive paired
+success 95% confidence lower bound, teacher action-source no greater than 15%,
+combined replan-plus-teacher latency no more than 10% above control, and no
+task losing at least 3/20 net successes. E3 initially logs the structured score
+without changing actions and can route only after passing E1 and a fresh
+matched online comparison.
+
 ## WAM Shadow Signal: Delayed Video Prediction Error
 
 Raw motion measures how much the imagined video changes, not whether that
@@ -361,6 +426,228 @@ Because TN=3 task outcomes have varied substantially across identical controls,
 the next decision uses four tasks x 10 trials with the motion-only policy. No
 additional router or verifier change is stacked into that run.
 
+### Motion-conditioned selective verification
+
+The completed low10 x 20 motion/gripper run reached `146/200 = 73.0%`, but
+teacher actions still accounted for `728/3366 = 21.63%`. The full-action
+reasons were initial anchor `200`, video motion `109`, gripper consensus `304`,
+zero prefix `90`, and periodic refresh `25`. Therefore threshold relaxation
+alone cannot reach the latency goal: the hard motion gate can save at most
+`109/3366 = 3.24` percentage points, while every accepted low-risk round still
+pays both action probes.
+
+The next policy changes the *use* of motion rather than inventing a new score.
+`global_mean` remains the only routing signal because it has completed online
+evidence; regional `motion_v2` remains shadow-only until it has a matched
+task-held-out calibration. Motion allocates verifier compute and executable
+horizon:
+
+```text
+normal: global_mean < 1.2
+        -> verify tau={50,100} with unchanged min-over-K acceptance
+high:   global_mean >= 1.2
+        -> verify tau={50,100}; if accepted, execute at most 16 actions;
+           if prefix is zero, replan the same observation with teacher
+```
+
+The high-motion branch no longer treats motion magnitude as proof that an
+action is wrong. It asks the existing teacher action verifier first, then uses
+one action/video frame as a receding-horizon safety cap. Initial teacher
+anchoring, zero-prefix fallback, gripper consensus semantics, teacher-cache
+replay, and PF=20 remain unchanged in the first matched run.
+
+The existing K=2 logs reject an immediate low-motion K=1 optimization. Among
+1306 rounds with `global_mean < 0.5`, no decoded draft gripper switch, and a
+full tau-50 prefix, 49 (`3.75%`) were rejected by tau-100 or cross-tau gripper
+consensus; `hanging_mug` reached `18/130 = 13.85%`. K=1 therefore remains out
+of the live policy. It may be reconsidered only with an additional calibrated
+risk signal that reduces the task-held-out miss rate below 1%.
+
+The feature is opt-in and requires exactly two tau probes. The high-motion cap
+is fixed to one `action_per_frame` unit rather than exposed as a tunable CLI
+value. With the feature disabled, `video_motion_gate_threshold` retains the
+previous hard-fallback behavior byte-for-byte. Telemetry must include the
+motion risk level, active tau list, raw verified prefix, gripper-adjusted
+pre-cap prefix, and whether the high-motion cap changed the executed prefix.
+Promotion requires low10 x 20
+success no worse than `73.0%` by more than sampling uncertainty, fewer teacher
+actions than `21.63%`, and lower model-forward latency than the hard-gate run.
+Repair remains disabled until this gate passes.
+
+### Motion/verifier-margin shadow audit
+
+The next motion iteration is not allowed to route on `motion_v2` directly.
+While the selective-verification benchmark runs, telemetry and the offline
+pairing audit retain the existing verifier threshold, per-tau prefixes, and
+distance tensor. For a fully verified 32-action proposal the audit derives:
+
+```text
+tail_max = max verify distance over actions 16:32 and every tau
+tail_margin = 1 - tail_max / delta
+strong_tail = tail_max <= 0.05
+```
+
+These fields are diagnostic only. They test whether a high global-motion
+proposal can safely avoid the 16-action cap when both a held-out calibrated
+regional motion score is low and the full K=2 verifier has a strong tail
+margin. The audit must preserve task identity and use whole-task holdouts; it
+must not randomly split rounds. Because the current high-motion policy only
+executes the first 16 actions, its delayed video error cannot certify the
+unexecuted tail. Any cap-release rule therefore still requires a matched
+closed-loop low10 x 20 evaluation after offline calibration.
+
+The telemetry change must not alter routing, RNG, model calls, cache state, or
+the accepted prefix. Missing or malformed distance tensors remain visible in
+the audit rather than being silently treated as strong evidence.
+
+### Motion Gate V3 shadow features
+
+The first V3 change remains telemetry-only. It does not replace
+`global_mean`, release the 16-action motion cap, alter verifier probes, or
+route a Teacher action. The draft server augments each existing RoboTwin
+region with a saliency-weighted motion statistic computed from the same future
+video latent:
+
+```text
+patch_motion = RMS_channel(z[f+1] - z[f]) / RMS(z_region)
+patch_saliency = normalized channel variance of z at the patch
+region_salient_motion = weighted_mean(patch_motion, 1 + patch_saliency)
+```
+
+This follows the content-aware allocation principle of video diffusion cache
+methods while keeping the statistic explicitly a proxy rather than an object
+or contact label. No image is decoded and no model forward is added.
+
+History innovation is derived offline from consecutive *executed* draft rows
+whose cache acknowledgements are present. Rejected proposals, replans, and
+Teacher actions break the history chain. This avoids adding speculative state
+to the live policy before task-held-out calibration demonstrates value.
+
+The offline comparison keeps task as the outer holdout and compares, at a
+matched trigger budget:
+
+- deployed `global_mean`;
+- existing energy-normalized regional `motion_v2`;
+- saliency-weighted regional motion;
+- regional motion plus executed-history innovation;
+- the above combined with verifier tail sensitivity/margin.
+
+These scores remain shadow-only until a whole-task holdout improves precision
+and AUPRC over `global_mean`, followed by a matched closed-loop low10 x 20 run.
+Motion never overrides a continuous zero prefix or a discrete gripper-phase
+disagreement.
+
+### Motion Gate V3 teacher-budget feasibility
+
+The completed hard-gate low10 x 20 logs contain 305 cross-tau gripper
+disagreements.  Of these, 224 occur before action 16 and quantize to a zero
+prefix, while 81 occur at or after action 16 and already execute a verified
+16-action prefix.  The current policy nevertheless schedules a Teacher round
+after every disagreement.  Avoiding only these 81 delayed Teacher rounds would
+save roughly `81 / 3366 = 2.41` percentage points of Teacher action source.
+Together with the maximum `3.24` points attributable to the hard motion gate,
+the projected rate is still about `15.98%`; motion and late-prefix deferral
+alone therefore cannot meet the `<15%` target.
+
+V3 consequently has two separate responsibilities:
+
+1. world-motion features choose whether an already verified chunk executes 16
+   or 32 actions; they never turn a failed action verification into a pass;
+2. only a `tau=50/100` gripper disagreement may request a conditional
+   `tau=75` tie-break.  A rescued proposal executes at most 16 actions, and a
+   continuous zero prefix remains a Teacher fallback.
+
+The first online-safe gripper change is to stop scheduling a Teacher round
+after a disagreement at or beyond action 16; the policy executes the verified
+16 actions and replans from the new observation.  Early disagreements remain
+unchanged until shadow telemetry shows that a three-probe phase majority can
+rescue at least 35 of the historical 224 early conflicts without task-level
+regression.  This is the minimum extra coverage needed to cross the fixed-
+denominator 15% budget after motion and late-prefix savings.  The engineering
+target is 45% rescue of all gripper disagreements to leave margin for denominator
+and closed-loop changes.
+
+The conditional probe uses the same Gaussian noise as `tau=50/100`; it is a
+flow-timestep tie-break, not an independent correctness certificate.  It
+compares the discrete gripper phase at every one of the first 16 actions and
+requires a two-of-three phase majority matching the draft.  It must not average
+continuous gripper values or accept merely because switch indices are close.
+Independent noise is reserved for the later repair holdout verifier.
+
+The first implementation is shadow-only.  With
+`--gripper-tiebreak-shadow`, the primary verifier explicitly requests the
+per-step gripper phase for `tau=50/100`; only a disagreement triggers one
+read-only `tau=75` verification with the same action noise.  Logs record the
+first majority mismatch, both continuous prefixes, the counterfactual rescue
+decision, and the extra model-forward timing.  The live prefix, replan, cache,
+and Teacher scheduling paths remain byte-for-byte unchanged.  The phase tensor
+is omitted from normal verifier responses when the flag is disabled.
+
+### Gripper phase response contract
+
+The verifier computes gripper phases from action latents with internal shape
+`[K, 2, F, N, 1]`. The trailing singleton is a latent-layout detail and must
+not cross the server boundary. When `return_gripper_phase` is enabled, the
+response contract is:
+
+- `gripper_phase_by_tau`: `[K, 2, F, N]`;
+- `draft_gripper_phase`: `[2, F, N]`.
+
+The policy keeps strict shape validation so a future server regression fails
+immediately. The server owns the one-time conversion at serialization; the
+policy does not silently accept both layouts.
+
+### Uncensored Motion Gate V3 shadow
+
+The selective-motion experiment is not a valid calibration source for a new
+motion score: the current score changes a verified 32-action prefix to 16,
+then the delayed latent error observes only that shorter execution. This mixes
+the feature being evaluated with its own intervention.
+
+The calibration run therefore keeps motion telemetry fully shadow-only:
+
+- draft inference still returns global, regional V2, and saliency V3 motion;
+- no motion threshold triggers a Teacher action or caps an accepted prefix;
+- the existing K=2 action verifier and gripper consensus remain unchanged;
+- delayed error is paired only after an actually executed draft and matching
+  cache acknowledgement;
+- results are stratified by executed prefix 16/32.
+
+Model selection uses leave-one-task-out folds. Trigger budget is frozen from
+training tasks only; held-out task scores cannot set their own threshold or
+top-k budget. A deployable V3 score must beat `global_mean` in macro task AP
+and precision at the frozen budget before it can affect online routing.
+
+### Model-only latency profiling
+
+Closed-loop wall time is not the speed metric for the motion-gate comparison:
+it includes websocket transport, RoboTwin stepping, rendering, and client
+bookkeeping.  An opt-in profiling path records only GPU model work performed
+by each server request:
+
+- observation VAE encoding;
+- draft/Teacher video DiT generation;
+- draft/Teacher action DiT generation;
+- Teacher action-only verification;
+- video/action transformer forwards used to update KV cache.
+
+Profiling is disabled by default.  When enabled, CUDA events synchronize each
+named block so the reported duration is attributable to completed GPU work.
+The synchronization overhead makes this a dedicated profiling mode rather
+than the latency used by normal closed-loop evaluation.  Server responses
+return a flat `model_timing_ms` mapping, and the speculative policy logs the
+draft, verifier, Teacher-full, and cache-update mappings without folding RPC
+time into them.  Summaries report total model milliseconds, low-level executed
+actions per model second, and the component breakdown.  The existing
+`elapsed_sec` field remains a wall-time diagnostic and is not relabeled.
+
+Teacher use is reported with three separate denominators: Teacher full rounds
+over action-producing rounds, Teacher-executed steps over all executed steps,
+and Teacher verifier forwards per 100 executed steps. When model profiling is
+enabled, summaries additionally report Teacher model milliseconds per 100
+executed steps. A lower full-round rate is not treated as a speed improvement
+unless verifier forwards and model milliseconds also decrease.
+
 ## Cross-Tau Gripper Consensus
 
 The original migration applies two independent phase fallbacks: the server
@@ -393,6 +680,82 @@ support exact offline replay of candidate thresholds and identify whether the
 first or second tau is responsible for each rejected prefix.
 
 ## Verification Plan
+
+### Motion-conditioned compute router V4
+
+The hard-motion low10 x 20 run is the quality reference: `146/200 = 73.0%`
+success with `728/3366 = 21.63%` Teacher full rounds per action-producing
+round. Motion must no longer be interpreted as evidence that a draft action is
+wrong. It is a world-transition complexity signal that may allocate verifier compute, while
+continuous endpoint and discrete phase agreement remain the acceptance
+certificate.
+
+V4 removes two interventions from the live routing path:
+
+- high motion does not directly request a Teacher action;
+- high motion does not shorten a K=2-verified 32-action prefix to 16.
+
+The first opt-in live change is late-gripper deferral. If cross-tau gripper
+consensus first fails at or after action 16 and the continuous verifier already
+admits at least 16 actions, execute the verified 16-action prefix and reobserve
+without scheduling a Teacher phase window. Continuous zero prefixes, failures
+inside the first 16 actions, invalid cache state, initial Teacher anchoring, and
+periodic refresh remain fail-closed. The existing logs contain 81 such late
+conflicts, corresponding to a fixed-denominator saving of about 2.41 Teacher
+percentage points.
+
+After the uncensored shadow freezes a task-held-out motion rule, a separate
+adaptive-K flag may use motion only as a veto on a strict one-probe fast path:
+
+```text
+green = motion is below the held-out threshold
+        and tau-50 verifies the full prefix
+        and tau-50 max continuous residual < 0.05
+        and neither draft nor reconstruction changes gripper phase
+
+green -> accept K=1, except deterministic K=2 audit rounds
+other -> run tau=100 with the same Gaussian noise and use min-over-K
+```
+
+The audit interval is deterministic so enabling telemetry does not perturb the
+verifier noise stream. Audit decisions use K=2 live output and log whether the
+second probe changed prefix or phase. Adaptive K reduces Teacher verification
+NFE; it is reported separately from Teacher action-source. It must remain
+disabled until whole-task replay bounds the false-safe rate below 1%.
+
+The adaptive-K calibration target is not delayed video NRMSE. A separate
+offline audit includes every proposal that actually ran two verifier probes,
+including zero-prefix replans, and labels whether the second probe made the
+decision more restrictive:
+
+```text
+second_probe_restricts =
+    quantize(prefix_tau100) < quantize(prefix_tau50)
+    or (tau50 gripper agreement is complete and tau100 agreement is not)
+```
+
+This avoids survivor bias from the delayed-error pairing, which necessarily
+contains only executed draft actions with a later cache acknowledgement. The
+motion score is evaluated as a predictor of whether K=2 is needed, not as a
+direct predictor of task success. Missing or malformed per-tau telemetry is
+reported and excluded rather than guessed.
+
+The safety bound is clustered by `(run, task, episode)`: an episode is a miss
+if any proposed K=1 fast path in that episode would have been restricted by the
+second probe. The report uses an exact one-sided 95% Clopper-Pearson upper
+bound, not a proposal-level normal approximation. With zero misses, proving an
+upper bound below 1% requires at least 299 independently evaluated episodes;
+low10 x 20 alone therefore cannot authorize the final K=1 policy. The deployed
+`global_mean` is the pre-registered primary motion score. Region-aware scores
+remain exploratory until a separate task set validates a frozen choice, which
+prevents selecting and certifying a score on the same folds. A training fold
+with no observed second-probe restriction abstains instead of treating its
+entire score range as safe.
+
+The conditional tau-75 early-phase tie-break remains shadow-only. It may be
+promoted only after it safely rescues at least 35 of the historical 224 early
+conflicts, the estimated minimum needed to move Teacher action-source below
+15% after motion hard-fallback removal and late-gripper deferral.
 
 - Unit-test shared-noise K verification and min-over-K prefix acceptance.
 - Unit-test continuous-channel RMS and gripper exclusion.

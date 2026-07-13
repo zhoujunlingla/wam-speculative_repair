@@ -97,6 +97,17 @@ def read_metric(run_root: Path, task: str) -> dict:
 def source_summary(path: Path) -> dict:
     counts: dict[str, int] = {}
     latencies: dict[str, list[float]] = {}
+    model_components_ms: dict[str, float] = {}
+    model_forward_counts: dict[str, int] = {}
+    action_steps_by_source: dict[str, int] = {}
+    executed_action_steps = 0
+    verify_k_counts: dict[str, int] = {}
+    motion = {
+        "high_proposals": 0,
+        "high_accepts": 0,
+        "high_rejects": 0,
+        "high_prefix_caps": 0,
+    }
     if path.exists():
         for line in path.read_text(errors="replace").splitlines():
             try:
@@ -107,6 +118,32 @@ def source_summary(path: Path) -> dict:
             counts[source] = counts.get(source, 0) + 1
             if row.get("elapsed_sec") is not None:
                 latencies.setdefault(source, []).append(float(row["elapsed_sec"]))
+            for name, value in row.get("model_timing_ms", {}).items():
+                model_components_ms[name] = (
+                    model_components_ms.get(name, 0.0) + float(value)
+                )
+            for name, value in row.get("model_forward_counts", {}).items():
+                model_forward_counts[name] = (
+                    model_forward_counts.get(name, 0) + int(value)
+                )
+            action_steps = int(row.get("executed_action_steps", 0))
+            executed_action_steps += action_steps
+            if action_steps:
+                action_steps_by_source[source] = (
+                    action_steps_by_source.get(source, 0) + action_steps
+                )
+            active_tau = row.get("active_tau_timesteps")
+            if active_tau:
+                key = str(len(active_tau))
+                verify_k_counts[key] = verify_k_counts.get(key, 0) + 1
+            if row.get("high_video_motion") is True:
+                motion["high_proposals"] += 1
+                if source == "draft_flash":
+                    motion["high_accepts"] += 1
+                elif source == "replan":
+                    motion["high_rejects"] += 1
+                if row.get("motion_prefix_cap_applied") is True:
+                    motion["high_prefix_caps"] += 1
     stats = {}
     for source, values in latencies.items():
         values.sort()
@@ -116,10 +153,59 @@ def source_summary(path: Path) -> dict:
             "p90_sec": values[round((len(values) - 1) * 0.9)],
         }
     action_total = counts.get("teacher_full", 0) + counts.get("draft_flash", 0)
+    motion["high_accept_rate"] = (
+        motion["high_accepts"] / motion["high_proposals"]
+        if motion["high_proposals"] else None
+    )
+    model_only_total_ms = sum(model_components_ms.values())
+    teacher_action_steps = sum(
+        action_steps_by_source.get(source, 0)
+        for source in ("teacher_full", "teacher_generation")
+    )
+    draft_action_steps = sum(
+        action_steps_by_source.get(source, 0)
+        for source in ("draft_flash", "draft_generation")
+    )
+    action_source_steps = teacher_action_steps + draft_action_steps
+    teacher_verify_forward_count = sum(
+        count
+        for name, count in model_forward_counts.items()
+        if "teacher_action_verify" in name
+    )
+    teacher_model_ms = sum(
+        value
+        for name, value in model_components_ms.items()
+        if name.startswith("teacher_")
+    )
     return {
         "counts": counts,
         "latency": stats,
         "teacher_action_rate": counts.get("teacher_full", 0) / action_total if action_total else None,
+        "action_steps_by_source": action_steps_by_source,
+        "teacher_action_step_rate": (
+            teacher_action_steps / action_source_steps
+            if action_source_steps else None
+        ),
+        "teacher_verify_forwards_per_100_actions": (
+            100.0 * teacher_verify_forward_count / executed_action_steps
+            if executed_action_steps else None
+        ),
+        "teacher_model_ms_per_100_actions": (
+            100.0 * teacher_model_ms / executed_action_steps
+            if executed_action_steps else None
+        ),
+        "verify_k_counts": verify_k_counts,
+        "motion_selective": motion,
+        "model_only": {
+            "total_ms": model_only_total_ms,
+            "executed_action_steps": executed_action_steps,
+            "action_hz": (
+                1000.0 * executed_action_steps / model_only_total_ms
+                if model_only_total_ms > 0 else None
+            ),
+            "components_ms": model_components_ms,
+            "forward_counts": model_forward_counts,
+        },
     }
 
 
@@ -145,8 +231,16 @@ def main() -> None:
     parser.add_argument("--delayed-error-consecutive", type=int, default=2)
     parser.add_argument("--delayed-error-teacher-rounds", type=int, default=2)
     parser.add_argument("--video-motion-gate-threshold", type=float, default=0.0)
+    parser.add_argument("--motion-selective-verify", action="store_true")
     parser.add_argument("--gripper-full-window", type=int, default=1)
     parser.add_argument("--gripper-consensus", action="store_true")
+    parser.add_argument("--late-gripper-deferral", action="store_true")
+    parser.add_argument("--gripper-tiebreak-shadow", action="store_true")
+    parser.add_argument("--repair-shadow", action="store_true")
+    parser.add_argument("--repair-strength", type=float, default=0.5)
+    parser.add_argument("--repair-max-step-rms", type=float, default=0.15)
+    parser.add_argument("--repair-prefix-len", type=int, default=16)
+    parser.add_argument("--profile-model-only", action="store_true")
     parser.add_argument(
         "--teacher-gripper-fallback",
         action=argparse.BooleanOptionalAction,
@@ -185,6 +279,21 @@ def main() -> None:
     ]
     if args.gripper_consensus:
         server_cmd.append("--gripper-consensus")
+    if args.late_gripper_deferral:
+        server_cmd.append("--late-gripper-deferral")
+    if args.gripper_tiebreak_shadow:
+        server_cmd.append("--gripper-tiebreak-shadow")
+    if args.motion_selective_verify:
+        server_cmd.append("--motion-selective-verify")
+    if args.repair_shadow:
+        server_cmd.append("--repair-shadow")
+    if args.profile_model_only:
+        server_cmd.append("--profile-model-only")
+    server_cmd.extend([
+        "--repair-strength", str(args.repair_strength),
+        "--repair-max-step-rms", str(args.repair_max_step_rms),
+        "--repair-prefix-len", str(args.repair_prefix_len),
+    ])
     if not args.teacher_gripper_fallback:
         server_cmd.append("--no-teacher-gripper-fallback")
     client_cmd = [
@@ -262,8 +371,15 @@ def main() -> None:
         "delayed_error_consecutive": args.delayed_error_consecutive,
         "delayed_error_teacher_rounds": args.delayed_error_teacher_rounds,
         "video_motion_gate_threshold": args.video_motion_gate_threshold,
+        "motion_selective_verify": args.motion_selective_verify,
         "gripper_full_window": args.gripper_full_window,
         "gripper_consensus": args.gripper_consensus,
+        "late_gripper_deferral": args.late_gripper_deferral,
+        "gripper_tiebreak_shadow": args.gripper_tiebreak_shadow,
+        "repair_shadow": args.repair_shadow,
+        "repair_strength": args.repair_strength,
+        "repair_max_step_rms": args.repair_max_step_rms,
+        "repair_prefix_len": args.repair_prefix_len,
         "teacher_gripper_fallback": args.teacher_gripper_fallback,
         "started_at": started,
         "ended_at": datetime.now().isoformat(timespec="seconds"),

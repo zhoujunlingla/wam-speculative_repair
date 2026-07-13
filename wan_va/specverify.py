@@ -18,7 +18,8 @@ GRIPPER_CHANNELS = (28, 29)
 def latent_frame_motion_stats(
     latents: torch.Tensor,
     top_fraction: float = 0.1,
-) -> dict[str, float]:
+    layout: str | None = None,
+) -> dict:
     """Summarize adjacent-frame motion already present in a video latent."""
 
     if latents.ndim != 5 or latents.shape[2] < 2:
@@ -34,13 +35,69 @@ def latent_frame_motion_stats(
     top = torch.topk(flat, top_count).values
     eps = torch.finfo(flat.dtype).eps
     median = torch.quantile(flat, 0.5)
-    return {
+    stats = {
         "global_mean": float(flat.mean().item()),
         "median": float(median.item()),
         "top_mean": float(top.mean().item()),
         "top_relative": float((top.mean() / median.clamp_min(eps)).item()),
         "top_concentration": float((top.sum() / flat.sum().clamp_min(eps)).item()),
     }
+    if layout is None:
+        return stats
+    if layout != "robotwin_tshape":
+        raise ValueError(f"unsupported video latent layout: {layout}")
+
+    height, width = motion.shape[-2:]
+    if height < 3 or width < 2:
+        raise ValueError("robotwin T-shaped latent is too small to split")
+    wrist_height = height // 3
+    wrist_width = width // 2
+    regions = {
+        "left_wrist": (slice(0, wrist_height), slice(0, wrist_width)),
+        "right_wrist": (slice(0, wrist_height), slice(wrist_width, width)),
+        "head": (slice(wrist_height, height), slice(0, width)),
+    }
+    region_stats = {}
+    for name, (height_slice, width_slice) in regions.items():
+        region_motion = motion[..., height_slice, width_slice].flatten()
+        region_latent = latents[..., height_slice, width_slice].float()
+        latent_rms = region_latent.square().mean().sqrt().clamp_min(eps)
+        normalized = region_motion / latent_rms
+        channel_variance = region_latent.var(dim=1, unbiased=False)
+        adjacent_saliency = 0.5 * (
+            channel_variance[:, 1:] + channel_variance[:, :-1]
+        )
+        saliency_min = adjacent_saliency.amin()
+        saliency_range = adjacent_saliency.amax() - saliency_min
+        saliency = (adjacent_saliency - saliency_min) / saliency_range.clamp_min(eps)
+        saliency_weights = 1.0 + saliency.flatten()
+        weights = normalized / normalized.sum().clamp_min(eps)
+        entropy = -(weights * weights.clamp_min(eps).log()).sum()
+        if normalized.numel() > 1:
+            entropy = entropy / math.log(normalized.numel())
+        else:
+            entropy = entropy * 0.0
+        dense = torch.quantile(normalized, 0.5)
+        p95 = torch.quantile(normalized, 0.95)
+        region_stats[name] = {
+            "latent_rms": float(latent_rms.item()),
+            "dense_median": float(dense.item()),
+            "p95": float(p95.item()),
+            "spatial_entropy": float(entropy.item()),
+            "dense_diffuse": float((dense * entropy).item()),
+            "saliency_weighted": float(
+                ((normalized * saliency_weights).sum() / saliency_weights.sum()).item()
+            ),
+        }
+
+    stats["motion_v2_regions"] = region_stats
+    stats["motion_v2_score"] = max(
+        region["dense_diffuse"] for region in region_stats.values()
+    )
+    stats["motion_v3_saliency_score"] = max(
+        region["saliency_weighted"] for region in region_stats.values()
+    )
+    return stats
 
 
 def latent_prediction_error_stats(

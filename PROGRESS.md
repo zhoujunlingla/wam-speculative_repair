@@ -170,3 +170,188 @@ teacher quality with materially lower teacher use.
 - The feature remains default-off for future analysis, but it is not promoted.
   Four-task TN=10 now evaluates the motion-only policy before any further
   routing or adaptive-K change.
+
+### Motion-score E0/E1 audit
+
+- The frozen pairing rule now includes only a `draft_flash` action with a
+  positive executed prefix whose same-round `flash_cache_update` contains a
+  delayed-error label and exactly `ceil(prefix / 16)` acknowledged frames.
+  Replans and unexecuted proposals are excluded.
+- Replaying the two source runs produces 276 valid pairs, not 268: 276 executed
+  proposals all have aligned acknowledgements, 20 unexecuted/replan proposals
+  are excluded, and no executed proposal is missing its cache update. The old
+  268 count is not reproducible and is retired as a bookkeeping error.
+- With `latent_nrmse > 0.55` as the frozen label, there are 55 positives. At
+  the existing 18/276 (6.52%) trigger budget, `global_mean` reaches AUPRC
+  0.632, precision 15/18 = 83.3%, recall 27.3%; `median` reaches AUPRC 0.656,
+  precision 14/18 = 77.8%, recall 25.5%.
+- Task-balanced selection reduces both scores to 10/18 = 55.6% precision, and
+  leave-one-task-out thresholds produce different trigger rates across tasks.
+  The apparent aggregate separation is therefore task-confounded. The current
+  `global_mean >= 1.2` remains the causal E2 baseline, but the offline audit
+  alone does not prove that motion routing improves success.
+- Equal-weight macro task AUPRC is 0.495 for `global_mean` and 0.509 for
+  `median`. This small ranking gain does not offset median's lower matched-rate
+  precision and is not enough to replace the deployed baseline.
+- `motion-v2` is now shadow-only telemetry. It splits the RoboTwin T-shaped
+  latent into head/left-wrist/right-wrist regions and scores the largest
+  region-wise product of normalized median patch motion and spatial entropy.
+  It cannot affect routing until complete low10 telemetry beats global mean at
+  the same trigger budget.
+
+### Motion/verifier-margin audit instrumentation
+
+- The running MCSV-B1 benchmark is unchanged. Offline audit support now retains
+  the logged verifier threshold, per-tau prefix, distance tensor, pre-cap
+  prefix, and gripper-consensus status for each action-aligned delayed-error
+  pair. It derives the maximum K=2 residual over actions 16:32 and its margin
+  from `delta`; malformed or missing telemetry remains an explicit audit count.
+- Legacy logs require an explicit `--verify-threshold` argument. The analysis
+  never guesses a threshold that was not recorded in the log.
+- A partial audit over 426 aligned B1 pairs found eight high-global-motion
+  proposals whose continuous/gripper prefix was 32 before the motion cap. None
+  had `tail_max <= 0.05`; their tail residuals ranged from 0.0847 to 0.1190.
+  This is incomplete, task-imbalanced evidence, but it already shows that a
+  margin-only cap release at 0.05 has zero expected coverage. Region-aware
+  telemetry is still required before any cap-release policy is considered.
+- The local policy change only logs `verify_threshold`; it does not change
+  routing, model calls, RNG, cache state, or the accepted prefix. The active
+  remote B1 process was not modified or restarted.
+
+### Motion Gate V3 shadow telemetry
+
+- Added a saliency-weighted regional motion statistic using channel variance
+  from the draft future video latent. It adds no VAE, DiT, decode, or network
+  transfer and remains absent from online routing.
+- Offline audit derives history innovation only across consecutive executed
+  draft proposals with aligned cache acknowledgements. Teacher actions,
+  replans, resets, malformed labels, and frame mismatches break the chain.
+- The active MCSV-B1 run remains unchanged. This telemetry is intended for the
+  next shadow collection after B1 completes; it cannot retroactively appear in
+  the current logs.
+- Isolated A800 verification passed `15/15` focused tests. Local Python
+  compilation and `git diff --check` also passed.
+
+Verification: isolated A800 review copy passed `40/40` focused tests; local
+Python compilation and `git diff --check` passed. Formal routing conclusions
+remain locked until B1 low10 x 20 completes.
+
+### Model-only profiling for gate and repair comparisons
+
+The existing policy `elapsed_sec` is retained as wall-time telemetry but is no
+longer treated as model-only speed. An opt-in profiler now measures completed
+CUDA work for VAE encoding, video/action generation DiT forwards, Teacher
+action-only verification, and video/action KV-cache transformer forwards.
+Speculative logs preserve failed draft/verify cost, Teacher cache replay, and
+executed low-level action counts so summaries can report actions per model
+second without RPC, rendering, or RoboTwin stepping.
+
+The profiler is disabled by default and therefore does not alter the active
+MCSV-B1 run. Validation in the isolated remote review copy
+`/mnt/afs/intern/manlichen/ivan/zhoujunl/tmp/model_profile_review` passed:
+
+```text
+/usr/bin/python -m pytest -q \
+  tests/test_realtime_flash_policy.py \
+  tests/test_run_realtime_flash_task.py \
+  tests/test_specverify.py \
+  tests/test_analyze_motion_score.py
+54 passed
+```
+
+An exclusive-GPU speed-only smoke is still required before using the metric in
+a benchmark claim.
+
+### Exclusive model-only profiler and selective-motion diagnostic (2026-07-14)
+
+- The exclusive GPU4 `turn_switch` TN=1 profiler completed for all three
+  modes.  Model-only throughput, including VAE, video/action DiT, verification,
+  and KV-cache transformer work, was `36.79 action Hz` for draft v1/a2,
+  `36.05 action Hz` for Teacher v2/a4, and `13.36 action Hz` for the current
+  speculative policy.  These are smoke measurements, not success estimates.
+- The speculative path spent `5987.9 ms` for 80 executed actions.  Duplicate
+  draft/Teacher VAE and cache work plus six Teacher action-verifier forwards
+  dominated the gap.  Lowering only the Teacher action-source rate cannot make
+  this implementation approach draft speed while every draft round still pays
+  K=2 verification and short prefixes increase the number of rounds.
+- The running MCSV-B1 selective-motion benchmark is not complete and remains
+  excluded from final claims.  Its completed tasks are `turn_switch 12/20`
+  versus hard-gate `14/20`, and `open_microwave 11/20` versus `9/20`.
+  The valid recovery shard for `hanging_mug` is currently `2/17`, versus the
+  hard-gate result `8/20`.
+- In the current hanging shard, 31 high-motion proposals were shortened from
+  a verified 32-action prefix to 16 actions.  The shorter closed-loop horizon
+  was followed by more gripper-consensus and zero-prefix events.  Therefore
+  `high motion -> always cap 16` is not approved for promotion even if it lowers
+  Teacher action-source.
+- GPT-5.5 technical review approved only the next shadow collection.  It did
+  not approve online early-gripper rescue, K=1, or unconditional 32-action cap
+  release.  Same-noise tau=75 is treated only as a cross-timestep phase
+  stability probe, and fixed-denominator Teacher savings remain estimates.
+
+Next: collect Motion Gate V3 regional/saliency/history telemetry and tau=75
+gripper tie-break telemetry without changing routing, RNG, caches, or Teacher
+scheduling.  Online routing requires whole-task held-out improvement and an
+estimated early-conflict rescue lower bound of at least `35/224`.
+
+### Invalid V3 shadow launch: phase payload shape (2026-07-14)
+
+The first V3 shadow launch produced no valid completed trial. Its first
+conditional gripper probe failed because `VA_Server.verify_action_chunk`
+serialized internal `[K,2,F,N,1]` phase tensors unchanged, while the policy
+contract is `[K,2,F,N]`. The run is invalid benchmark evidence. The root fix
+removes the latent-only singleton at the server response boundary; the policy
+keeps strict validation so the same interface regression cannot pass silently.
+
+### Selective-motion B1 stopped (2026-07-14)
+
+The valid B1 `hanging_mug` shard completed `2/20`, versus `8/20` for the
+hard-motion baseline. Completed B1 tasks were `turn_switch 12/20` and
+`open_microwave 11/20`; they do not offset the contact-task regression. The
+32-to-16 high-motion cap also changes the horizon used by delayed-error labels,
+so B1 is unsuitable for fitting Motion Gate V3. The remaining B1 queue is
+stopped and retained as negative evidence. The next collection leaves motion
+fully shadow-only and preserves the action verifier's prefix.
+
+### Motion V4 late-gripper deferral code gate (2026-07-14)
+
+- Added an opt-in policy that executes only the consensus-safe prefix when a
+  gripper disagreement begins at or after action 16, then reobserves without
+  scheduling a Teacher phase window.
+- Code review caught and fixed a consensus bypass where disabling the legacy
+  Teacher gripper fallback could restore `accepted_prefix_before_gripper=32`
+  after the server had capped the prefix at 16.
+- The feature now requires gripper consensus at configuration time and also
+  caps the executed prefix at the quantized failure boundary.
+- Corrected `728/3366 = 21.63%` to Teacher-full rounds per action-producing
+  round; action-step rate remains a separate summary metric.
+
+Verification: local diff/compile passed; isolated A800 focused tests passed
+`65/65`. No active shadow process was changed. Live evaluation remains gated on
+the complete uncensored Motion V3 analysis.
+
+### Adaptive-K second-probe audit (2026-07-14)
+
+- Added a separate audit over every standard `tau={50,100}` K=2 proposal,
+  including zero-prefix replans. The label is whether tau100 quantizes to a
+  shorter prefix or introduces a gripper disagreement absent at tau50; delayed
+  video NRMSE and episode success are not used as labels.
+- Code review fixed three optimistic failure modes before using the result:
+  proposal-level independence, folds with no risky training examples, and
+  treating gripper agreement as equivalent to no phase transition. Safety is
+  now clustered by episode with an exact one-sided Clopper-Pearson bound, empty
+  evidence abstains, and the K=1 candidate requires no draft/tau50 phase switch.
+- A partial read-only audit over the completed/active uncensored shards found
+  `1082` K=2 proposals. Only `185` passed the strict tau50 certificate, and
+  tau100 restricted one of those. The frozen `global_mean` leave-one-task-out
+  rule selected `105/185 = 56.8%` with zero observed proposal misses, but those
+  covered only 34 episodes; the exact episode-level upper bound is still
+  `8.43%`. This is useful compute-saving signal but is not enough evidence to
+  enable adaptive K.
+- Region-aware scores did not improve this partial adaptive-K target:
+  `motion_v2` covered `48.1%` and `motion_v3` `42.2%`, both with weaker average
+  precision than `global_mean`. They remain exploratory shadow telemetry.
+
+Verification: isolated A800 review copy passed `70/70` focused tests; local
+Python compilation and `git diff --check` passed. No online routing or active
+experiment was changed.

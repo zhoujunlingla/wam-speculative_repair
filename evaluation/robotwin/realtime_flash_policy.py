@@ -135,6 +135,84 @@ def _as_bcfh(action: np.ndarray) -> np.ndarray:
     return action
 
 
+def bounded_endpoint_repair(
+    draft_latent: np.ndarray,
+    teacher_endpoint_latent: np.ndarray,
+    *,
+    prefix_len: int = 16,
+    strength: float = 0.5,
+    max_step_rms: float = 0.15,
+    continuous_channels: Iterable[int] = range(14),
+) -> tuple[np.ndarray, float]:
+    """Move a continuous prefix toward a teacher endpoint with an RMS cap."""
+
+    draft = np.asarray(draft_latent, dtype=np.float32)
+    endpoint = np.asarray(teacher_endpoint_latent, dtype=np.float32)
+    if draft.shape != endpoint.shape or draft.ndim != 5 or draft.shape[-1] != 1:
+        raise ValueError("draft and endpoint must share shape [B,C,F,N,1]")
+    if draft.shape[0] != 1:
+        raise ValueError("repair supports one action chunk")
+    if (
+        not np.isfinite(strength)
+        or not 0 <= strength <= 1
+        or not np.isfinite(max_step_rms)
+        or max_step_rms <= 0
+    ):
+        raise ValueError("repair strength and max_step_rms are out of range")
+    channels = tuple(int(channel) for channel in continuous_channels)
+    if not channels or min(channels) < 0 or max(channels) >= draft.shape[1]:
+        raise ValueError("continuous_channels are invalid")
+
+    horizon = draft.shape[2] * draft.shape[3]
+    prefix_len = max(0, min(int(prefix_len), horizon))
+    candidate = draft.copy()
+    delta = np.zeros_like(draft)
+    delta[:, channels] = strength * (endpoint[:, channels] - draft[:, channels])
+    flat = delta[:, channels].transpose(0, 2, 3, 1, 4).reshape(
+        1, horizon, len(channels)
+    )
+    flat[:, prefix_len:] = 0
+    rms = np.sqrt(np.mean(np.square(flat, dtype=np.float32), axis=-1, keepdims=True))
+    scale = np.minimum(1.0, max_step_rms / np.maximum(rms, 1e-8))
+    flat *= scale
+    applied = flat.reshape(1, draft.shape[2], draft.shape[3], len(channels), 1)
+    candidate[:, channels] += applied.transpose(0, 3, 1, 2, 4)
+    return candidate, float(np.max(np.sqrt(np.mean(np.square(flat), axis=-1))))
+
+
+def gripper_phase_majority_matches_draft(
+    primary_phases,
+    tiebreak_phases,
+    draft_phase,
+    *,
+    prefix_len: int,
+) -> tuple[bool, int | None]:
+    """Check a 2-of-3 cross-tau gripper phase vote against the draft."""
+
+    primary = np.asarray(primary_phases, dtype=bool)
+    tiebreak = np.asarray(tiebreak_phases, dtype=bool)
+    draft = np.asarray(draft_phase, dtype=bool)
+    if primary.ndim != 4 or primary.shape[0] != 2:
+        raise ValueError("primary gripper phases must have shape [2, C, F, N]")
+    if tiebreak.shape != (1, *primary.shape[1:]):
+        raise ValueError("tiebreak gripper phases must add one matching tau probe")
+    if draft.shape != primary.shape[1:]:
+        raise ValueError("draft gripper phase must match one tau probe")
+    horizon = int(np.prod(draft.shape[1:]))
+    limit = max(0, min(int(prefix_len), horizon))
+    if limit == 0:
+        return False, 0
+    probes = np.concatenate((primary, tiebreak), axis=0).reshape(
+        3, primary.shape[1], horizon
+    )
+    draft = draft.reshape(draft.shape[0], horizon)
+    majority = probes.sum(axis=0) >= 2
+    disagreement = np.any(majority[:, :limit] != draft[:, :limit], axis=0)
+    indices = np.flatnonzero(disagreement)
+    first = int(indices[0]) if indices.size else None
+    return first is None, first
+
+
 class RealtimeFlashPolicy:
     """First-full speculative policy with a last-full teacher reference."""
 
@@ -159,9 +237,18 @@ class RealtimeFlashPolicy:
         delayed_error_consecutive: int = 2,
         delayed_error_teacher_rounds: int = 2,
         video_motion_gate_threshold: float = 0.0,
+        motion_selective_verify: bool = False,
         gripper_full_window: int = 1,
         gripper_consensus: bool = False,
+        late_gripper_deferral: bool = False,
+        gripper_tiebreak_shadow: bool = False,
+        repair_shadow: bool = False,
+        repair_strength: float = 0.5,
+        repair_max_step_rms: float = 0.15,
+        repair_prefix_len: int = 16,
+        profile_model_only: bool = False,
         rng: Optional[np.random.Generator] = None,
+        repair_rng: Optional[np.random.Generator] = None,
         log_path: Optional[str] = None,
     ) -> None:
         if pf_interval < 0:
@@ -186,13 +273,31 @@ class RealtimeFlashPolicy:
             raise ValueError("delayed-error recovery values must be positive")
         if not np.isfinite(video_motion_gate_threshold) or video_motion_gate_threshold < 0:
             raise ValueError("video_motion_gate_threshold must be non-negative")
+        if motion_selective_verify and video_motion_gate_threshold <= 0:
+            raise ValueError(
+                "motion selective verification requires a positive motion gate threshold"
+            )
         if gripper_full_window < 1:
             raise ValueError("gripper_full_window must be positive")
+        if not np.isfinite(repair_strength) or not 0 <= repair_strength <= 1:
+            raise ValueError("repair_strength must be in [0, 1]")
+        if (
+            not np.isfinite(repair_max_step_rms)
+            or repair_max_step_rms <= 0
+            or repair_prefix_len <= 0
+        ):
+            raise ValueError("repair bounds must be positive")
         tau_timesteps = tuple(float(timestep) for timestep in tau_timesteps)
         if not tau_timesteps:
             raise ValueError("tau_timesteps must be non-empty")
         if gripper_consensus and len(tau_timesteps) < 2:
             raise ValueError("gripper consensus requires at least two tau probes")
+        if late_gripper_deferral and not gripper_consensus:
+            raise ValueError("late gripper deferral requires gripper consensus")
+        if gripper_tiebreak_shadow and not gripper_consensus:
+            raise ValueError("gripper tiebreak shadow requires gripper consensus")
+        if motion_selective_verify and len(tau_timesteps) != 2:
+            raise ValueError("motion selective verification requires exactly two tau probes")
 
         self.draft = draft
         self.teacher = teacher
@@ -212,9 +317,18 @@ class RealtimeFlashPolicy:
         self.delayed_error_consecutive = int(delayed_error_consecutive)
         self.delayed_error_teacher_rounds = int(delayed_error_teacher_rounds)
         self.video_motion_gate_threshold = float(video_motion_gate_threshold)
+        self.motion_selective_verify = bool(motion_selective_verify)
         self.gripper_full_window = int(gripper_full_window)
         self.gripper_consensus = bool(gripper_consensus)
+        self.late_gripper_deferral = bool(late_gripper_deferral)
+        self.gripper_tiebreak_shadow = bool(gripper_tiebreak_shadow)
+        self.repair_shadow = bool(repair_shadow)
+        self.repair_strength = float(repair_strength)
+        self.repair_max_step_rms = float(repair_max_step_rms)
+        self.repair_prefix_len = int(repair_prefix_len)
+        self.profile_model_only = bool(profile_model_only)
         self.rng = rng or np.random.default_rng()
+        self.repair_rng = repair_rng or np.random.default_rng()
         self.log_path = Path(log_path) if log_path else None
         if self.log_path:
             self.log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -242,10 +356,22 @@ class RealtimeFlashPolicy:
         self._draft_primed = False
 
     def _call(self, model, request: dict) -> dict:
+        if self.profile_model_only:
+            request = dict(request)
+            request["profile_model_time"] = True
         response = model.infer(request)
         if not isinstance(response, dict):
             raise TypeError("model inference must return a dict")
         return response
+
+    @staticmethod
+    def _merge_model_profile(timing, counts, response, role) -> None:
+        for name, value in response.get("model_timing_ms", {}).items():
+            key = f"{role}.{name}"
+            timing[key] = timing.get(key, 0.0) + float(value)
+        for name, value in response.get("model_forward_counts", {}).items():
+            key = f"{role}.{name}"
+            counts[key] = counts.get(key, 0) + int(value)
 
     def _log(self, **record) -> None:
         if not self.log_path:
@@ -303,14 +429,19 @@ class RealtimeFlashPolicy:
             return "periodic"
         return None
 
-    def _replay_teacher_updates(self) -> int:
+    def _replay_teacher_updates(self) -> tuple[int, dict, dict]:
         replayed = 0
+        timing = {}
+        counts = {}
         while self.pending_teacher_cache_updates:
             request = self.pending_teacher_cache_updates[0]
-            self._call(self.teacher, request)
+            response = self._call(self.teacher, request)
+            self._merge_model_profile(
+                timing, counts, response, "teacher_cache_replay"
+            )
             self.pending_teacher_cache_updates.popleft()
             replayed += 1
-        return replayed
+        return replayed, timing, counts
 
     def _reset(self, request: dict) -> dict:
         start = time.perf_counter()
@@ -330,8 +461,19 @@ class RealtimeFlashPolicy:
         draft_request = dict(request)
         draft_request["compare_video_prediction"] = source == "flash"
         draft_response = self._call(self.draft, draft_request)
+        model_timing_ms = {}
+        model_forward_counts = {}
+        self._merge_model_profile(
+            model_timing_ms, model_forward_counts, draft_response, "draft_cache"
+        )
         if source == "full":
-            self._call(self.teacher, dict(request))
+            teacher_response = self._call(self.teacher, dict(request))
+            self._merge_model_profile(
+                model_timing_ms,
+                model_forward_counts,
+                teacher_response,
+                "teacher_cache",
+            )
         else:
             self.pending_teacher_cache_updates.append(dict(request))
 
@@ -373,6 +515,9 @@ class RealtimeFlashPolicy:
             delayed_error_triggered=delayed_error_triggered,
             delayed_error_trigger_count=self.delayed_error_trigger_count,
             delayed_error_teacher_rounds_left=self.delayed_error_teacher_rounds_left,
+            model_timing_ms=model_timing_ms,
+            model_forward_counts=model_forward_counts,
+            executed_action_steps=0,
             elapsed_sec=time.perf_counter() - start,
         )
         return {}
@@ -380,16 +525,33 @@ class RealtimeFlashPolicy:
     def _full(self, request: dict, reason: str) -> dict:
         start = time.perf_counter()
         flow_error_budget = self.flow_error_budget
-        replayed = self._replay_teacher_updates()
+        replayed, model_timing_ms, model_forward_counts = \
+            self._replay_teacher_updates()
         if not self._draft_primed:
             prime_request = dict(request)
             prime_request["prime_only"] = True
-            self._call(self.draft, prime_request)
+            prime_response = self._call(self.draft, prime_request)
+            self._merge_model_profile(
+                model_timing_ms,
+                model_forward_counts,
+                prime_response,
+                "draft_prime",
+            )
             self._draft_primed = True
 
         teacher_response = self._call(self.teacher, dict(request))
+        self._merge_model_profile(
+            model_timing_ms,
+            model_forward_counts,
+            teacher_response,
+            "teacher_generation",
+        )
         action = self._action(teacher_response)
         horizon = action.shape[1] * action.shape[2]
+        executed_action_steps = (
+            horizon - self.action_per_frame
+            if self.frame_st_id == 0 else horizon
+        )
         self.pending_cache_source = "full"
         self._stage_gripper(action)
         self.last_source = "teacher_full"
@@ -418,6 +580,9 @@ class RealtimeFlashPolicy:
             accepted_prefix=horizon,
             replayed_teacher_cache_updates=replayed,
             flow_error_budget_before_reset=flow_error_budget,
+            model_timing_ms=model_timing_ms,
+            model_forward_counts=model_forward_counts,
+            executed_action_steps=executed_action_steps,
             elapsed_sec=time.perf_counter() - start,
         )
         return response
@@ -439,7 +604,9 @@ class RealtimeFlashPolicy:
         verify_response: dict,
         horizon: int,
     ) -> int:
-        if not self.teacher_gripper_fallback and \
+        if self.gripper_consensus and "accepted_prefix" in verify_response:
+            raw_prefix = int(verify_response["accepted_prefix"])
+        elif not self.teacher_gripper_fallback and \
                 "accepted_prefix_before_gripper" in verify_response:
             raw_prefix = int(verify_response["accepted_prefix_before_gripper"])
         elif "accepted_prefix" in verify_response:
@@ -464,6 +631,108 @@ class RealtimeFlashPolicy:
             raise RuntimeError("teacher verification did not return a prefix or distances")
         return quantize_prefix(raw_prefix, self.action_per_frame, horizon)
 
+    def _shadow_gripper_tiebreak(
+        self,
+        verify_request: dict,
+        primary_response: dict,
+        horizon: int,
+    ) -> dict:
+        """Probe tau=75 without changing the live gripper decision."""
+
+        request = dict(verify_request)
+        request["tau_timesteps"] = (75.0,)
+        request["gripper_consensus"] = False
+        response = self._call(self.teacher, request)
+        prefix_len = min(self.action_per_frame, int(horizon))
+        majority_matches, first_failure = gripper_phase_majority_matches_draft(
+            primary_response.get("gripper_phase_by_tau"),
+            response.get("gripper_phase_by_tau"),
+            primary_response.get("draft_gripper_phase"),
+            prefix_len=prefix_len,
+        )
+        primary_continuous_prefix = int(
+            primary_response.get("accepted_prefix_before_gripper", 0)
+        )
+        tiebreak_continuous_prefix = int(
+            response.get("accepted_prefix_before_gripper", 0)
+        )
+        rescue = bool(
+            majority_matches
+            and primary_continuous_prefix >= prefix_len
+            and tiebreak_continuous_prefix >= prefix_len
+        )
+        return {
+            "gripper_tiebreak_shadow_tau": 75.0,
+            "gripper_tiebreak_shadow_majority_matches": majority_matches,
+            "gripper_tiebreak_shadow_first_failure": first_failure,
+            "gripper_tiebreak_shadow_primary_continuous_prefix":
+                primary_continuous_prefix,
+            "gripper_tiebreak_shadow_continuous_prefix":
+                tiebreak_continuous_prefix,
+            "gripper_tiebreak_shadow_rescue": rescue,
+            "gripper_tiebreak_shadow_model_timing_ms": response.get(
+                "model_timing_ms", {}
+            ),
+            "gripper_tiebreak_shadow_model_forward_counts": response.get(
+                "model_forward_counts", {}
+            ),
+        }
+
+    def _shadow_repair_probe(
+        self,
+        request: dict,
+        action_latent: np.ndarray,
+        verify_response: dict,
+        horizon: int,
+    ) -> dict:
+        endpoint = verify_response.get("teacher_endpoint_latent")
+        if endpoint is None:
+            raise RuntimeError("shadow repair requires teacher_endpoint_latent")
+        candidate, correction_max_rms = bounded_endpoint_repair(
+            action_latent,
+            endpoint,
+            prefix_len=min(self.repair_prefix_len, horizon),
+            strength=self.repair_strength,
+            max_step_rms=self.repair_max_step_rms,
+            continuous_channels=verify_response.get(
+                "continuous_channels", range(14)
+            ),
+        )
+        holdout_request = dict(request)
+        holdout_request.update(
+            verify_action=True,
+            action_latent=candidate,
+            verify_noise=self.repair_rng.standard_normal(candidate.shape).astype(
+                np.float32
+            ),
+            threshold=self.threshold,
+            tau_timesteps=self.tau_timesteps,
+            frame_st_id=self.frame_st_id,
+            gripper_consensus=self.gripper_consensus,
+        )
+        if self.last_gripper is not None:
+            previous_phase = self.last_gripper >= self.gripper_threshold
+            holdout_request["previous_gripper"] = np.where(
+                previous_phase, 1.0, -1.0
+            ).astype(np.float32)
+        holdout = self._call(self.teacher, holdout_request)
+        return {
+            "repair_shadow_holdout_prefix": self._accepted_prefix(
+                candidate, holdout, horizon
+            ),
+            "repair_shadow_prefix_by_tau": holdout.get("prefix_by_tau"),
+            "repair_shadow_correction_max_rms": correction_max_rms,
+            "repair_shadow_gripper_force_teacher": bool(
+                holdout.get("gripper_force_teacher", False)
+            ),
+            "repair_shadow_model_timing_ms": holdout.get(
+                "model_timing_ms", {}
+            ),
+            "repair_shadow_model_forward_counts": holdout.get(
+                "model_forward_counts", {}
+            ),
+        }
+
     def _flash(self, request: dict) -> dict:
         start = time.perf_counter()
         draft_request = dict(request)
@@ -471,6 +740,14 @@ class RealtimeFlashPolicy:
         draft_request["return_video_motion_stats"] = True
         draft_request["track_video_prediction"] = True
         draft_response = self._call(self.draft, draft_request)
+        model_timing_ms = {}
+        model_forward_counts = {}
+        self._merge_model_profile(
+            model_timing_ms,
+            model_forward_counts,
+            draft_response,
+            "draft_generation",
+        )
         self._draft_primed = True
         action = self._action(draft_response)
         action_latent = draft_response.get("action_latent")
@@ -479,36 +756,60 @@ class RealtimeFlashPolicy:
         action_latent = np.asarray(action_latent)
         video_motion_stats = draft_response.get("video_motion_stats")
         horizon = action.shape[1] * action.shape[2]
+        switch_step = first_gripper_switch(
+            action,
+            self.gripper_channels,
+            self.gripper_threshold,
+            previous=self.last_gripper,
+        )
 
         global_motion = None
-        if self.video_motion_gate_threshold > 0 or self.flow_budget_motion_ceiling > 0:
+        if (
+            self.video_motion_gate_threshold > 0
+            or self.flow_budget_motion_ceiling > 0
+            or self.motion_selective_verify
+        ):
             if video_motion_stats is None or "global_mean" not in video_motion_stats:
                 raise RuntimeError("motion-aware routing requires draft global_mean")
             global_motion = float(video_motion_stats["global_mean"])
             if not np.isfinite(global_motion):
                 raise ValueError("draft global video motion must be finite")
-        if self.video_motion_gate_threshold > 0:
-            if global_motion >= self.video_motion_gate_threshold:
-                self.force_full_reason = "video_motion_risk"
-                self.last_source = "replan"
-                self.round_id += 1
-                response = {
-                    "replan": True,
-                    "action_source": self.last_source,
-                    "fallback_reason": self.force_full_reason,
-                    "accepted_prefix": 0,
-                    "verified_prefix": None,
-                }
-                self._log(
-                    source=self.last_source,
-                    fallback_reason=self.force_full_reason,
-                    accepted_prefix=0,
-                    verified_prefix=None,
-                    video_motion_stats=video_motion_stats,
-                    video_motion_gate_threshold=self.video_motion_gate_threshold,
-                    elapsed_sec=time.perf_counter() - start,
-                )
-                return response
+        high_video_motion = bool(
+            self.video_motion_gate_threshold > 0
+            and global_motion >= self.video_motion_gate_threshold
+        )
+        if high_video_motion and not self.motion_selective_verify:
+            self.force_full_reason = "video_motion_risk"
+            self.last_source = "replan"
+            self.round_id += 1
+            response = {
+                "replan": True,
+                "action_source": self.last_source,
+                "fallback_reason": self.force_full_reason,
+                "accepted_prefix": 0,
+                "verified_prefix": None,
+            }
+            self._log(
+                source=self.last_source,
+                fallback_reason=self.force_full_reason,
+                accepted_prefix=0,
+                verified_prefix=None,
+                video_motion_stats=video_motion_stats,
+                video_motion_gate_threshold=self.video_motion_gate_threshold,
+                model_timing_ms=model_timing_ms,
+                model_forward_counts=model_forward_counts,
+                executed_action_steps=0,
+                elapsed_sec=time.perf_counter() - start,
+            )
+            return response
+
+        motion_risk_level = (
+            "high" if high_video_motion and self.motion_selective_verify
+            else "normal" if self.motion_selective_verify
+            else "disabled"
+        )
+        active_tau_timesteps = self.tau_timesteps
+        active_gripper_consensus = self.gripper_consensus
 
         verify_request = dict(request)
         verify_request.update(
@@ -516,9 +817,10 @@ class RealtimeFlashPolicy:
             action_latent=action_latent,
             verify_noise=self.rng.standard_normal(action_latent.shape).astype(np.float32),
             threshold=self.threshold,
-            tau_timesteps=self.tau_timesteps,
+            tau_timesteps=active_tau_timesteps,
             frame_st_id=self.frame_st_id,
-            gripper_consensus=self.gripper_consensus,
+            gripper_consensus=active_gripper_consensus,
+            return_gripper_phase=self.gripper_tiebreak_shadow,
         )
         if self.last_gripper is not None:
             previous_phase = self.last_gripper >= self.gripper_threshold
@@ -526,11 +828,19 @@ class RealtimeFlashPolicy:
                 previous_phase, 1.0, -1.0
             ).astype(np.float32)
         verify_response = self._call(self.teacher, verify_request)
+        self._merge_model_profile(
+            model_timing_ms,
+            model_forward_counts,
+            verify_response,
+            "teacher_verify_primary",
+        )
         verified_prefix = self._accepted_prefix(action_latent, verify_response, horizon)
+        raw_verified_prefix = verified_prefix
         verify_distances = verify_response.get("distances")
         if verify_distances is not None:
             verify_distances = np.asarray(verify_distances).tolist()
         verify_telemetry = {
+            "verify_threshold": self.threshold,
             "tau_timesteps": verify_response.get("tau_timesteps"),
             "prefix_by_tau": verify_response.get("prefix_by_tau"),
             "verify_distances": verify_distances,
@@ -544,6 +854,9 @@ class RealtimeFlashPolicy:
                 "draft_gripper_switch_index"
             ),
             "video_motion_stats": video_motion_stats,
+            "motion_risk_level": motion_risk_level,
+            "active_tau_timesteps": list(active_tau_timesteps),
+            "active_gripper_consensus": active_gripper_consensus,
             "gripper_consensus_prefix": verify_response.get(
                 "gripper_consensus_prefix"
             ),
@@ -558,26 +871,46 @@ class RealtimeFlashPolicy:
         gripper_consensus_failure = verify_response.get(
             "gripper_consensus_failure_index"
         )
+        verify_telemetry["gripper_tiebreak_shadow_enabled"] = (
+            self.gripper_tiebreak_shadow
+        )
+        verify_telemetry["gripper_tiebreak_shadow_eligible"] = bool(
+            self.gripper_tiebreak_shadow
+            and gripper_consensus_failure is not None
+        )
+        if verify_telemetry["gripper_tiebreak_shadow_eligible"]:
+            tiebreak_shadow = self._shadow_gripper_tiebreak(
+                verify_request, verify_response, horizon
+            )
+            tiebreak_profile = {
+                "model_timing_ms": tiebreak_shadow.pop(
+                    "gripper_tiebreak_shadow_model_timing_ms", {}
+                ),
+                "model_forward_counts": tiebreak_shadow.pop(
+                    "gripper_tiebreak_shadow_model_forward_counts", {}
+                ),
+            }
+            self._merge_model_profile(
+                model_timing_ms,
+                model_forward_counts,
+                tiebreak_profile,
+                "teacher_verify_gripper_tiebreak_shadow",
+            )
+            verify_telemetry.update(tiebreak_shadow)
         if (
             teacher_gripper_switch
             and self.teacher_gripper_fallback
-            and not self.gripper_consensus
+            and not active_gripper_consensus
         ):
             verified_prefix = 0
             self.force_full_reason = "teacher_gripper_switch"
             self.gripper_full_rounds_left = self.gripper_full_window
 
-        switch_step = first_gripper_switch(
-            action,
-            self.gripper_channels,
-            self.gripper_threshold,
-            previous=self.last_gripper,
-        )
         accepted_prefix = verified_prefix
         if (
             switch_step is not None
             and verified_prefix > 0
-            and not self.gripper_consensus
+            and not active_gripper_consensus
         ):
             accepted_prefix = min(
                 accepted_prefix,
@@ -585,9 +918,72 @@ class RealtimeFlashPolicy:
             )
             self.force_full_reason = "gripper_switch"
             self.gripper_full_rounds_left = self.gripper_full_window
-        if self.gripper_consensus and gripper_consensus_failure is not None:
+        late_gripper_deferred = bool(
+            active_gripper_consensus
+            and self.late_gripper_deferral
+            and gripper_consensus_failure is not None
+            and int(gripper_consensus_failure) >= self.action_per_frame
+            and accepted_prefix >= self.action_per_frame
+        )
+        if late_gripper_deferred:
+            accepted_prefix = min(
+                accepted_prefix,
+                quantize_prefix(
+                    int(gripper_consensus_failure),
+                    self.action_per_frame,
+                    horizon,
+                ),
+            )
+        if (
+            active_gripper_consensus
+            and gripper_consensus_failure is not None
+            and not late_gripper_deferred
+        ):
             self.force_full_reason = "gripper_consensus"
             self.gripper_full_rounds_left = self.gripper_full_window
+
+        accepted_prefix_before_motion_cap = accepted_prefix
+        motion_prefix_cap_applied = False
+        if high_video_motion and self.motion_selective_verify and accepted_prefix > 0:
+            accepted_prefix = min(accepted_prefix, self.action_per_frame)
+            motion_prefix_cap_applied = accepted_prefix < accepted_prefix_before_motion_cap
+        verify_telemetry.update(
+            high_video_motion=high_video_motion,
+            raw_verified_prefix=raw_verified_prefix,
+            accepted_prefix_before_motion_cap=accepted_prefix_before_motion_cap,
+            motion_prefix_cap_applied=motion_prefix_cap_applied,
+            motion_high_prefix_cap=self.action_per_frame,
+            late_gripper_deferral_enabled=self.late_gripper_deferral,
+            late_gripper_deferred=late_gripper_deferred,
+        )
+
+        repair_shadow = None
+        repair_shadow_eligible = bool(
+            self.repair_shadow
+            and accepted_prefix == 0
+            and self.force_full_reason is None
+            and not teacher_gripper_switch
+            and gripper_consensus_failure is None
+            and switch_step is None
+        )
+        if repair_shadow_eligible:
+            repair_shadow = self._shadow_repair_probe(
+                request, action_latent, verify_response, horizon
+            )
+            repair_timing = {
+                "model_timing_ms": repair_shadow.pop(
+                    "repair_shadow_model_timing_ms", {}
+                ),
+                "model_forward_counts": repair_shadow.pop(
+                    "repair_shadow_model_forward_counts", {}
+                ),
+            }
+            self._merge_model_profile(
+                model_timing_ms,
+                model_forward_counts,
+                repair_timing,
+                "teacher_verify_repair_holdout",
+            )
 
         self.round_id += 1
         if accepted_prefix == 0:
@@ -607,7 +1003,13 @@ class RealtimeFlashPolicy:
                 accepted_prefix=0,
                 verified_prefix=verified_prefix,
                 teacher_gripper_switch=teacher_gripper_switch,
+                repair_shadow_enabled=self.repair_shadow,
+                repair_shadow_eligible=repair_shadow_eligible,
+                **(repair_shadow or {}),
                 **verify_telemetry,
+                model_timing_ms=model_timing_ms,
+                model_forward_counts=model_forward_counts,
+                executed_action_steps=0,
                 elapsed_sec=time.perf_counter() - start,
             )
             return response
@@ -652,12 +1054,16 @@ class RealtimeFlashPolicy:
             "accepted_prefix": accepted_prefix,
             "verified_prefix": verified_prefix,
         }
-        if gripper_consensus_failure is not None:
+        if active_gripper_consensus and gripper_consensus_failure is not None:
             response.update(
-                fallback_reason="gripper_consensus",
+                fallback_reason=(
+                    "gripper_consensus_deferred"
+                    if late_gripper_deferred
+                    else "gripper_consensus"
+                ),
                 gripper_consensus_failure_index=gripper_consensus_failure,
             )
-        elif switch_step is not None and not self.gripper_consensus:
+        elif switch_step is not None and not active_gripper_consensus:
             response.update(
                 fallback_reason="gripper_switch",
                 gripper_switch_step=switch_step,
@@ -681,6 +1087,9 @@ class RealtimeFlashPolicy:
             delayed_error_teacher_rounds_left=self.delayed_error_teacher_rounds_left,
             gripper_full_rounds_left=self.gripper_full_rounds_left,
             **verify_telemetry,
+            model_timing_ms=model_timing_ms,
+            model_forward_counts=model_forward_counts,
+            executed_action_steps=accepted_prefix,
             elapsed_sec=time.perf_counter() - start,
         )
         return response

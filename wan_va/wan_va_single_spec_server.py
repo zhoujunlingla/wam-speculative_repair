@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import json
 import logging
 import os
 import sys
@@ -27,15 +28,60 @@ from wan_va.wan_va_server import VA_Server
 class LocalModelAdapter:
     """Expose a local ``VA_Server`` through the policy's small infer contract."""
 
-    def __init__(self, model: VA_Server) -> None:
+    def __init__(
+        self,
+        model: VA_Server,
+        *,
+        profile_model_only: bool = False,
+        log_path: str | None = None,
+        role: str | None = None,
+    ) -> None:
         self.model = model
+        self.profile_model_only = bool(profile_model_only)
+        self.log_path = Path(log_path) if log_path else None
+        self.role = role
+        if self.log_path:
+            self.log_path.parent.mkdir(parents=True, exist_ok=True)
 
     def infer(self, request: dict) -> dict:
+        if self.profile_model_only:
+            request = dict(request)
+            request["profile_model_time"] = True
         verifying = bool(request.get("verify_action", False))
-        frame_st_id = getattr(self.model, "frame_st_id", None) if verifying else None
+        model_frame_st_id = getattr(self.model, "frame_st_id", None)
+        frame_st_id = model_frame_st_id if verifying else None
         response = self.model.infer(request)
         if verifying and getattr(self.model, "frame_st_id", None) != frame_st_id:
             raise RuntimeError("teacher verification mutated frame_st_id")
+        if self.log_path and response.get("model_timing_ms") is not None:
+            action = response.get("action")
+            executed_action_steps = (
+                int(np.asarray(action).shape[1] * np.asarray(action).shape[2])
+                if action is not None else 0
+            )
+            if action is not None and model_frame_st_id == 0:
+                executed_action_steps = max(
+                    0,
+                    executed_action_steps
+                    - int(self.model.job_config.action_per_frame),
+                )
+            source = (
+                "reset" if request.get("reset", False)
+                else f"{self.role}_cache_update"
+                if request.get("compute_kv_cache", False)
+                else f"{self.role}_verify"
+                if verifying
+                else f"{self.role}_generation"
+            )
+            with self.log_path.open("a", encoding="utf-8") as stream:
+                stream.write(json.dumps({
+                    "source": source,
+                    "model_timing_ms": response.get("model_timing_ms", {}),
+                    "model_forward_counts": response.get(
+                        "model_forward_counts", {}
+                    ),
+                    "executed_action_steps": executed_action_steps,
+                }) + "\n")
         return response
 
 
@@ -53,14 +99,24 @@ def build_policy(args: argparse.Namespace):
     save_root.mkdir(parents=True, exist_ok=True)
     if args.mode == "draft_only":
         logging.info("loading local draft model: %s", args.draft_config_name)
-        return LocalModelAdapter(VA_Server(
-            _model_config(args.draft_config_name, save_root / "draft", args.local_rank)
-        ))
+        return LocalModelAdapter(
+            VA_Server(_model_config(
+                args.draft_config_name, save_root / "draft", args.local_rank
+            )),
+            profile_model_only=args.profile_model_only,
+            log_path=args.log_path,
+            role="draft",
+        )
     if args.mode == "teacher_only":
         logging.info("loading local teacher model: %s", args.teacher_config_name)
-        return LocalModelAdapter(VA_Server(
-            _model_config(args.teacher_config_name, save_root / "teacher", args.local_rank)
-        ))
+        return LocalModelAdapter(
+            VA_Server(_model_config(
+                args.teacher_config_name, save_root / "teacher", args.local_rank
+            )),
+            profile_model_only=args.profile_model_only,
+            log_path=args.log_path,
+            role="teacher",
+        )
     logging.info("loading local draft model: %s", args.draft_config_name)
     draft = VA_Server(_model_config(
         args.draft_config_name, save_root / "draft", args.local_rank
@@ -85,9 +141,20 @@ def build_policy(args: argparse.Namespace):
         delayed_error_consecutive=args.delayed_error_consecutive,
         delayed_error_teacher_rounds=args.delayed_error_teacher_rounds,
         video_motion_gate_threshold=args.video_motion_gate_threshold,
+        motion_selective_verify=args.motion_selective_verify,
         gripper_full_window=args.gripper_full_window,
         gripper_consensus=args.gripper_consensus,
+        late_gripper_deferral=args.late_gripper_deferral,
+        gripper_tiebreak_shadow=args.gripper_tiebreak_shadow,
+        repair_shadow=args.repair_shadow,
+        repair_strength=args.repair_strength,
+        repair_max_step_rms=args.repair_max_step_rms,
+        repair_prefix_len=args.repair_prefix_len,
+        profile_model_only=args.profile_model_only,
         rng=None if args.seed is None else np.random.default_rng(args.seed),
+        repair_rng=None
+        if args.seed is None
+        else np.random.default_rng(args.seed + 1),
         log_path=args.log_path,
     )
 
@@ -123,8 +190,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--delayed-error-consecutive", type=int, default=2)
     parser.add_argument("--delayed-error-teacher-rounds", type=int, default=2)
     parser.add_argument("--video-motion-gate-threshold", type=float, default=0.0)
+    parser.add_argument("--motion-selective-verify", action="store_true")
     parser.add_argument("--gripper-full-window", type=int, default=1)
     parser.add_argument("--gripper-consensus", action="store_true")
+    parser.add_argument("--late-gripper-deferral", action="store_true")
+    parser.add_argument("--gripper-tiebreak-shadow", action="store_true")
+    parser.add_argument("--repair-shadow", action="store_true")
+    parser.add_argument("--repair-strength", type=float, default=0.5)
+    parser.add_argument("--repair-max-step-rms", type=float, default=0.15)
+    parser.add_argument("--repair-prefix-len", type=int, default=16)
+    parser.add_argument("--profile-model-only", action="store_true")
     parser.add_argument(
         "--tau-timesteps", type=float, nargs="+", default=(50.0, 100.0)
     )

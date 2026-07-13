@@ -4,16 +4,48 @@ from pathlib import Path
 import sys
 
 import numpy as np
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from evaluation.robotwin.realtime_flash_policy import (
     RealtimeFlashPolicy,
+    bounded_endpoint_repair,
     first_gripper_switch,
+    gripper_phase_majority_matches_draft,
     infer_with_replan,
     longest_safe_prefix,
     normalized_l2_step_distances,
 )
+
+
+def test_gripper_phase_majority_matches_draft_uses_three_tau_vote():
+    draft = np.zeros((2, 2, 16), dtype=bool)
+    primary = np.zeros((2, 2, 2, 16), dtype=bool)
+    primary[1, 0, 0, 0] = True
+    tiebreak = np.zeros((1, 2, 2, 16), dtype=bool)
+
+    matches, first = gripper_phase_majority_matches_draft(
+        primary, tiebreak, draft, prefix_len=16
+    )
+
+    assert matches is True
+    assert first is None
+
+
+def test_gripper_phase_majority_reports_first_persistent_disagreement():
+    draft = np.zeros((2, 2, 16), dtype=bool)
+    primary = np.zeros((2, 2, 2, 16), dtype=bool)
+    tiebreak = np.zeros((1, 2, 2, 16), dtype=bool)
+    primary[:, 0, 0, 3] = True
+    tiebreak[:, 0, 0, 3] = True
+
+    matches, first = gripper_phase_majority_matches_draft(
+        primary, tiebreak, draft, prefix_len=16
+    )
+
+    assert matches is False
+    assert first == 3
 
 
 def _action(switch_step=None, value=0.0):
@@ -67,10 +99,32 @@ class _FakeModel:
         self.calls.append(call)
         self.events.append((self.role, kind, request.get("tag")))
 
+        def profiled(response):
+            if not request.get("profile_model_time", False):
+                return response
+            names = {
+                "cache": {
+                    "vae_encode": 1.0,
+                    "kv_cache_video_transformer": 1.0,
+                    "kv_cache_action_transformer": 1.0,
+                },
+                "verify": {"teacher_action_verify": 2.0},
+                "prime": {"vae_encode": 1.0},
+                "action": {
+                    "video_dit": 10.0,
+                    "action_dit_generation": 5.0,
+                },
+            }.get(kind, {})
+            return {
+                **response,
+                "model_timing_ms": names,
+                "model_forward_counts": {name: 1 for name in names},
+            }
+
         if kind == "reset":
             self.cache.clear()
             self.frame_st_id = 0
-            return {}
+            return profiled({})
         if kind == "cache":
             self.cache.append(request["tag"])
             self.frame_st_id += int(np.asarray(request["state"]).shape[1])
@@ -78,11 +132,17 @@ class _FakeModel:
                 latent_nrmse = (
                     self.delayed_errors.popleft() if self.delayed_errors else 0.25
                 )
-                return {"delayed_video_error": {"latent_nrmse": latent_nrmse}}
-            return {}
+                return profiled({
+                    "delayed_video_error": {"latent_nrmse": latent_nrmse}
+                })
+            return profiled({})
         if kind == "verify":
             result = self.verify_results.popleft() if self.verify_results else 32
-            return dict(result) if isinstance(result, dict) else {"accepted_prefix": result}
+            response = (
+                dict(result) if isinstance(result, dict)
+                else {"accepted_prefix": result}
+            )
+            return profiled(response)
         response = {"action": self.action.copy()}
         if self.role == "draft":
             response["action_latent"] = self.action_latent.copy()
@@ -94,7 +154,7 @@ class _FakeModel:
                     "top_relative": 4.0,
                     "top_concentration": 0.5,
                 }
-        return response
+        return profiled(response)
 
 
 def _action_request():
@@ -143,6 +203,25 @@ def test_normalized_l2_excludes_grippers_and_prefix_uses_every_k():
     assert longest_safe_prefix(distances, threshold=0.5) == 16
 
 
+def test_bounded_endpoint_repair_changes_only_continuous_prefix():
+    draft = np.zeros((1, 30, 2, 16, 1), dtype=np.float32)
+    endpoint = np.ones_like(draft)
+    draft[:, 28:30] = -1.0
+
+    candidate, max_rms = bounded_endpoint_repair(
+        draft,
+        endpoint,
+        prefix_len=16,
+        strength=1.0,
+        max_step_rms=0.1,
+    )
+
+    assert np.isclose(max_rms, 0.1)
+    assert np.allclose(candidate[:, :14, 0], 0.1)
+    assert np.array_equal(candidate[:, :14, 1], draft[:, :14, 1])
+    assert np.array_equal(candidate[:, 14:], draft[:, 14:])
+
+
 def test_gripper_switch_finds_first_transition_not_only_endpoints():
     action = _action()
     action[7, 0, 4:8] = 1.0
@@ -176,6 +255,89 @@ def test_first_round_is_full_and_full_cache_update_becomes_anchor():
     assert teacher.cache == ["anchor"]
     assert policy.teacher_anchor_frame_st_id == 2
     assert not policy.pending_teacher_cache_updates
+
+
+def test_model_only_profile_aggregates_generation_and_cache_costs(tmp_path):
+    events = []
+    draft = _FakeModel("draft", events)
+    teacher = _FakeModel("teacher", events, verify_results=(32,))
+    log_path = tmp_path / "metrics.jsonl"
+    policy = RealtimeFlashPolicy(
+        draft,
+        teacher,
+        pf_interval=20,
+        profile_model_only=True,
+        log_path=log_path,
+        rng=np.random.default_rng(3),
+    )
+
+    policy.infer({"reset": True, "prompt": "test task"})
+    initial = policy.infer(_action_request())
+    policy.infer(_cache_request("anchor", initial["action"]))
+    flash = policy.infer(_action_request())
+
+    rows = [json.loads(line) for line in log_path.read_text().splitlines()]
+    full = next(row for row in rows if row["source"] == "teacher_full")
+    cache = next(row for row in rows if row["source"] == "full_cache_update")
+    draft_row = next(row for row in rows if row["source"] == "draft_flash")
+    assert full["model_timing_ms"]["draft_prime.vae_encode"] == 1.0
+    assert full["model_timing_ms"]["teacher_generation.video_dit"] == 10.0
+    assert cache["model_timing_ms"]["draft_cache.vae_encode"] == 1.0
+    assert cache["model_timing_ms"]["teacher_cache.vae_encode"] == 1.0
+    assert draft_row["model_timing_ms"]["draft_generation.video_dit"] == 10.0
+    assert draft_row["model_timing_ms"][
+        "teacher_verify_primary.teacher_action_verify"
+    ] == 2.0
+    assert full["executed_action_steps"] == 16
+    assert draft_row["executed_action_steps"] == 32
+    assert flash["accepted_prefix"] == 32
+    assert all(
+        call["request"].get("profile_model_time") is True
+        for call in draft.calls + teacher.calls
+    )
+
+
+def test_model_only_profile_preserves_replan_and_cache_replay_costs(tmp_path):
+    events = []
+    draft = _FakeModel("draft", events)
+    teacher = _FakeModel("teacher", events, verify_results=(32, 0))
+    log_path = tmp_path / "metrics.jsonl"
+    policy = RealtimeFlashPolicy(
+        draft,
+        teacher,
+        pf_interval=20,
+        profile_model_only=True,
+        log_path=log_path,
+        rng=np.random.default_rng(3),
+    )
+    policy.infer({"reset": True, "prompt": "test task"})
+    initial = policy.infer(_action_request())
+    policy.infer(_cache_request("anchor", initial["action"]))
+    flash = policy.infer(_action_request())
+    policy.infer(_cache_request("flash", flash["action"]))
+
+    rejected = policy.infer(_action_request())
+    full = policy.infer(_action_request())
+
+    rows = [json.loads(line) for line in log_path.read_text().splitlines()]
+    replan = next(
+        row for row in rows
+        if row["source"] == "replan" and row.get("fallback_reason") == "zero_prefix"
+    )
+    final_full = [row for row in rows if row["source"] == "teacher_full"][-1]
+    assert rejected["replan"] is True
+    assert full["action_source"] == "teacher_full"
+    assert replan["model_timing_ms"]["draft_generation.video_dit"] == 10.0
+    assert replan["model_timing_ms"][
+        "teacher_verify_primary.teacher_action_verify"
+    ] == 2.0
+    assert final_full["replayed_teacher_cache_updates"] == 1
+    assert final_full["model_timing_ms"][
+        "teacher_cache_replay.kv_cache_video_transformer"
+    ] == 1.0
+    assert final_full["model_timing_ms"][
+        "teacher_generation.action_dit_generation"
+    ] == 5.0
 
 
 def test_every_flash_verifies_against_last_full_and_queues_teacher_update():
@@ -504,6 +666,7 @@ def test_gripper_consensus_partial_prefix_schedules_teacher_window():
         events,
         verify_results=({
             "accepted_prefix": 16,
+            "accepted_prefix_before_gripper": 32,
             "gripper_consensus_prefix": 16,
             "gripper_consensus_failure_index": 20,
         },),
@@ -530,6 +693,83 @@ def test_gripper_consensus_partial_prefix_schedules_teacher_window():
     assert partial["fallback_reason"] == "gripper_consensus"
     assert teacher_1["full_reason"] == "gripper_consensus"
     assert teacher_2["full_reason"] == "gripper_phase_burst"
+
+
+def test_late_gripper_deferral_executes_verified_prefix_without_teacher_window(
+    tmp_path,
+):
+    events = []
+    draft = _FakeModel("draft", events, action=_action(switch_step=20))
+    teacher = _FakeModel(
+        "teacher",
+        events,
+        verify_results=({
+            "accepted_prefix": 16,
+            "accepted_prefix_before_gripper": 32,
+            "gripper_consensus_prefix": 16,
+            "gripper_consensus_failure_index": 20,
+        }, {
+            "accepted_prefix": 32,
+        }),
+    )
+    log_path = tmp_path / "metrics.jsonl"
+    policy = RealtimeFlashPolicy(
+        draft,
+        teacher,
+        pf_interval=0,
+        gripper_consensus=True,
+        late_gripper_deferral=True,
+        teacher_gripper_fallback=False,
+        gripper_full_window=2,
+        log_path=log_path,
+        rng=np.random.default_rng(7),
+    )
+    policy.infer({"reset": True, "prompt": "test task"})
+    first = policy.infer(_action_request())
+    policy.infer(_cache_request("anchor", first["action"]))
+
+    partial = policy.infer(_action_request())
+    policy.infer(_cache_request("partial", partial["action"]))
+    next_action = policy.infer(_action_request())
+    records = [json.loads(line) for line in log_path.read_text().splitlines()]
+    record = next(item for item in records if item.get("late_gripper_deferred"))
+
+    assert partial["accepted_prefix"] == 16
+    assert partial["fallback_reason"] == "gripper_consensus_deferred"
+    assert next_action["action_source"] == "draft_flash"
+    assert policy.gripper_full_rounds_left == 0
+    assert record["late_gripper_deferred"] is True
+
+
+def test_early_gripper_conflict_is_not_deferred():
+    events = []
+    draft = _FakeModel("draft", events, action=_action(switch_step=4))
+    teacher = _FakeModel(
+        "teacher",
+        events,
+        verify_results=({
+            "accepted_prefix": 0,
+            "gripper_consensus_prefix": 0,
+            "gripper_consensus_failure_index": 4,
+        },),
+    )
+    policy = RealtimeFlashPolicy(
+        draft,
+        teacher,
+        pf_interval=0,
+        gripper_consensus=True,
+        late_gripper_deferral=True,
+        rng=np.random.default_rng(7),
+    )
+    policy.infer({"reset": True, "prompt": "test task"})
+    first = policy.infer(_action_request())
+    policy.infer(_cache_request("anchor", first["action"]))
+
+    rejected = policy.infer(_action_request())
+
+    assert rejected["replan"] is True
+    assert rejected["fallback_reason"] == "gripper_consensus"
+    assert policy.gripper_full_rounds_left == 1
 
 
 def test_gripper_consensus_makes_server_prefix_authoritative():
@@ -598,6 +838,7 @@ def test_flash_logs_distances_without_changing_acceptance(tmp_path):
 
     assert accepted["accepted_prefix"] == 32
     assert record["prefix_by_tau"] == [32, 32]
+    assert record["verify_threshold"] == 0.15
     assert record["tau_timesteps"] == [50.0, 100.0]
     assert np.asarray(record["verify_distances"]).shape == (2, 2, 16)
     assert record["gripper_switch_indices_by_tau"] == [None, 7]
@@ -781,6 +1022,178 @@ def test_video_motion_gate_default_off_still_verifies():
     assert [call for call in teacher.calls if call["kind"] == "verify"]
 
 
+def test_motion_selective_verify_keeps_two_probes_for_normal_motion():
+    events = []
+    draft = _FakeModel("draft", events, video_motion_global=0.8)
+    teacher = _FakeModel("teacher", events)
+    policy = RealtimeFlashPolicy(
+        draft,
+        teacher,
+        pf_interval=20,
+        tau_timesteps=(50.0, 100.0),
+        video_motion_gate_threshold=1.2,
+        motion_selective_verify=True,
+        gripper_consensus=True,
+        rng=np.random.default_rng(7),
+    )
+    policy.infer({"reset": True, "prompt": "test task"})
+    initial = policy.infer(_action_request())
+    policy.infer(_cache_request("anchor", initial["action"]))
+
+    response = policy.infer(_action_request())
+
+    verify = [call for call in teacher.calls if call["kind"] == "verify"][-1]
+    assert tuple(verify["request"]["tau_timesteps"]) == (50.0, 100.0)
+    assert verify["request"]["gripper_consensus"] is True
+    assert response["accepted_prefix"] == 32
+
+
+def test_motion_selective_verify_caps_accepted_high_motion_prefix(tmp_path):
+    events = []
+    draft = _FakeModel("draft", events, video_motion_global=1.3)
+    teacher = _FakeModel("teacher", events)
+    log_path = tmp_path / "metrics.jsonl"
+    policy = RealtimeFlashPolicy(
+        draft,
+        teacher,
+        pf_interval=20,
+        tau_timesteps=(50.0, 100.0),
+        video_motion_gate_threshold=1.2,
+        motion_selective_verify=True,
+        log_path=log_path,
+        rng=np.random.default_rng(7),
+    )
+    policy.infer({"reset": True, "prompt": "test task"})
+    initial = policy.infer(_action_request())
+    policy.infer(_cache_request("anchor", initial["action"]))
+
+    response = policy.infer(_action_request())
+    policy.infer(_cache_request("high-motion", response["action"]))
+
+    verify = [call for call in teacher.calls if call["kind"] == "verify"][-1]
+    record = json.loads(log_path.read_text().splitlines()[-2])
+    assert tuple(verify["request"]["tau_timesteps"]) == (50.0, 100.0)
+    assert response["action_source"] == "draft_flash"
+    assert response["accepted_prefix"] == 16
+    assert record["motion_risk_level"] == "high"
+    assert record["raw_verified_prefix"] == 32
+    assert record["accepted_prefix_before_motion_cap"] == 32
+    assert record["motion_prefix_cap_applied"] is True
+    assert draft.cache[-1] == "high-motion"
+
+
+def test_motion_selective_verify_replans_high_motion_zero_prefix():
+    events = []
+    draft = _FakeModel("draft", events, video_motion_global=1.3)
+    teacher = _FakeModel("teacher", events, verify_results=(0,))
+    policy = RealtimeFlashPolicy(
+        draft,
+        teacher,
+        pf_interval=20,
+        tau_timesteps=(50.0, 100.0),
+        video_motion_gate_threshold=1.2,
+        motion_selective_verify=True,
+        rng=np.random.default_rng(7),
+    )
+    policy.infer({"reset": True, "prompt": "test task"})
+    initial = policy.infer(_action_request())
+    policy.infer(_cache_request("anchor", initial["action"]))
+
+    response = infer_with_replan(policy, _action_request())
+
+    assert response["action_source"] == "teacher_full"
+    assert response["full_reason"] == "zero_prefix"
+    assert [call for call in teacher.calls if call["kind"] == "verify"]
+
+
+def test_motion_selective_verify_requires_exactly_two_tau_probes():
+    with pytest.raises(ValueError, match="exactly two tau probes"):
+        RealtimeFlashPolicy(
+            _FakeModel("draft", []),
+            _FakeModel("teacher", []),
+            tau_timesteps=(50.0,),
+            video_motion_gate_threshold=1.2,
+            motion_selective_verify=True,
+        )
+
+
+def test_gripper_tiebreak_shadow_logs_rescue_without_changing_replan(tmp_path):
+    events = []
+    draft = _FakeModel("draft", events)
+    draft_phase = np.zeros((2, 2, 16), dtype=bool)
+    primary_phase = np.zeros((2, 2, 2, 16), dtype=bool)
+    primary_phase[1, 0, 0, 0] = True
+    tiebreak_phase = np.zeros((1, 2, 2, 16), dtype=bool)
+    teacher = _FakeModel(
+        "teacher",
+        events,
+        verify_results=(
+            {
+                "accepted_prefix": 0,
+                "accepted_prefix_before_gripper": 32,
+                "gripper_consensus_failure_index": 0,
+                "gripper_phase_by_tau": primary_phase.tolist(),
+                "draft_gripper_phase": draft_phase.tolist(),
+            },
+            {
+                "accepted_prefix": 32,
+                "accepted_prefix_before_gripper": 32,
+                "gripper_phase_by_tau": tiebreak_phase.tolist(),
+                "draft_gripper_phase": draft_phase.tolist(),
+            },
+        ),
+    )
+    log_path = tmp_path / "metrics.jsonl"
+    policy = RealtimeFlashPolicy(
+        draft,
+        teacher,
+        pf_interval=20,
+        tau_timesteps=(50.0, 100.0),
+        gripper_consensus=True,
+        gripper_tiebreak_shadow=True,
+        log_path=log_path,
+        rng=np.random.default_rng(7),
+    )
+    policy.infer({"reset": True, "prompt": "test task"})
+    initial = policy.infer(_action_request())
+    policy.infer(_cache_request("anchor", initial["action"]))
+
+    response = policy.infer(_action_request())
+
+    verify_calls = [call for call in teacher.calls if call["kind"] == "verify"]
+    record = json.loads(log_path.read_text().splitlines()[-1])
+    assert response["replan"] is True
+    assert response["fallback_reason"] == "gripper_consensus"
+    assert len(verify_calls) == 2
+    assert verify_calls[0]["request"]["return_gripper_phase"] is True
+    assert verify_calls[1]["request"]["return_gripper_phase"] is True
+    assert tuple(verify_calls[1]["request"]["tau_timesteps"]) == (75.0,)
+    np.testing.assert_array_equal(
+        verify_calls[0]["request"]["verify_noise"],
+        verify_calls[1]["request"]["verify_noise"],
+    )
+    assert record["gripper_tiebreak_shadow_eligible"] is True
+    assert record["gripper_tiebreak_shadow_rescue"] is True
+
+
+def test_gripper_tiebreak_shadow_requires_consensus():
+    with pytest.raises(ValueError, match="requires gripper consensus"):
+        RealtimeFlashPolicy(
+            _FakeModel("draft", []),
+            _FakeModel("teacher", []),
+            gripper_tiebreak_shadow=True,
+        )
+
+
+def test_late_gripper_deferral_requires_consensus():
+    with pytest.raises(ValueError, match="requires gripper consensus"):
+        RealtimeFlashPolicy(
+            _FakeModel("draft", []),
+            _FakeModel("teacher", []),
+            late_gripper_deferral=True,
+        )
+
+
 def test_zero_prefix_replans_same_observation_without_cache_update():
     policy, draft, teacher, _ = _anchored_policy(verify_results=(0,))
     request = _action_request()
@@ -803,6 +1216,58 @@ def test_zero_prefix_replans_same_observation_without_cache_update():
     assert draft.cache == ["anchor"]
     assert teacher.cache == ["anchor"]
     assert not policy.pending_teacher_cache_updates
+
+
+def test_zero_prefix_shadow_repair_uses_holdout_and_still_replans(tmp_path):
+    events = []
+    draft = _FakeModel("draft", events)
+    endpoint = np.zeros((1, 30, 2, 16, 1), dtype=np.float32)
+    endpoint[:, :14, 0] = 0.2
+    teacher = _FakeModel(
+        "teacher",
+        events,
+        verify_results=(
+            {
+                "accepted_prefix": 0,
+                "teacher_endpoint_latent": endpoint,
+                "continuous_channels": list(range(14)),
+            },
+            {"accepted_prefix": 16, "prefix_by_tau": [16, 16]},
+        ),
+    )
+    log_path = tmp_path / "metrics.jsonl"
+    policy = RealtimeFlashPolicy(
+        draft,
+        teacher,
+        pf_interval=20,
+        repair_shadow=True,
+        profile_model_only=True,
+        rng=np.random.default_rng(7),
+        repair_rng=np.random.default_rng(8),
+        log_path=log_path,
+    )
+    policy.infer({"reset": True, "prompt": "test task"})
+    initial = policy.infer(_action_request())
+    policy.infer(_cache_request("anchor", initial["action"]))
+
+    response = policy.infer(_action_request())
+
+    verifies = [call for call in teacher.calls if call["kind"] == "verify"]
+    record = json.loads(log_path.read_text().splitlines()[-1])
+    assert response["replan"] is True
+    assert response["fallback_reason"] == "zero_prefix"
+    assert len(verifies) == 2
+    assert not np.array_equal(
+        verifies[0]["request"]["verify_noise"],
+        verifies[1]["request"]["verify_noise"],
+    )
+    assert record["repair_shadow_eligible"] is True
+    assert record["repair_shadow_holdout_prefix"] == 16
+    assert record["repair_shadow_correction_max_rms"] <= 0.15
+    assert record["model_timing_ms"][
+        "teacher_verify_repair_holdout.teacher_action_verify"
+    ] == 2.0
+    assert policy.pending_cache_source is None
 
 
 def test_direct_response_is_not_retried():

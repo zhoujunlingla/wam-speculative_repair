@@ -1,6 +1,10 @@
 import json
 
-from scripts.analyze_motion_score import audit_log, compare_scores
+from scripts.analyze_motion_score import (
+    average_precision,
+    audit_log,
+    compare_scores,
+)
 
 
 def _write(path, records):
@@ -246,7 +250,7 @@ def test_audit_rejects_frame_alignment_mismatch(tmp_path):
     assert audit["excluded_frame_alignment_mismatch"] == 1
 
 
-def test_compare_scores_matches_baseline_trigger_budget():
+def test_compare_scores_uses_fixed_trigger_budget():
     rows = [
         {"task": "a", "global_mean": 1.3, "median": 0.9, "high_delayed_error": True},
         {"task": "a", "global_mean": 0.2, "median": 0.1, "high_delayed_error": False},
@@ -256,7 +260,90 @@ def test_compare_scores_matches_baseline_trigger_budget():
 
     report = compare_scores(rows)
 
-    assert report["baseline_trigger_count"] == 1
+    assert report["target_trigger_count"] == 1
     assert report["overall"]["global_mean"]["matched_budget"]["trigger_count"] == 1
     assert report["overall"]["median"]["matched_budget"]["trigger_count"] == 1
     assert report["overall"]["global_mean"]["macro_task_average_precision"] == 1.0
+
+
+def test_average_precision_is_invariant_to_tie_order():
+    assert average_precision([1.0, 1.0, 0.0], [True, False, False]) == 0.5
+    assert average_precision([1.0, 1.0, 0.0], [False, True, False]) == 0.5
+
+
+def test_compare_scores_includes_complete_v3_saliency():
+    rows = [
+        {
+            "task": "a",
+            "global_mean": 1.0,
+            "median": 0.5,
+            "motion_v2_score": 0.6,
+            "motion_v3_saliency_score": 0.7,
+            "high_delayed_error": True,
+        },
+        {
+            "task": "b",
+            "global_mean": 0.5,
+            "median": 0.3,
+            "motion_v2_score": 0.4,
+            "motion_v3_saliency_score": 0.2,
+            "high_delayed_error": False,
+        },
+    ]
+
+    report = compare_scores(rows)
+
+    assert "motion_v3_saliency" in report["overall"]
+
+
+def test_leave_one_task_out_threshold_does_not_use_heldout_scores():
+    def rows(heldout_scores):
+        result = []
+        for task, scores in {
+            "a": [0.9, 0.8],
+            "b": [0.7, 0.6],
+            "c": heldout_scores,
+        }.items():
+            for index, score in enumerate(scores):
+                result.append(
+                    {
+                        "task": task,
+                        "global_mean": score,
+                        "median": score,
+                        "high_delayed_error": index == 0,
+                    }
+                )
+        return result
+
+    first = compare_scores(rows([0.5, 0.4]))
+    second = compare_scores(rows([100.0, -100.0]))
+    first_fold = next(
+        fold
+        for fold in first["leave_one_task_out_threshold"]["global_mean"]["folds"]
+        if fold["task"] == "c"
+    )
+    second_fold = next(
+        fold
+        for fold in second["leave_one_task_out_threshold"]["global_mean"]["folds"]
+        if fold["task"] == "c"
+    )
+
+    assert first_fold["threshold"] == second_fold["threshold"]
+
+
+def test_task_balanced_budget_sums_to_frozen_total():
+    rows = [
+        {
+            "task": f"task_{index % 10}",
+            "global_mean": float(index),
+            "median": float(index),
+            "high_delayed_error": index % 3 == 0,
+        }
+        for index in range(100)
+    ]
+
+    report = compare_scores(rows)
+    budget = report["task_balanced_matched_budget"]["global_mean"]
+
+    assert report["target_trigger_count"] == 7
+    assert budget["trigger_count"] == 7

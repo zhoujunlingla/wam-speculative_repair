@@ -14,6 +14,7 @@ from typing import Callable, Iterable
 
 HIGH_ERROR_THRESHOLD = 0.55
 BASELINE_GATE_THRESHOLD = 1.2
+TARGET_TRIGGER_RATE = 0.067
 STRONG_TAIL_DISTANCE = 0.05
 
 
@@ -216,14 +217,20 @@ def average_precision(scores: list[float], labels: list[bool]) -> float | None:
     positive_count = sum(labels)
     if not positive_count:
         return None
-    order = sorted(range(len(scores)), key=scores.__getitem__, reverse=True)
-    hits = 0
-    precision_sum = 0.0
-    for rank, index in enumerate(order, 1):
-        if labels[index]:
-            hits += 1
-            precision_sum += hits / rank
-    return precision_sum / positive_count
+    groups: dict[float, list[bool]] = {}
+    for score, label in zip(scores, labels):
+        groups.setdefault(score, []).append(label)
+    true_positives = 0
+    false_positives = 0
+    result = 0.0
+    for score in sorted(groups, reverse=True):
+        group = groups[score]
+        group_positives = sum(group)
+        true_positives += group_positives
+        false_positives += len(group) - group_positives
+        precision = true_positives / (true_positives + false_positives)
+        result += group_positives / positive_count * precision
+    return result
 
 
 def _matched_budget_metrics(
@@ -248,7 +255,34 @@ def _score_functions(rows: list[dict]) -> dict[str, Callable[[dict], float]]:
     }
     if rows and all("motion_v2_score" in row for row in rows):
         scores["motion_v2"] = lambda row: float(row["motion_v2_score"])
+    if rows and all("motion_v3_saliency_score" in row for row in rows):
+        scores["motion_v3_saliency"] = lambda row: float(
+            row["motion_v3_saliency_score"]
+        )
     return scores
+
+
+def _allocate_task_budget(rows: list[dict], trigger_count: int) -> dict[str, int]:
+    """Allocate an integer fixed budget by task size without looking at scores."""
+
+    task_counts = Counter(row["task"] for row in rows)
+    if not task_counts or trigger_count <= 0:
+        return {task: 0 for task in task_counts}
+    trigger_count = min(trigger_count, len(rows))
+    exact = {
+        task: trigger_count * count / len(rows)
+        for task, count in task_counts.items()
+    }
+    budget = {task: math.floor(value) for task, value in exact.items()}
+    remaining = trigger_count - sum(budget.values())
+    order = sorted(
+        task_counts,
+        key=lambda task: (exact[task] - budget[task], task),
+        reverse=True,
+    )
+    for task in order[:remaining]:
+        budget[task] += 1
+    return budget
 
 
 def compare_scores(rows: list[dict]) -> dict:
@@ -256,6 +290,8 @@ def compare_scores(rows: list[dict]) -> dict:
     baseline_trigger_count = sum(
         float(row["global_mean"]) >= BASELINE_GATE_THRESHOLD for row in rows
     )
+    target_trigger_count = max(1, round(len(rows) * TARGET_TRIGGER_RATE))
+    task_budget = _allocate_task_budget(rows, target_trigger_count)
     scores = _score_functions(rows)
     overall = {}
     by_task = {}
@@ -267,7 +303,7 @@ def compare_scores(rows: list[dict]) -> dict:
             "roc_auc": roc_auc(values, labels),
             "average_precision": average_precision(values, labels),
             "matched_budget": _matched_budget_metrics(
-                rows, score, baseline_trigger_count
+                rows, score, target_trigger_count
             ),
         }
         by_task[name] = {}
@@ -297,9 +333,7 @@ def compare_scores(rows: list[dict]) -> dict:
         for task in sorted({row["task"] for row in rows}):
             train = [row for row in rows if row["task"] != task]
             heldout = [row for row in rows if row["task"] == task]
-            train_trigger_count = max(
-                1, round(len(train) * baseline_trigger_count / len(rows))
-            )
+            train_trigger_count = max(1, round(len(train) * TARGET_TRIGGER_RATE))
             train_scores = sorted((score(row) for row in train), reverse=True)
             threshold = train_scores[train_trigger_count - 1]
             selected = [score(row) >= threshold for row in heldout]
@@ -344,9 +378,7 @@ def compare_scores(rows: list[dict]) -> dict:
         task_budget_rows = []
         for task in sorted({row["task"] for row in rows}):
             heldout = [row for row in rows if row["task"] == task]
-            task_trigger_count = max(
-                1, round(len(heldout) * baseline_trigger_count / len(rows))
-            )
+            task_trigger_count = task_budget[task]
             metrics = _matched_budget_metrics(
                 heldout, score, task_trigger_count
             )
@@ -370,6 +402,9 @@ def compare_scores(rows: list[dict]) -> dict:
         "high_error_threshold": HIGH_ERROR_THRESHOLD,
         "baseline_gate_threshold": BASELINE_GATE_THRESHOLD,
         "baseline_trigger_count": baseline_trigger_count,
+        "target_trigger_rate": TARGET_TRIGGER_RATE,
+        "target_trigger_count": target_trigger_count,
+        "realized_target_trigger_rate": target_trigger_count / len(rows),
         "overall": overall,
         "within_task_ranking": by_task,
         "task_balanced_matched_budget": task_balanced_budget,

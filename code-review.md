@@ -778,3 +778,27 @@ pass.
 Decision: allowed to stop the failed B1 queues and launch uncensored shadow
 collection under new run roots. No completed experiment notification is sent
 for the partial B1 result.
+
+## Motion score held-out analysis fix (2026-07-14)
+
+### Findings
+
+No blocking issue remains. The analysis now freezes a 6.7% target budget
+independently of the legacy `global_mean >= 1.2` trigger count, derives each
+deployable threshold from training tasks only, allocates descriptive task
+budgets using task sizes rather than labels/scores, evaluates tied scores as a
+single threshold group, and includes the complete V3 saliency field.
+
+The task-balanced top-k table remains a ranking diagnostic, not a deployable
+held-out threshold. History innovation is deliberately excluded from the first
+comparison because episode-first rows lack it non-randomly.
+
+### Verification
+
+- Local `python3 -m py_compile`: passed.
+- Local direct tie/budget assertions: passed.
+- Local `git diff --check`: passed.
+- Isolated A800 focused pytest: `62 passed in 1.44s`.
+
+Decision: allowed to analyze the uncensored shadow logs after task completion.
+No online motion policy is approved by this tooling change.

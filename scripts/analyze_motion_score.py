@@ -16,6 +16,9 @@ HIGH_ERROR_THRESHOLD = 0.55
 BASELINE_GATE_THRESHOLD = 1.2
 TARGET_TRIGGER_RATE = 0.067
 STRONG_TAIL_DISTANCE = 0.05
+ACTION_PER_FRAME = 16
+FULL_DRAFT_PREFIX = 32
+ONE_SIDED_ALPHA = 0.05
 
 
 def _task_from_path(path: Path) -> str:
@@ -147,6 +150,129 @@ def audit_log(
     return rows, audit
 
 
+def audit_second_probe_log(
+    path: Path,
+    run_name: str | None = None,
+) -> tuple[list[dict], Counter]:
+    """Collect every standard K=2 proposal, including rejected proposals."""
+
+    task = _task_from_path(path)
+    run_name = run_name or (
+        path.parent.parent.name if path.parent.name == "logs" else path.parent.name
+    )
+    episode = -1
+    rows: list[dict] = []
+    audit = Counter()
+
+    with path.open(encoding="utf-8") as stream:
+        for line_number, line in enumerate(stream, 1):
+            record = json.loads(line)
+            if record.get("source") == "reset":
+                episode += 1
+                continue
+            prefixes = record.get("prefix_by_tau")
+            agreements = record.get("gripper_phase_agreement_by_tau")
+            taus = record.get("active_tau_timesteps", record.get("tau_timesteps"))
+            distances = record.get("verify_distances")
+            if taus is None:
+                if record.get("video_motion_stats") is not None:
+                    audit["excluded_missing_k2_telemetry"] += 1
+                continue
+            try:
+                taus = [float(value) for value in taus]
+            except (TypeError, ValueError):
+                audit["excluded_malformed_k2_telemetry"] += 1
+                continue
+            if taus != [50.0, 100.0]:
+                audit["excluded_nonstandard_k2_probe"] += 1
+                continue
+            audit["observed_standard_k2_proposal"] += 1
+            motion = record.get("video_motion_stats")
+            if motion is None:
+                audit["excluded_missing_motion"] += 1
+                continue
+            if prefixes is None or agreements is None or distances is None:
+                audit["excluded_missing_k2_telemetry"] += 1
+                continue
+            try:
+                prefixes = [int(value) for value in prefixes]
+                agreements = [float(value) for value in agreements]
+                all_distances = [
+                    [float(value) for frame in tau_distances for value in frame]
+                    for tau_distances in distances
+                ]
+            except (IndexError, TypeError, ValueError):
+                audit["excluded_malformed_k2_telemetry"] += 1
+                continue
+            if len(prefixes) != 2 or len(agreements) != 2 or len(all_distances) != 2:
+                audit["excluded_malformed_k2_telemetry"] += 1
+                continue
+            if any(prefix < 0 or prefix > FULL_DRAFT_PREFIX for prefix in prefixes):
+                audit["excluded_malformed_k2_telemetry"] += 1
+                continue
+            if any(not values for values in all_distances) or any(
+                not math.isfinite(value)
+                for value in (*agreements, *(v for values in all_distances for v in values))
+            ):
+                audit["excluded_malformed_k2_telemetry"] += 1
+                continue
+            try:
+                baseline_motion = [
+                    float(motion[key]) for key in ("global_mean", "median")
+                ]
+            except (KeyError, TypeError, ValueError):
+                audit["excluded_malformed_motion"] += 1
+                continue
+            if not all(math.isfinite(value) for value in baseline_motion):
+                audit["excluded_malformed_motion"] += 1
+                continue
+
+            draft_switch = record.get("draft_gripper_switch_index")
+            switches = record.get("gripper_switch_indices_by_tau")
+            if switches is None or not isinstance(switches, list) or len(switches) != 2:
+                audit["excluded_missing_phase_switch_telemetry"] += 1
+                continue
+
+            quantized = [
+                max(0, prefix) // ACTION_PER_FRAME * ACTION_PER_FRAME
+                for prefix in prefixes
+            ]
+            first_phase_stable = math.isclose(
+                agreements[0], 1.0, rel_tol=0.0, abs_tol=1e-8
+            )
+            second_phase_stable = math.isclose(
+                agreements[1], 1.0, rel_tol=0.0, abs_tol=1e-8
+            )
+            second_restricts_prefix = quantized[1] < quantized[0]
+            second_restricts_phase = first_phase_stable and not second_phase_stable
+            rows.append(
+                {
+                    "run": run_name,
+                    "task": task,
+                    "episode": episode,
+                    "round_id": record.get("round_id"),
+                    "proposal_line": line_number,
+                    "tau50_prefix": quantized[0],
+                    "tau100_prefix": quantized[1],
+                    "tau50_max_residual": max(all_distances[0]),
+                    "tau50_gripper_stable": first_phase_stable,
+                    "draft_gripper_switch_index": draft_switch,
+                    "tau50_gripper_switch_index": switches[0],
+                    "tau50_no_phase_switch": (
+                        draft_switch is None and switches[0] is None
+                    ),
+                    "second_probe_restricts_prefix": second_restricts_prefix,
+                    "second_probe_restricts_phase": second_restricts_phase,
+                    "second_probe_restricts": (
+                        second_restricts_prefix or second_restricts_phase
+                    ),
+                    **motion,
+                }
+            )
+            audit["included_k2_proposal"] += 1
+    return rows, audit
+
+
 def _region_saliency(proposal: dict) -> dict[str, float] | None:
     regions = proposal.get("motion_v2_regions")
     if not isinstance(regions, dict) or not regions:
@@ -260,6 +386,137 @@ def _score_functions(rows: list[dict]) -> dict[str, Callable[[dict], float]]:
             row["motion_v3_saliency_score"]
         )
     return scores
+
+
+def _binomial_cdf(failures: int, count: int, probability: float) -> float:
+    return sum(
+        math.comb(count, value)
+        * probability ** value
+        * (1.0 - probability) ** (count - value)
+        for value in range(failures + 1)
+    )
+
+
+def _clopper_pearson_upper(failures: int, count: int) -> float | None:
+    if count <= 0:
+        return None
+    if failures >= count:
+        return 1.0
+    low, high = 0.0, 1.0
+    for _ in range(80):
+        midpoint = (low + high) / 2.0
+        if _binomial_cdf(failures, count, midpoint) > ONE_SIDED_ALPHA:
+            low = midpoint
+        else:
+            high = midpoint
+    return high
+
+
+def _zero_miss_threshold(
+    rows: list[dict], score: Callable[[dict], float]
+) -> float | None:
+    if not rows:
+        return None
+    risky_scores = [score(row) for row in rows if row["second_probe_restricts"]]
+    if not risky_scores:
+        return None
+    return math.nextafter(min(risky_scores), -math.inf)
+
+
+def compare_second_probe_scores(rows: list[dict]) -> dict:
+    """Evaluate motion only as a veto on the strict tau-50 fast path."""
+
+    strict = [
+        row for row in rows
+        if row["tau50_prefix"] >= FULL_DRAFT_PREFIX
+        and row["tau50_max_residual"] < STRONG_TAIL_DISTANCE
+        and row["tau50_gripper_stable"]
+        and row["tau50_no_phase_switch"]
+    ]
+    scores = _score_functions(strict)
+    labels = [bool(row["second_probe_restricts"]) for row in strict]
+    result = {}
+    tasks = sorted({row["task"] for row in strict})
+    for name, score in scores.items():
+        folds = []
+        selected_total = 0
+        failures_total = 0
+        selected_episodes = set()
+        failure_episodes = set()
+        for task in tasks:
+            train = [row for row in strict if row["task"] != task]
+            heldout = [row for row in strict if row["task"] == task]
+            threshold = _zero_miss_threshold(train, score)
+            selected = (
+                [row for row in heldout if score(row) <= threshold]
+                if threshold is not None else []
+            )
+            failures = sum(row["second_probe_restricts"] for row in selected)
+            heldout_selected_episodes = {
+                (row["run"], row["task"], row["episode"]) for row in selected
+            }
+            heldout_failure_episodes = {
+                (row["run"], row["task"], row["episode"])
+                for row in selected if row["second_probe_restricts"]
+            }
+            selected_total += len(selected)
+            failures_total += failures
+            selected_episodes.update(heldout_selected_episodes)
+            failure_episodes.update(heldout_failure_episodes)
+            folds.append(
+                {
+                    "task": task,
+                    "train_count": len(train),
+                    "heldout_count": len(heldout),
+                    "threshold": threshold,
+                    "selected_count": len(selected),
+                    "coverage": len(selected) / len(heldout) if heldout else None,
+                    "failures": failures,
+                    "false_safe_rate": failures / len(selected) if selected else None,
+                    "false_safe_upper_95": _clopper_pearson_upper(
+                        failures, len(selected)
+                    ),
+                    "selected_episode_count": len(heldout_selected_episodes),
+                    "failure_episode_count": len(heldout_failure_episodes),
+                    "episode_false_safe_upper_95": _clopper_pearson_upper(
+                        len(heldout_failure_episodes),
+                        len(heldout_selected_episodes),
+                    ),
+                    "insufficient_positive_support": threshold is None,
+                }
+            )
+        result[name] = {
+            "roc_auc": roc_auc([score(row) for row in strict], labels),
+            "average_precision": average_precision(
+                [score(row) for row in strict], labels
+            ),
+            "folds": folds,
+            "selected_count": selected_total,
+            "coverage": selected_total / len(strict) if strict else 0.0,
+            "failures": failures_total,
+            "false_safe_rate": (
+                failures_total / selected_total if selected_total else None
+            ),
+            "false_safe_upper_95": _clopper_pearson_upper(
+                failures_total, selected_total
+            ),
+            "selected_episode_count": len(selected_episodes),
+            "failure_episode_count": len(failure_episodes),
+            "episode_false_safe_rate": (
+                len(failure_episodes) / len(selected_episodes)
+                if selected_episodes else None
+            ),
+            "episode_false_safe_upper_95": _clopper_pearson_upper(
+                len(failure_episodes), len(selected_episodes)
+            ),
+        }
+    return {
+        "proposal_count": len(rows),
+        "strict_tau50_count": len(strict),
+        "strict_tau50_rate": len(strict) / len(rows) if rows else 0.0,
+        "strict_tau50_second_probe_restrictions": sum(labels),
+        "scores": result,
+    }
 
 
 def _allocate_task_budget(rows: list[dict], trigger_count: int) -> dict[str, int]:
@@ -433,18 +690,29 @@ def main(argv: Iterable[str] | None = None) -> None:
     args = parser.parse_args(argv)
 
     rows: list[dict] = []
+    k2_rows: list[dict] = []
     audit = Counter()
+    k2_audit = Counter()
     per_log = []
     for path in args.logs:
         log_rows, log_audit = audit_log(
             path, verify_threshold=args.verify_threshold
         )
+        log_k2_rows, log_k2_audit = audit_second_probe_log(path)
         rows.extend(log_rows)
+        k2_rows.extend(log_k2_rows)
         audit.update(log_audit)
-        per_log.append({"path": str(path), "audit": dict(log_audit)})
+        k2_audit.update(log_k2_audit)
+        per_log.append(
+            {
+                "path": str(path),
+                "audit": dict(log_audit),
+                "second_probe_audit": dict(log_k2_audit),
+            }
+        )
 
-    if not rows:
-        raise RuntimeError("no valid executed-draft motion/error pairs")
+    if not rows and not k2_rows:
+        raise RuntimeError("no valid motion/error pairs or K2 proposals")
 
     identities = {
         (row["run"], row["task"], row["episode"], row["round_id"])
@@ -452,13 +720,22 @@ def main(argv: Iterable[str] | None = None) -> None:
     }
     if len(identities) != len(rows):
         raise RuntimeError("duplicate run/task/episode/round motion pairs")
+    k2_identities = {
+        (row["run"], row["task"], row["episode"], row["round_id"])
+        for row in k2_rows
+    }
+    if len(k2_identities) != len(k2_rows):
+        raise RuntimeError("duplicate run/task/episode/round K2 proposals")
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     write_pairs(args.output_dir / "motion_pairs.csv", rows)
+    write_pairs(args.output_dir / "motion_k2_proposals.csv", k2_rows)
     report = {
         "audit": dict(audit),
+        "second_probe_audit": dict(k2_audit),
         "per_log": per_log,
-        "comparison": compare_scores(rows),
+        "comparison": compare_scores(rows) if rows else None,
+        "second_probe_comparison": compare_second_probe_scores(k2_rows),
     }
     (args.output_dir / "motion_score_audit.json").write_text(
         json.dumps(report, indent=2), encoding="utf-8"

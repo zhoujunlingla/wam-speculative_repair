@@ -723,6 +723,35 @@ second probe changed prefix or phase. Adaptive K reduces Teacher verification
 NFE; it is reported separately from Teacher action-source. It must remain
 disabled until whole-task replay bounds the false-safe rate below 1%.
 
+The adaptive-K calibration target is not delayed video NRMSE. A separate
+offline audit includes every proposal that actually ran two verifier probes,
+including zero-prefix replans, and labels whether the second probe made the
+decision more restrictive:
+
+```text
+second_probe_restricts =
+    quantize(prefix_tau100) < quantize(prefix_tau50)
+    or (tau50 gripper agreement is complete and tau100 agreement is not)
+```
+
+This avoids survivor bias from the delayed-error pairing, which necessarily
+contains only executed draft actions with a later cache acknowledgement. The
+motion score is evaluated as a predictor of whether K=2 is needed, not as a
+direct predictor of task success. Missing or malformed per-tau telemetry is
+reported and excluded rather than guessed.
+
+The safety bound is clustered by `(run, task, episode)`: an episode is a miss
+if any proposed K=1 fast path in that episode would have been restricted by the
+second probe. The report uses an exact one-sided 95% Clopper-Pearson upper
+bound, not a proposal-level normal approximation. With zero misses, proving an
+upper bound below 1% requires at least 299 independently evaluated episodes;
+low10 x 20 alone therefore cannot authorize the final K=1 policy. The deployed
+`global_mean` is the pre-registered primary motion score. Region-aware scores
+remain exploratory until a separate task set validates a frozen choice, which
+prevents selecting and certifying a score on the same folds. A training fold
+with no observed second-probe restriction abstains instead of treating its
+entire score range as safe.
+
 The conditional tau-75 early-phase tie-break remains shadow-only. It may be
 promoted only after it safely rescues at least 35 of the historical 224 early
 conflicts, the estimated minimum needed to move Teacher action-source below

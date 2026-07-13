@@ -3,6 +3,8 @@ import json
 from scripts.analyze_motion_score import (
     average_precision,
     audit_log,
+    audit_second_probe_log,
+    compare_second_probe_scores,
     compare_scores,
 )
 
@@ -347,3 +349,154 @@ def test_task_balanced_budget_sums_to_frozen_total():
 
     assert report["target_trigger_count"] == 7
     assert budget["trigger_count"] == 7
+
+
+def test_second_probe_audit_includes_rejected_proposals(tmp_path):
+    log = tmp_path / "specverify_task.jsonl"
+    _write(
+        log,
+        [
+            {"source": "reset", "round_id": 0},
+            {
+                "source": "replan",
+                "round_id": 1,
+                "accepted_prefix": 0,
+                "active_tau_timesteps": [50, 100],
+                "prefix_by_tau": [32, 28],
+                "gripper_phase_agreement_by_tau": [1.0, 1.0],
+                "draft_gripper_switch_index": None,
+                "gripper_switch_indices_by_tau": [None, None],
+                "verify_distances": [
+                    [[0.01] * 16, [0.02] * 16],
+                    [[0.03] * 16, [0.04] * 16],
+                ],
+                "video_motion_stats": {"global_mean": 0.4, "median": 0.2},
+            },
+        ],
+    )
+
+    rows, audit = audit_second_probe_log(log, run_name="run")
+
+    assert len(rows) == 1
+    assert rows[0]["tau50_prefix"] == 32
+    assert rows[0]["tau100_prefix"] == 16
+    assert rows[0]["second_probe_restricts_prefix"] is True
+    assert rows[0]["second_probe_restricts"] is True
+    assert audit["included_k2_proposal"] == 1
+
+
+def test_second_probe_audit_detects_phase_restriction(tmp_path):
+    log = tmp_path / "specverify_task.jsonl"
+    _write(
+        log,
+        [
+            {
+                "source": "draft_flash",
+                "round_id": 1,
+                "active_tau_timesteps": [50, 100],
+                "prefix_by_tau": [32, 32],
+                "gripper_phase_agreement_by_tau": [1.0, 0.75],
+                "draft_gripper_switch_index": None,
+                "gripper_switch_indices_by_tau": [None, 8],
+                "verify_distances": [
+                    [[0.01] * 16, [0.02] * 16],
+                    [[0.03] * 16, [0.04] * 16],
+                ],
+                "video_motion_stats": {"global_mean": 0.4, "median": 0.2},
+            }
+        ],
+    )
+
+    rows, _ = audit_second_probe_log(log)
+
+    assert rows[0]["second_probe_restricts_prefix"] is False
+    assert rows[0]["second_probe_restricts_phase"] is True
+    assert rows[0]["second_probe_restricts"] is True
+
+
+def test_second_probe_audit_excludes_missing_and_nonstandard_telemetry(tmp_path):
+    log = tmp_path / "specverify_task.jsonl"
+    base = {
+        "source": "draft_flash",
+        "prefix_by_tau": [32, 32],
+        "gripper_phase_agreement_by_tau": [1.0, 1.0],
+        "draft_gripper_switch_index": None,
+        "gripper_switch_indices_by_tau": [None, None],
+        "verify_distances": [
+            [[0.01] * 16, [0.02] * 16],
+            [[0.03] * 16, [0.04] * 16],
+        ],
+        "video_motion_stats": {"global_mean": 0.4, "median": 0.2},
+    }
+    _write(
+        log,
+        [
+            {**base, "round_id": 1},
+            {**base, "round_id": 2, "active_tau_timesteps": [150, 300]},
+        ],
+    )
+
+    rows, audit = audit_second_probe_log(log)
+
+    assert rows == []
+    assert audit["excluded_missing_k2_telemetry"] == 1
+    assert audit["excluded_nonstandard_k2_probe"] == 1
+
+
+def test_second_probe_comparison_uses_task_heldout_zero_miss_threshold():
+    def row(task, motion, restricts):
+        return {
+            "task": task,
+            "tau50_prefix": 32,
+            "tau50_max_residual": 0.01,
+            "tau50_gripper_stable": True,
+            "tau50_no_phase_switch": True,
+            "second_probe_restricts": restricts,
+            "run": "run",
+            "episode": 0 if task == "a" else 1,
+            "global_mean": motion,
+            "median": motion,
+        }
+
+    rows = [
+        row("a", 0.1, False),
+        row("a", 0.8, True),
+        row("b", 0.2, False),
+        row("b", 0.8, True),
+    ]
+
+    report = compare_second_probe_scores(rows)
+    score = report["scores"]["global_mean"]
+
+    assert report["proposal_count"] == 4
+    assert report["strict_tau50_count"] == 4
+    assert score["selected_count"] == 2
+    assert score["failures"] == 0
+    assert score["coverage"] == 0.5
+    assert score["false_safe_upper_95"] is not None
+
+
+def test_second_probe_comparison_abstains_without_training_positive():
+    rows = [
+        {
+            "task": task,
+            "run": "run",
+            "episode": index,
+            "tau50_prefix": 32,
+            "tau50_max_residual": 0.01,
+            "tau50_gripper_stable": True,
+            "tau50_no_phase_switch": True,
+            "second_probe_restricts": False,
+            "global_mean": 0.1,
+            "median": 0.1,
+        }
+        for index, task in enumerate(("a", "b"))
+    ]
+
+    report = compare_second_probe_scores(rows)
+
+    assert report["scores"]["global_mean"]["selected_count"] == 0
+    assert all(
+        fold["insufficient_positive_support"]
+        for fold in report["scores"]["global_mean"]["folds"]
+    )

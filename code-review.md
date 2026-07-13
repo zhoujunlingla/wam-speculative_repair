@@ -855,3 +855,42 @@ does not affect the active uncensored shadow runs.
 Decision: implementation is approved for a dedicated smoke after the
 uncensored shadow freezes the motion rule. It is not yet evidence that live
 deferral preserves Low10 success.
+
+## 2026-07-14: Adaptive-K offline audit
+
+Risk level: low for runtime behavior, medium for statistical interpretation.
+The change is offline-only and cannot alter actions, caches, model RNG, or
+Teacher scheduling.
+
+Findings fixed before approval:
+
+1. Proposal rounds within one episode are correlated. The safety report now
+   clusters misses by `(run, task, episode)` and uses an exact one-sided 95%
+   Clopper-Pearson upper bound.
+2. A training fold with no second-probe restriction previously implied no
+   observed boundary. It now abstains instead of selecting all held-out rows.
+3. Full gripper agreement with the draft does not imply no phase transition.
+   The strict tau50 fast-path audit now requires both draft and tau50
+   reconstruction switch indices to be absent.
+4. Missing motion and malformed/nonstandard K2 telemetry are explicit audit
+   counters. Duplicate run/task/episode/round identities fail closed.
+5. The K2 audit can run without delayed-error pairs, so rejected proposals do
+   not depend on the executed-draft survivor set.
+
+Checks run:
+
+```text
+python3 -m py_compile scripts/analyze_motion_score.py \
+  tests/test_analyze_motion_score.py
+git diff --check
+python3 -m pytest -q \
+  tests/test_realtime_flash_policy.py \
+  tests/test_run_realtime_flash_task.py \
+  tests/test_specverify.py \
+  tests/test_analyze_motion_score.py
+70 passed
+```
+
+Decision: allowed to proceed as offline/shadow analysis only. Adaptive K is not
+approved online until a frozen rule has enough independent episode coverage;
+with zero misses, an exact upper bound below 1% requires at least 299 episodes.

@@ -329,3 +329,29 @@ fully shadow-only and preserves the action verifier's prefix.
 Verification: local diff/compile passed; isolated A800 focused tests passed
 `65/65`. No active shadow process was changed. Live evaluation remains gated on
 the complete uncensored Motion V3 analysis.
+
+### Adaptive-K second-probe audit (2026-07-14)
+
+- Added a separate audit over every standard `tau={50,100}` K=2 proposal,
+  including zero-prefix replans. The label is whether tau100 quantizes to a
+  shorter prefix or introduces a gripper disagreement absent at tau50; delayed
+  video NRMSE and episode success are not used as labels.
+- Code review fixed three optimistic failure modes before using the result:
+  proposal-level independence, folds with no risky training examples, and
+  treating gripper agreement as equivalent to no phase transition. Safety is
+  now clustered by episode with an exact one-sided Clopper-Pearson bound, empty
+  evidence abstains, and the K=1 candidate requires no draft/tau50 phase switch.
+- A partial read-only audit over the completed/active uncensored shards found
+  `1082` K=2 proposals. Only `185` passed the strict tau50 certificate, and
+  tau100 restricted one of those. The frozen `global_mean` leave-one-task-out
+  rule selected `105/185 = 56.8%` with zero observed proposal misses, but those
+  covered only 34 episodes; the exact episode-level upper bound is still
+  `8.43%`. This is useful compute-saving signal but is not enough evidence to
+  enable adaptive K.
+- Region-aware scores did not improve this partial adaptive-K target:
+  `motion_v2` covered `48.1%` and `motion_v3` `42.2%`, both with weaker average
+  precision than `global_mean`. They remain exploratory shadow telemetry.
+
+Verification: isolated A800 review copy passed `70/70` focused tests; local
+Python compilation and `git diff --check` passed. No online routing or active
+experiment was changed.

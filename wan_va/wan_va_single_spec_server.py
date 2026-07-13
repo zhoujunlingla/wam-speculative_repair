@@ -85,6 +85,7 @@ def build_policy(args: argparse.Namespace):
         delayed_error_consecutive=args.delayed_error_consecutive,
         delayed_error_teacher_rounds=args.delayed_error_teacher_rounds,
         video_motion_gate_threshold=args.video_motion_gate_threshold,
+        motion_selective_verify=args.motion_selective_verify,
         gripper_full_window=args.gripper_full_window,
         gripper_consensus=args.gripper_consensus,
         repair_shadow=args.repair_shadow,
@@ -130,6 +131,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--delayed-error-consecutive", type=int, default=2)
     parser.add_argument("--delayed-error-teacher-rounds", type=int, default=2)
     parser.add_argument("--video-motion-gate-threshold", type=float, default=0.0)
+    parser.add_argument("--motion-selective-verify", action="store_true")
     parser.add_argument("--gripper-full-window", type=int, default=1)
     parser.add_argument("--gripper-consensus", action="store_true")
     parser.add_argument("--repair-shadow", action="store_true")

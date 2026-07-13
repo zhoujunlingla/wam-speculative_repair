@@ -97,6 +97,13 @@ def read_metric(run_root: Path, task: str) -> dict:
 def source_summary(path: Path) -> dict:
     counts: dict[str, int] = {}
     latencies: dict[str, list[float]] = {}
+    verify_k_counts: dict[str, int] = {}
+    motion = {
+        "high_proposals": 0,
+        "high_accepts": 0,
+        "high_rejects": 0,
+        "high_prefix_caps": 0,
+    }
     if path.exists():
         for line in path.read_text(errors="replace").splitlines():
             try:
@@ -107,6 +114,18 @@ def source_summary(path: Path) -> dict:
             counts[source] = counts.get(source, 0) + 1
             if row.get("elapsed_sec") is not None:
                 latencies.setdefault(source, []).append(float(row["elapsed_sec"]))
+            active_tau = row.get("active_tau_timesteps")
+            if active_tau:
+                key = str(len(active_tau))
+                verify_k_counts[key] = verify_k_counts.get(key, 0) + 1
+            if row.get("high_video_motion") is True:
+                motion["high_proposals"] += 1
+                if source == "draft_flash":
+                    motion["high_accepts"] += 1
+                elif source == "replan":
+                    motion["high_rejects"] += 1
+                if row.get("motion_prefix_cap_applied") is True:
+                    motion["high_prefix_caps"] += 1
     stats = {}
     for source, values in latencies.items():
         values.sort()
@@ -116,10 +135,16 @@ def source_summary(path: Path) -> dict:
             "p90_sec": values[round((len(values) - 1) * 0.9)],
         }
     action_total = counts.get("teacher_full", 0) + counts.get("draft_flash", 0)
+    motion["high_accept_rate"] = (
+        motion["high_accepts"] / motion["high_proposals"]
+        if motion["high_proposals"] else None
+    )
     return {
         "counts": counts,
         "latency": stats,
         "teacher_action_rate": counts.get("teacher_full", 0) / action_total if action_total else None,
+        "verify_k_counts": verify_k_counts,
+        "motion_selective": motion,
     }
 
 
@@ -145,6 +170,7 @@ def main() -> None:
     parser.add_argument("--delayed-error-consecutive", type=int, default=2)
     parser.add_argument("--delayed-error-teacher-rounds", type=int, default=2)
     parser.add_argument("--video-motion-gate-threshold", type=float, default=0.0)
+    parser.add_argument("--motion-selective-verify", action="store_true")
     parser.add_argument("--gripper-full-window", type=int, default=1)
     parser.add_argument("--gripper-consensus", action="store_true")
     parser.add_argument("--repair-shadow", action="store_true")
@@ -189,6 +215,8 @@ def main() -> None:
     ]
     if args.gripper_consensus:
         server_cmd.append("--gripper-consensus")
+    if args.motion_selective_verify:
+        server_cmd.append("--motion-selective-verify")
     if args.repair_shadow:
         server_cmd.append("--repair-shadow")
     server_cmd.extend([
@@ -273,6 +301,7 @@ def main() -> None:
         "delayed_error_consecutive": args.delayed_error_consecutive,
         "delayed_error_teacher_rounds": args.delayed_error_teacher_rounds,
         "video_motion_gate_threshold": args.video_motion_gate_threshold,
+        "motion_selective_verify": args.motion_selective_verify,
         "gripper_full_window": args.gripper_full_window,
         "gripper_consensus": args.gripper_consensus,
         "repair_shadow": args.repair_shadow,

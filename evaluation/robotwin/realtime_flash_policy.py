@@ -204,6 +204,7 @@ class RealtimeFlashPolicy:
         delayed_error_consecutive: int = 2,
         delayed_error_teacher_rounds: int = 2,
         video_motion_gate_threshold: float = 0.0,
+        motion_selective_verify: bool = False,
         gripper_full_window: int = 1,
         gripper_consensus: bool = False,
         repair_shadow: bool = False,
@@ -236,6 +237,10 @@ class RealtimeFlashPolicy:
             raise ValueError("delayed-error recovery values must be positive")
         if not np.isfinite(video_motion_gate_threshold) or video_motion_gate_threshold < 0:
             raise ValueError("video_motion_gate_threshold must be non-negative")
+        if motion_selective_verify and video_motion_gate_threshold <= 0:
+            raise ValueError(
+                "motion selective verification requires a positive motion gate threshold"
+            )
         if gripper_full_window < 1:
             raise ValueError("gripper_full_window must be positive")
         if not np.isfinite(repair_strength) or not 0 <= repair_strength <= 1:
@@ -251,6 +256,8 @@ class RealtimeFlashPolicy:
             raise ValueError("tau_timesteps must be non-empty")
         if gripper_consensus and len(tau_timesteps) < 2:
             raise ValueError("gripper consensus requires at least two tau probes")
+        if motion_selective_verify and len(tau_timesteps) != 2:
+            raise ValueError("motion selective verification requires exactly two tau probes")
 
         self.draft = draft
         self.teacher = teacher
@@ -270,6 +277,7 @@ class RealtimeFlashPolicy:
         self.delayed_error_consecutive = int(delayed_error_consecutive)
         self.delayed_error_teacher_rounds = int(delayed_error_teacher_rounds)
         self.video_motion_gate_threshold = float(video_motion_gate_threshold)
+        self.motion_selective_verify = bool(motion_selective_verify)
         self.gripper_full_window = int(gripper_full_window)
         self.gripper_consensus = bool(gripper_consensus)
         self.repair_shadow = bool(repair_shadow)
@@ -591,36 +599,57 @@ class RealtimeFlashPolicy:
         action_latent = np.asarray(action_latent)
         video_motion_stats = draft_response.get("video_motion_stats")
         horizon = action.shape[1] * action.shape[2]
+        switch_step = first_gripper_switch(
+            action,
+            self.gripper_channels,
+            self.gripper_threshold,
+            previous=self.last_gripper,
+        )
 
         global_motion = None
-        if self.video_motion_gate_threshold > 0 or self.flow_budget_motion_ceiling > 0:
+        if (
+            self.video_motion_gate_threshold > 0
+            or self.flow_budget_motion_ceiling > 0
+            or self.motion_selective_verify
+        ):
             if video_motion_stats is None or "global_mean" not in video_motion_stats:
                 raise RuntimeError("motion-aware routing requires draft global_mean")
             global_motion = float(video_motion_stats["global_mean"])
             if not np.isfinite(global_motion):
                 raise ValueError("draft global video motion must be finite")
-        if self.video_motion_gate_threshold > 0:
-            if global_motion >= self.video_motion_gate_threshold:
-                self.force_full_reason = "video_motion_risk"
-                self.last_source = "replan"
-                self.round_id += 1
-                response = {
-                    "replan": True,
-                    "action_source": self.last_source,
-                    "fallback_reason": self.force_full_reason,
-                    "accepted_prefix": 0,
-                    "verified_prefix": None,
-                }
-                self._log(
-                    source=self.last_source,
-                    fallback_reason=self.force_full_reason,
-                    accepted_prefix=0,
-                    verified_prefix=None,
-                    video_motion_stats=video_motion_stats,
-                    video_motion_gate_threshold=self.video_motion_gate_threshold,
-                    elapsed_sec=time.perf_counter() - start,
-                )
-                return response
+        high_video_motion = bool(
+            self.video_motion_gate_threshold > 0
+            and global_motion >= self.video_motion_gate_threshold
+        )
+        if high_video_motion and not self.motion_selective_verify:
+            self.force_full_reason = "video_motion_risk"
+            self.last_source = "replan"
+            self.round_id += 1
+            response = {
+                "replan": True,
+                "action_source": self.last_source,
+                "fallback_reason": self.force_full_reason,
+                "accepted_prefix": 0,
+                "verified_prefix": None,
+            }
+            self._log(
+                source=self.last_source,
+                fallback_reason=self.force_full_reason,
+                accepted_prefix=0,
+                verified_prefix=None,
+                video_motion_stats=video_motion_stats,
+                video_motion_gate_threshold=self.video_motion_gate_threshold,
+                elapsed_sec=time.perf_counter() - start,
+            )
+            return response
+
+        motion_risk_level = (
+            "high" if high_video_motion and self.motion_selective_verify
+            else "normal" if self.motion_selective_verify
+            else "disabled"
+        )
+        active_tau_timesteps = self.tau_timesteps
+        active_gripper_consensus = self.gripper_consensus
 
         verify_request = dict(request)
         verify_request.update(
@@ -628,9 +657,9 @@ class RealtimeFlashPolicy:
             action_latent=action_latent,
             verify_noise=self.rng.standard_normal(action_latent.shape).astype(np.float32),
             threshold=self.threshold,
-            tau_timesteps=self.tau_timesteps,
+            tau_timesteps=active_tau_timesteps,
             frame_st_id=self.frame_st_id,
-            gripper_consensus=self.gripper_consensus,
+            gripper_consensus=active_gripper_consensus,
         )
         if self.last_gripper is not None:
             previous_phase = self.last_gripper >= self.gripper_threshold
@@ -639,6 +668,7 @@ class RealtimeFlashPolicy:
             ).astype(np.float32)
         verify_response = self._call(self.teacher, verify_request)
         verified_prefix = self._accepted_prefix(action_latent, verify_response, horizon)
+        raw_verified_prefix = verified_prefix
         verify_distances = verify_response.get("distances")
         if verify_distances is not None:
             verify_distances = np.asarray(verify_distances).tolist()
@@ -656,6 +686,9 @@ class RealtimeFlashPolicy:
                 "draft_gripper_switch_index"
             ),
             "video_motion_stats": video_motion_stats,
+            "motion_risk_level": motion_risk_level,
+            "active_tau_timesteps": list(active_tau_timesteps),
+            "active_gripper_consensus": active_gripper_consensus,
             "gripper_consensus_prefix": verify_response.get(
                 "gripper_consensus_prefix"
             ),
@@ -673,23 +706,17 @@ class RealtimeFlashPolicy:
         if (
             teacher_gripper_switch
             and self.teacher_gripper_fallback
-            and not self.gripper_consensus
+            and not active_gripper_consensus
         ):
             verified_prefix = 0
             self.force_full_reason = "teacher_gripper_switch"
             self.gripper_full_rounds_left = self.gripper_full_window
 
-        switch_step = first_gripper_switch(
-            action,
-            self.gripper_channels,
-            self.gripper_threshold,
-            previous=self.last_gripper,
-        )
         accepted_prefix = verified_prefix
         if (
             switch_step is not None
             and verified_prefix > 0
-            and not self.gripper_consensus
+            and not active_gripper_consensus
         ):
             accepted_prefix = min(
                 accepted_prefix,
@@ -697,9 +724,22 @@ class RealtimeFlashPolicy:
             )
             self.force_full_reason = "gripper_switch"
             self.gripper_full_rounds_left = self.gripper_full_window
-        if self.gripper_consensus and gripper_consensus_failure is not None:
+        if active_gripper_consensus and gripper_consensus_failure is not None:
             self.force_full_reason = "gripper_consensus"
             self.gripper_full_rounds_left = self.gripper_full_window
+
+        accepted_prefix_before_motion_cap = accepted_prefix
+        motion_prefix_cap_applied = False
+        if high_video_motion and self.motion_selective_verify and accepted_prefix > 0:
+            accepted_prefix = min(accepted_prefix, self.action_per_frame)
+            motion_prefix_cap_applied = accepted_prefix < accepted_prefix_before_motion_cap
+        verify_telemetry.update(
+            high_video_motion=high_video_motion,
+            raw_verified_prefix=raw_verified_prefix,
+            accepted_prefix_before_motion_cap=accepted_prefix_before_motion_cap,
+            motion_prefix_cap_applied=motion_prefix_cap_applied,
+            motion_high_prefix_cap=self.action_per_frame,
+        )
 
         repair_shadow = None
         repair_shadow_eligible = bool(
@@ -781,12 +821,12 @@ class RealtimeFlashPolicy:
             "accepted_prefix": accepted_prefix,
             "verified_prefix": verified_prefix,
         }
-        if gripper_consensus_failure is not None:
+        if active_gripper_consensus and gripper_consensus_failure is not None:
             response.update(
                 fallback_reason="gripper_consensus",
                 gripper_consensus_failure_index=gripper_consensus_failure,
             )
-        elif switch_step is not None and not self.gripper_consensus:
+        elif switch_step is not None and not active_gripper_consensus:
             response.update(
                 fallback_reason="gripper_switch",
                 gripper_switch_step=switch_step,

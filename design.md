@@ -426,6 +426,54 @@ Because TN=3 task outcomes have varied substantially across identical controls,
 the next decision uses four tasks x 10 trials with the motion-only policy. No
 additional router or verifier change is stacked into that run.
 
+### Motion-conditioned selective verification
+
+The completed low10 x 20 motion/gripper run reached `146/200 = 73.0%`, but
+teacher actions still accounted for `728/3366 = 21.63%`. The full-action
+reasons were initial anchor `200`, video motion `109`, gripper consensus `304`,
+zero prefix `90`, and periodic refresh `25`. Therefore threshold relaxation
+alone cannot reach the latency goal: the hard motion gate can save at most
+`109/3366 = 3.24` percentage points, while every accepted low-risk round still
+pays both action probes.
+
+The next policy changes the *use* of motion rather than inventing a new score.
+`global_mean` remains the only routing signal because it has completed online
+evidence; regional `motion_v2` remains shadow-only until it has a matched
+task-held-out calibration. Motion allocates verifier compute and executable
+horizon:
+
+```text
+normal: global_mean < 1.2
+        -> verify tau={50,100} with unchanged min-over-K acceptance
+high:   global_mean >= 1.2
+        -> verify tau={50,100}; if accepted, execute at most 16 actions;
+           if prefix is zero, replan the same observation with teacher
+```
+
+The high-motion branch no longer treats motion magnitude as proof that an
+action is wrong. It asks the existing teacher action verifier first, then uses
+one action/video frame as a receding-horizon safety cap. Initial teacher
+anchoring, zero-prefix fallback, gripper consensus semantics, teacher-cache
+replay, and PF=20 remain unchanged in the first matched run.
+
+The existing K=2 logs reject an immediate low-motion K=1 optimization. Among
+1306 rounds with `global_mean < 0.5`, no decoded draft gripper switch, and a
+full tau-50 prefix, 49 (`3.75%`) were rejected by tau-100 or cross-tau gripper
+consensus; `hanging_mug` reached `18/130 = 13.85%`. K=1 therefore remains out
+of the live policy. It may be reconsidered only with an additional calibrated
+risk signal that reduces the task-held-out miss rate below 1%.
+
+The feature is opt-in and requires exactly two tau probes. The high-motion cap
+is fixed to one `action_per_frame` unit rather than exposed as a tunable CLI
+value. With the feature disabled, `video_motion_gate_threshold` retains the
+previous hard-fallback behavior byte-for-byte. Telemetry must include the
+motion risk level, active tau list, raw verified prefix, gripper-adjusted
+pre-cap prefix, and whether the high-motion cap changed the executed prefix.
+Promotion requires low10 x 20
+success no worse than `73.0%` by more than sampling uncertainty, fewer teacher
+actions than `21.63%`, and lower model-forward latency than the hard-gate run.
+Repair remains disabled until this gate passes.
+
 ## Cross-Tau Gripper Consensus
 
 The original migration applies two independent phase fallbacks: the server

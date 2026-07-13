@@ -4,6 +4,7 @@ from pathlib import Path
 import sys
 
 import numpy as np
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -799,6 +800,101 @@ def test_video_motion_gate_default_off_still_verifies():
 
     assert response["action_source"] == "draft_flash"
     assert [call for call in teacher.calls if call["kind"] == "verify"]
+
+
+def test_motion_selective_verify_keeps_two_probes_for_normal_motion():
+    events = []
+    draft = _FakeModel("draft", events, video_motion_global=0.8)
+    teacher = _FakeModel("teacher", events)
+    policy = RealtimeFlashPolicy(
+        draft,
+        teacher,
+        pf_interval=20,
+        tau_timesteps=(50.0, 100.0),
+        video_motion_gate_threshold=1.2,
+        motion_selective_verify=True,
+        gripper_consensus=True,
+        rng=np.random.default_rng(7),
+    )
+    policy.infer({"reset": True, "prompt": "test task"})
+    initial = policy.infer(_action_request())
+    policy.infer(_cache_request("anchor", initial["action"]))
+
+    response = policy.infer(_action_request())
+
+    verify = [call for call in teacher.calls if call["kind"] == "verify"][-1]
+    assert tuple(verify["request"]["tau_timesteps"]) == (50.0, 100.0)
+    assert verify["request"]["gripper_consensus"] is True
+    assert response["accepted_prefix"] == 32
+
+
+def test_motion_selective_verify_caps_accepted_high_motion_prefix(tmp_path):
+    events = []
+    draft = _FakeModel("draft", events, video_motion_global=1.3)
+    teacher = _FakeModel("teacher", events)
+    log_path = tmp_path / "metrics.jsonl"
+    policy = RealtimeFlashPolicy(
+        draft,
+        teacher,
+        pf_interval=20,
+        tau_timesteps=(50.0, 100.0),
+        video_motion_gate_threshold=1.2,
+        motion_selective_verify=True,
+        log_path=log_path,
+        rng=np.random.default_rng(7),
+    )
+    policy.infer({"reset": True, "prompt": "test task"})
+    initial = policy.infer(_action_request())
+    policy.infer(_cache_request("anchor", initial["action"]))
+
+    response = policy.infer(_action_request())
+    policy.infer(_cache_request("high-motion", response["action"]))
+
+    verify = [call for call in teacher.calls if call["kind"] == "verify"][-1]
+    record = json.loads(log_path.read_text().splitlines()[-2])
+    assert tuple(verify["request"]["tau_timesteps"]) == (50.0, 100.0)
+    assert response["action_source"] == "draft_flash"
+    assert response["accepted_prefix"] == 16
+    assert record["motion_risk_level"] == "high"
+    assert record["raw_verified_prefix"] == 32
+    assert record["accepted_prefix_before_motion_cap"] == 32
+    assert record["motion_prefix_cap_applied"] is True
+    assert draft.cache[-1] == "high-motion"
+
+
+def test_motion_selective_verify_replans_high_motion_zero_prefix():
+    events = []
+    draft = _FakeModel("draft", events, video_motion_global=1.3)
+    teacher = _FakeModel("teacher", events, verify_results=(0,))
+    policy = RealtimeFlashPolicy(
+        draft,
+        teacher,
+        pf_interval=20,
+        tau_timesteps=(50.0, 100.0),
+        video_motion_gate_threshold=1.2,
+        motion_selective_verify=True,
+        rng=np.random.default_rng(7),
+    )
+    policy.infer({"reset": True, "prompt": "test task"})
+    initial = policy.infer(_action_request())
+    policy.infer(_cache_request("anchor", initial["action"]))
+
+    response = infer_with_replan(policy, _action_request())
+
+    assert response["action_source"] == "teacher_full"
+    assert response["full_reason"] == "zero_prefix"
+    assert [call for call in teacher.calls if call["kind"] == "verify"]
+
+
+def test_motion_selective_verify_requires_exactly_two_tau_probes():
+    with pytest.raises(ValueError, match="exactly two tau probes"):
+        RealtimeFlashPolicy(
+            _FakeModel("draft", []),
+            _FakeModel("teacher", []),
+            tau_timesteps=(50.0,),
+            video_motion_gate_threshold=1.2,
+            motion_selective_verify=True,
+        )
 
 
 def test_zero_prefix_replans_same_observation_without_cache_update():

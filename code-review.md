@@ -491,3 +491,44 @@ replan, and absence of pending cache state. A real-model smoke reached
 Decision: allowed to run a four-task TN=5 counterfactual audit. Do not enable
 execution unless independent holdout prefix recovery has useful episode-level
 predictive value.
+
+## Motion-Conditioned Selective Verification Review
+
+Scope: replace the high-video-motion hard Teacher fallback with the existing
+two-probe action verifier. A verified high-motion chunk may execute at most one
+16-action observation interval; a zero prefix still replans the same
+observation with Teacher. Normal-motion verification, initial Teacher anchor,
+PF=20, gripper consensus, cache replay, and repair behavior are unchanged.
+
+The independent review initially found three contract gaps, all fixed before
+benchmark launch:
+
+1. Selective mode now requires exactly two tau probes; it cannot silently run
+   an uncalibrated K=1 or K>2 policy.
+2. The high-motion cap is fixed to `action_per_frame`, rather than exposed as
+   another experiment hyperparameter.
+3. Telemetry separates the raw continuous verifier prefix, the gripper-adjusted
+   prefix before the motion cap, and the final executed prefix. Run summaries
+   aggregate K counts, high-motion proposals, accepts, rejects, and cap events.
+
+The proposed low-motion K=1 optimization is explicitly rejected. Frozen logs
+contain 1306 low-motion rounds that passed tau 50 without a decoded gripper
+switch; 49 (3.75%) were rejected by tau 100 or cross-tau phase consensus, and
+`hanging_mug` missed 18/130 (13.85%). Reducing K would therefore trade away
+task quality instead of safely reducing Teacher use.
+
+Verification:
+
+- Remote focused suite: `44 passed`.
+- Local Python compilation and `git diff --check`: passed.
+- Real-model smoke reached `Render Well`, completed cache updates, and entered
+  repeated K=2 action verification without shape, reset, or cache-state errors.
+  Formal success/latency evidence still comes from the matched low10 x 20 run.
+
+Risk is medium and experimental rather than structural. Motion magnitude does
+not certify correctness; the verifier remains the sole accept/reject signal,
+and the 16-step cap limits high-motion open-loop exposure. Promotion requires
+success statistically compatible with the 73.0% hard-gate baseline, Teacher
+action-source below 21.63%, and lower model-forward latency.
+
+Decision: allowed to proceed to one matched low10 x 20 run with repair disabled.

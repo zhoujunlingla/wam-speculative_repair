@@ -432,3 +432,25 @@ Verification: remote focused suite `37 passed`; local `py_compile` and
 Decision: allowed to run four-task TN=3 with immediate motion threshold 1.2,
 flow threshold 0.4, low-motion ceiling 0.5, no delayed recovery/burst, PF20,
 K=2 endpoint verification, and gripper consensus.
+
+## Repair Counterfactual Shadow Review
+
+Scope: shadow-only bounded endpoint repair for pure continuous zero-prefix
+rejections. It must not alter the executed action, fallback decision, primary
+verifier RNG, or cache state.
+
+No blocking correctness finding remains after finite-value validation was
+added. The mean endpoint can overfit the primary probe, so it is evaluated only
+with an independent Gaussian holdout from a dedicated RNG. Continuous endpoint
+agreement cannot certify contact; motion, gripper, phase, and refresh fallbacks
+are therefore ineligible, and repair remains non-executable.
+
+Verification: local `py_compile` and `git diff --check` passed. The A800 focused
+suite passed `39/39`, covering continuous-prefix-only modification, exact
+gripper/suffix preservation, RMS clipping, independent noise, unchanged
+replan, and absence of pending cache state. A real-model smoke reached
+`Render Well` without OOM or cache mutation.
+
+Decision: allowed to run a four-task TN=5 counterfactual audit. Do not enable
+execution unless independent holdout prefix recovery has useful episode-level
+predictive value.

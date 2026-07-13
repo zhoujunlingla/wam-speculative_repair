@@ -9,6 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from evaluation.robotwin.realtime_flash_policy import (
     RealtimeFlashPolicy,
+    bounded_endpoint_repair,
     first_gripper_switch,
     infer_with_replan,
     longest_safe_prefix,
@@ -141,6 +142,25 @@ def test_normalized_l2_excludes_grippers_and_prefix_uses_every_k():
     assert distances[0].max() == 0.0
     assert np.isclose(distances[1, 20], 1.0)
     assert longest_safe_prefix(distances, threshold=0.5) == 16
+
+
+def test_bounded_endpoint_repair_changes_only_continuous_prefix():
+    draft = np.zeros((1, 30, 2, 16, 1), dtype=np.float32)
+    endpoint = np.ones_like(draft)
+    draft[:, 28:30] = -1.0
+
+    candidate, max_rms = bounded_endpoint_repair(
+        draft,
+        endpoint,
+        prefix_len=16,
+        strength=1.0,
+        max_step_rms=0.1,
+    )
+
+    assert np.isclose(max_rms, 0.1)
+    assert np.allclose(candidate[:, :14, 0], 0.1)
+    assert np.array_equal(candidate[:, :14, 1], draft[:, :14, 1])
+    assert np.array_equal(candidate[:, 14:], draft[:, 14:])
 
 
 def test_gripper_switch_finds_first_transition_not_only_endpoints():
@@ -803,6 +823,54 @@ def test_zero_prefix_replans_same_observation_without_cache_update():
     assert draft.cache == ["anchor"]
     assert teacher.cache == ["anchor"]
     assert not policy.pending_teacher_cache_updates
+
+
+def test_zero_prefix_shadow_repair_uses_holdout_and_still_replans(tmp_path):
+    events = []
+    draft = _FakeModel("draft", events)
+    endpoint = np.zeros((1, 30, 2, 16, 1), dtype=np.float32)
+    endpoint[:, :14, 0] = 0.2
+    teacher = _FakeModel(
+        "teacher",
+        events,
+        verify_results=(
+            {
+                "accepted_prefix": 0,
+                "teacher_endpoint_latent": endpoint,
+                "continuous_channels": list(range(14)),
+            },
+            {"accepted_prefix": 16, "prefix_by_tau": [16, 16]},
+        ),
+    )
+    log_path = tmp_path / "metrics.jsonl"
+    policy = RealtimeFlashPolicy(
+        draft,
+        teacher,
+        pf_interval=20,
+        repair_shadow=True,
+        rng=np.random.default_rng(7),
+        repair_rng=np.random.default_rng(8),
+        log_path=log_path,
+    )
+    policy.infer({"reset": True, "prompt": "test task"})
+    initial = policy.infer(_action_request())
+    policy.infer(_cache_request("anchor", initial["action"]))
+
+    response = policy.infer(_action_request())
+
+    verifies = [call for call in teacher.calls if call["kind"] == "verify"]
+    record = json.loads(log_path.read_text().splitlines()[-1])
+    assert response["replan"] is True
+    assert response["fallback_reason"] == "zero_prefix"
+    assert len(verifies) == 2
+    assert not np.array_equal(
+        verifies[0]["request"]["verify_noise"],
+        verifies[1]["request"]["verify_noise"],
+    )
+    assert record["repair_shadow_eligible"] is True
+    assert record["repair_shadow_holdout_prefix"] == 16
+    assert record["repair_shadow_correction_max_rms"] <= 0.15
+    assert policy.pending_cache_source is None
 
 
 def test_direct_response_is_not_retried():

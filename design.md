@@ -15,6 +15,33 @@ The first experiment contains no repair, risk router, world verifier, or
 Verify++ signal. The verifier is useful only if matched four-task success is
 better than direct draft and close to direct teacher.
 
+## Repair Counterfactual Audit
+
+The promoted four-task configuration reached `24/40`, versus matched draft
+`21/40` and teacher `23/40`, with `17.67%` teacher action rounds. Repair is not
+allowed to execute yet: 18 of the 20 zero-prefix events occurred in failed
+episodes, and earlier endpoint-repair variants often passed a reused verifier
+probe without improving task success.
+
+The first repair experiment is therefore shadow-only. It runs only for a pure
+continuous zero-prefix rejection, never for video-motion, gripper, phase, or
+periodic-refresh fallbacks. It:
+
+1. moves only the first 16 steps of the 14 continuous action-latent channels
+   toward the mean teacher endpoint returned by the primary verifier;
+2. freezes both gripper channels and the remaining 16-step suffix;
+3. caps the per-step correction norm;
+4. reverifies with an independent Gaussian probe from a dedicated repair RNG;
+5. logs the original and holdout prefixes, correction norm, and eligibility;
+6. still executes the existing teacher fallback regardless of the shadow
+   result.
+
+This is a counterfactual audit, not a claimed rescue mechanism. Execution may
+be enabled only in a later change if the holdout prefix reaches at least 16,
+the candidate remains phase-safe, and accepted shadow candidates correlate
+with episode recovery. The dedicated RNG is required so enabling shadow mode
+does not alter the primary verifier noise stream or baseline actions.
+
 ## Runtime State Machine
 
 1. Reset both model caches and all speculative state.

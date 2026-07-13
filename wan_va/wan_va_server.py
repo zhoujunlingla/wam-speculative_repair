@@ -990,7 +990,9 @@ class VA_Server:
                 result['action_latent'] = self.last_action_latent
             if obs.get('return_video_motion_stats', False):
                 result['video_motion_stats'] = latent_frame_motion_stats(
-                    video_latent)
+                    video_latent,
+                    layout=('robotwin_tshape'
+                            if self.env_type == 'robotwin_tshape' else None))
             return result
     
     def decode_one_video(self, latents, output_type):

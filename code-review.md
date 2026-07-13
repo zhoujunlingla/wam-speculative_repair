@@ -433,6 +433,43 @@ Decision: allowed to run four-task TN=3 with immediate motion threshold 1.2,
 flow threshold 0.4, low-motion ceiling 0.5, no delayed recovery/burst, PF20,
 K=2 endpoint verification, and gripper consensus.
 
+## Motion-Score E0-E3 Review
+
+No blocking correctness finding remains for audit or shadow telemetry.
+
+- Pairing is tied to the policy state machine: only an executed positive draft
+  prefix can open a pair, and only its same-round cache acknowledgement can
+  close it. Frame-count alignment prevents a delayed label from being assigned
+  to the wrong action horizon.
+- The analysis never randomly splits rounds. It reports task-wise rankings,
+  task-balanced matched-budget metrics, and thresholds calibrated with one
+  whole task held out.
+- Existing `global_mean`, `median`, and top-patch fields are unchanged. The new
+  RoboTwin score is emitted only as telemetry and has no policy caller, CLI
+  flag, threshold, or action-side effect.
+- The T-shaped split matches the encoder layout: wrist cameras occupy the top
+  third split across width and the head camera occupies the lower two thirds.
+  Each region is normalized by its own latent RMS before robust median and
+  entropy statistics are computed.
+
+Residual risks: region-wise RMS normalization can amplify a nearly empty
+camera region, and `max(region)` may be sensitive to one noisy camera. These
+are acceptable only in shadow mode; E3 must reject the score if its matched
+precision, AUPRC, or task-held-out behavior is worse than `global_mean`.
+Current historical logs do not contain motion-v2, so they cannot be used to
+claim an improvement.
+
+Verification: `git diff --check` and Python compilation passed locally. The
+A800 focused suite passed `41/41`, covering audit pairing, frame mismatch,
+matched trigger budgets, regional motion telemetry, verifier behavior, and
+policy state transitions. Replaying the frozen logs produced 276/276 aligned
+pairs and 20 explicit unexecuted exclusions.
+
+Decision: E0/E1 evidence may be recorded; motion-v2 may proceed to E3 shadow
+collection only. It is not allowed to route or alter teacher usage. E2 must
+compare motion off versus `global_mean >= 1.2` on one matched low10 x 20
+manifest before any causal benefit is claimed.
+
 ## Repair Counterfactual Shadow Review
 
 Scope: shadow-only bounded endpoint repair for pure continuous zero-prefix

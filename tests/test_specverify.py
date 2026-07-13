@@ -56,6 +56,26 @@ def test_latent_frame_motion_stats_detects_concentrated_change():
     assert stats["top_relative"] > 1.0
 
 
+def test_latent_frame_motion_stats_robotwin_regions():
+    latents = torch.zeros((1, 4, 2, 6, 4), dtype=torch.float32)
+    latents[:, :, 1, :2, :2] = 1.0
+    latents[:, :, 1, :2, 2:] = 2.0
+    latents[:, :, 1, 2:, :] = 0.5
+
+    stats = latent_frame_motion_stats(latents, layout="robotwin_tshape")
+
+    assert set(stats["motion_v2_regions"]) == {
+        "left_wrist",
+        "right_wrist",
+        "head",
+    }
+    assert stats["motion_v2_score"] >= 0
+    assert all(
+        region["dense_median"] > 0
+        for region in stats["motion_v2_regions"].values()
+    )
+
+
 def test_latent_prediction_error_aligns_available_frames():
     predicted = torch.zeros(1, 4, 2, 2, 2)
     observed = torch.ones(1, 4, 1, 2, 2)

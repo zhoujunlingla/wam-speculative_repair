@@ -170,3 +170,31 @@ teacher quality with materially lower teacher use.
 - The feature remains default-off for future analysis, but it is not promoted.
   Four-task TN=10 now evaluates the motion-only policy before any further
   routing or adaptive-K change.
+
+### Motion-score E0/E1 audit
+
+- The frozen pairing rule now includes only a `draft_flash` action with a
+  positive executed prefix whose same-round `flash_cache_update` contains a
+  delayed-error label and exactly `ceil(prefix / 16)` acknowledged frames.
+  Replans and unexecuted proposals are excluded.
+- Replaying the two source runs produces 276 valid pairs, not 268: 276 executed
+  proposals all have aligned acknowledgements, 20 unexecuted/replan proposals
+  are excluded, and no executed proposal is missing its cache update. The old
+  268 count is not reproducible and is retired as a bookkeeping error.
+- With `latent_nrmse > 0.55` as the frozen label, there are 55 positives. At
+  the existing 18/276 (6.52%) trigger budget, `global_mean` reaches AUPRC
+  0.632, precision 15/18 = 83.3%, recall 27.3%; `median` reaches AUPRC 0.656,
+  precision 14/18 = 77.8%, recall 25.5%.
+- Task-balanced selection reduces both scores to 10/18 = 55.6% precision, and
+  leave-one-task-out thresholds produce different trigger rates across tasks.
+  The apparent aggregate separation is therefore task-confounded. The current
+  `global_mean >= 1.2` remains the causal E2 baseline, but the offline audit
+  alone does not prove that motion routing improves success.
+- Equal-weight macro task AUPRC is 0.495 for `global_mean` and 0.509 for
+  `median`. This small ranking gain does not offset median's lower matched-rate
+  precision and is not enough to replace the deployed baseline.
+- `motion-v2` is now shadow-only telemetry. It splits the RoboTwin T-shaped
+  latent into head/left-wrist/right-wrist regions and scores the largest
+  region-wise product of normalized median patch motion and spatial entropy.
+  It cannot affect routing until complete low10 telemetry beats global mean at
+  the same trigger budget.

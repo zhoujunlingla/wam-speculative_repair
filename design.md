@@ -266,6 +266,44 @@ precision-contact gripper rounds and ordinary gripper rounds before it may
 select `gripper_full_window=2`. It does not change action acceptance, budget,
 teacher use, or repair.
 
+### Motion-score evidence protocol
+
+Motion routing is promoted only after four separate gates. E0 audits every
+motion/delayed-error pair and includes a row only when the draft proposal was
+actually executed and its next acknowledged draft cache update carries the
+matching delayed prediction label. Replans, teacher actions, unmatched labels,
+and overwritten proposals are retained in the audit report with an exclusion
+reason. The frozen E0 table is the only input to E1.
+
+E1 compares `global_mean`, `median`, and a structured motion score with task as
+the outer holdout unit; rounds from the same task are never split randomly.
+Scores are compared at the same 6.7% trigger budget using AUPRC, precision, and
+recall. The structured score remains shadow-only unless its held-out precision
+and AUPRC improve over `global_mean`.
+
+The structured score uses the RoboTwin T-shaped latent layout rather than
+flattening all cameras. For each head, left-wrist, and right-wrist region it
+computes latent-energy-normalized adjacent-frame patch motion, its median,
+95th percentile, and normalized spatial entropy. The candidate risk is a
+monotone calibration of dense and spatially diffuse motion:
+
+`motion_v2 = max_region(median(normalized_patch_motion) * spatial_entropy)`.
+
+The maximum keeps a risky wrist or head camera from being averaged away.
+Localized motion remains diagnostic rather than automatically risky because
+prior telemetry shows that `top_relative` and `top_concentration` do not
+positively predict delayed error. This formula is shadow telemetry, not a
+routing threshold; its scale and calibration are decided only after E3.
+
+E2 is a matched low10 x 20 comparison between motion disabled and the frozen
+`global_mean >= 1.2` gate. Checkpoints, episode manifest, verifier, refresh,
+and gripper settings remain identical. Promotion requires a positive paired
+success 95% confidence lower bound, teacher action-source no greater than 15%,
+combined replan-plus-teacher latency no more than 10% above control, and no
+task losing at least 3/20 net successes. E3 initially logs the structured score
+without changing actions and can route only after passing E1 and a fresh
+matched online comparison.
+
 ## WAM Shadow Signal: Delayed Video Prediction Error
 
 Raw motion measures how much the imagined video changes, not whether that

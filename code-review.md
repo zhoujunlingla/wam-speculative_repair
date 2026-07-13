@@ -643,3 +643,28 @@ No blocking correctness finding remains after review.
 
 Decision: allowed to proceed to an exclusive-GPU speed smoke. It is not yet
 approved as formal v1/a2, v2/a4, or speculative throughput evidence.
+
+## Motion Gate V3 Budget Evidence Review (2026-07-14)
+
+### Findings
+
+No code finding. This documentation change records a read-only replay of the
+completed hard-gate low10 x 20 logs: 305 gripper disagreements split into 224
+failures before action 16 and 81 at or after action 16.
+
+Risk is low because no runtime behavior, threshold, model call, or experiment
+command changes. The projected Teacher savings are explicitly fixed-denominator
+estimates and cannot be reported as an achieved online rate. The design keeps
+motion from overriding a continuous zero prefix and treats `tau=75` only as a
+conditional phase tie-break.
+
+### Verification
+
+- Inspected `git diff -- design.md`.
+- Replayed all ten `specverify_*.jsonl` files under
+  `20260713_130446_rtflash_gripfallback_low10_tn20`: 305 total, 224 early,
+  81 late. Every early row is a zero-prefix replan and every late row executes
+  a 16-action draft prefix.
+
+Decision: allowed to proceed to shadow design only. No online gripper policy
+is approved from this documentation evidence alone.

@@ -537,6 +537,43 @@ and AUPRC over `global_mean`, followed by a matched closed-loop low10 x 20 run.
 Motion never overrides a continuous zero prefix or a discrete gripper-phase
 disagreement.
 
+### Motion Gate V3 teacher-budget feasibility
+
+The completed hard-gate low10 x 20 logs contain 305 cross-tau gripper
+disagreements.  Of these, 224 occur before action 16 and quantize to a zero
+prefix, while 81 occur at or after action 16 and already execute a verified
+16-action prefix.  The current policy nevertheless schedules a Teacher round
+after every disagreement.  Avoiding only these 81 delayed Teacher rounds would
+save roughly `81 / 3366 = 2.41` percentage points of Teacher action source.
+Together with the maximum `3.24` points attributable to the hard motion gate,
+the projected rate is still about `15.98%`; motion and late-prefix deferral
+alone therefore cannot meet the `<15%` target.
+
+V3 consequently has two separate responsibilities:
+
+1. world-motion features choose whether an already verified chunk executes 16
+   or 32 actions; they never turn a failed action verification into a pass;
+2. only a `tau=50/100` gripper disagreement may request a conditional
+   `tau=75` tie-break.  A rescued proposal executes at most 16 actions, and a
+   continuous zero prefix remains a Teacher fallback.
+
+The first online-safe gripper change is to stop scheduling a Teacher round
+after a disagreement at or beyond action 16; the policy executes the verified
+16 actions and replans from the new observation.  Early disagreements remain
+unchanged until shadow telemetry shows that a three-probe phase majority can
+rescue at least 35 of the historical 224 early conflicts without task-level
+regression.  This is the minimum extra coverage needed to cross the fixed-
+denominator 15% budget after motion and late-prefix savings.  The engineering
+target is 45% rescue of all gripper disagreements to leave margin for denominator
+and closed-loop changes.
+
+The conditional probe uses the same Gaussian noise as `tau=50/100`; it is a
+flow-timestep tie-break, not an independent correctness certificate.  It
+compares the discrete gripper phase at every one of the first 16 actions and
+requires a two-of-three phase majority matching the draft.  It must not average
+continuous gripper values or accept merely because switch indices are close.
+Independent noise is reserved for the later repair holdout verifier.
+
 ### Model-only latency profiling
 
 Closed-loop wall time is not the speed metric for the motion-gate comparison:

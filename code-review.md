@@ -406,3 +406,29 @@ verification, PF20, and gripper consensus are unchanged.
 Decision: allowed to run the same four-task TN=3 pilot. Compare both success
 and teacher action-source against motion-only (`8/12`, 14.57%) and delayed-
 route (`8/12`, 28.77%).
+
+## Motion-Conditioned Flow Budget Review
+
+The first independent review found one P1 transactional bug: invalid or missing
+motion telemetry was checked after `pending_cache_source="flash"` and flash age
+had been committed, so an exception could leave the policy waiting for a cache
+acknowledgement for an action never returned. Motion telemetry validation was
+moved before every policy-state mutation. A regression test now proves that a
+NaN raises without changing round id, pending source, or flash age, and that the
+same request can be retried after valid telemetry is restored.
+
+After the fix, no blocking finding remains:
+
+- low motion retains and accumulates the raw verifier charge;
+- motion above the ceiling clears historical budget and charges zero;
+- the immediate motion gate still runs first and teacher full resets all budget;
+- ceiling zero preserves the previous cumulative-budget behavior;
+- raw/effective charge and reset decisions are logged separately;
+- CLI forwarding and run-summary recording are complete.
+
+Verification: remote focused suite `37 passed`; local `py_compile` and
+`git diff --check` passed.
+
+Decision: allowed to run four-task TN=3 with immediate motion threshold 1.2,
+flow threshold 0.4, low-motion ceiling 0.5, no delayed recovery/burst, PF20,
+K=2 endpoint verification, and gripper consensus.

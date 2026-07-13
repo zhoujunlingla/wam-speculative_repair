@@ -150,3 +150,13 @@ teacher quality with materially lower teacher use.
   `hanging_mug`, while `open_microwave` needs low-motion cumulative refresh.
 - The next no-code configuration combines motion threshold 1.2 with a 0.18
   single flow refresh. Delayed recovery and repeated flow bursts remain off.
+
+### Ungated hybrid rejection
+
+- Combining motion threshold 1.2 with an unconditional 0.18 flow budget
+  regressed to `6/12 = 50.0%` and raised teacher action-source to 22.73%.
+- Its 23 flow-budget refreshes did not improve `open_microwave` and reduced
+  `hanging_mug`/`turn_switch` relative to motion-only. More teacher calls are
+  not monotonically safer when refresh timing changes the closed-loop policy.
+- Offline replay supports a regime-conditioned budget instead: reset whenever
+  global motion exceeds 0.5 and use threshold 0.4 during sustained low motion.

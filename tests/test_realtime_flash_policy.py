@@ -277,6 +277,85 @@ def test_cumulative_flow_budget_triggers_next_full_and_resets():
     assert policy.flow_error_budget == 0.0
 
 
+def test_flow_budget_accumulates_only_during_sustained_low_motion(tmp_path):
+    distances = np.full((2, 2, 16), 0.1, dtype=np.float32)
+    events = []
+    draft = _FakeModel("draft", events, video_motion_global=0.4)
+    teacher = _FakeModel(
+        "teacher",
+        events,
+        verify_results=tuple(
+            {"accepted_prefix": 32, "distances": distances} for _ in range(4)
+        ),
+    )
+    log_path = tmp_path / "metrics.jsonl"
+    policy = RealtimeFlashPolicy(
+        draft,
+        teacher,
+        pf_interval=0,
+        flow_budget_threshold=0.15,
+        flow_budget_motion_ceiling=0.5,
+        log_path=log_path,
+        rng=np.random.default_rng(7),
+    )
+    policy.infer({"reset": True, "prompt": "test task"})
+    initial = policy.infer(_action_request())
+    policy.infer(_cache_request("anchor", initial["action"]))
+
+    flash_1 = policy.infer(_action_request())
+    policy.infer(_cache_request("low-1", flash_1["action"]))
+    assert np.isclose(policy.flow_error_budget, 0.1)
+
+    draft.video_motion_global = 0.7
+    flash_2 = policy.infer(_action_request())
+    policy.infer(_cache_request("high-reset", flash_2["action"]))
+    assert policy.flow_error_budget == 0.0
+
+    draft.video_motion_global = 0.4
+    for tag in ("low-2", "low-3"):
+        flash = policy.infer(_action_request())
+        policy.infer(_cache_request(tag, flash["action"]))
+    full = policy.infer(_action_request())
+
+    flash_records = [
+        json.loads(line)
+        for line in log_path.read_text().splitlines()
+        if json.loads(line).get("source") == "draft_flash"
+    ]
+    assert flash_records[1]["flow_budget_motion_reset"] is True
+    assert flash_records[1]["flow_budget_charge"] == 0.0
+    assert full["full_reason"] == "flow_budget"
+
+
+def test_invalid_motion_telemetry_does_not_commit_flash_state():
+    events = []
+    draft = _FakeModel("draft", events, video_motion_global=np.nan)
+    teacher = _FakeModel("teacher", events)
+    policy = RealtimeFlashPolicy(
+        draft,
+        teacher,
+        pf_interval=0,
+        flow_budget_threshold=0.4,
+        flow_budget_motion_ceiling=0.5,
+        rng=np.random.default_rng(7),
+    )
+    policy.infer({"reset": True, "prompt": "test task"})
+    initial = policy.infer(_action_request())
+    policy.infer(_cache_request("anchor", initial["action"]))
+    round_id = policy.round_id
+
+    with np.testing.assert_raises(ValueError):
+        policy.infer(_action_request())
+
+    assert policy.pending_cache_source is None
+    assert policy.flash_rounds_since_full == 0
+    assert policy.round_id == round_id
+
+    draft.video_motion_global = 0.4
+    response = policy.infer(_action_request())
+    assert response["action_source"] == "draft_flash"
+
+
 def test_second_flow_budget_refresh_runs_two_teacher_rounds():
     distances = np.full((2, 2, 16), 0.04, dtype=np.float32)
     events = []

@@ -154,6 +154,7 @@ class RealtimeFlashPolicy:
         flow_budget_burst_after: int = 0,
         flow_budget_burst_rounds: int = 0,
         flow_budget_burst_limit: int = 0,
+        flow_budget_motion_ceiling: float = 0.0,
         delayed_error_threshold: float = 0.0,
         delayed_error_consecutive: int = 2,
         delayed_error_teacher_rounds: int = 2,
@@ -177,6 +178,8 @@ class RealtimeFlashPolicy:
             or flow_budget_burst_limit < 0
         ):
             raise ValueError("flow budget burst values must be non-negative")
+        if not np.isfinite(flow_budget_motion_ceiling) or flow_budget_motion_ceiling < 0:
+            raise ValueError("flow_budget_motion_ceiling must be non-negative")
         if not np.isfinite(delayed_error_threshold) or delayed_error_threshold < 0:
             raise ValueError("delayed_error_threshold must be non-negative")
         if delayed_error_consecutive < 1 or delayed_error_teacher_rounds < 1:
@@ -204,6 +207,7 @@ class RealtimeFlashPolicy:
         self.flow_budget_burst_after = int(flow_budget_burst_after)
         self.flow_budget_burst_rounds = int(flow_budget_burst_rounds)
         self.flow_budget_burst_limit = int(flow_budget_burst_limit)
+        self.flow_budget_motion_ceiling = float(flow_budget_motion_ceiling)
         self.delayed_error_threshold = float(delayed_error_threshold)
         self.delayed_error_consecutive = int(delayed_error_consecutive)
         self.delayed_error_teacher_rounds = int(delayed_error_teacher_rounds)
@@ -476,12 +480,14 @@ class RealtimeFlashPolicy:
         video_motion_stats = draft_response.get("video_motion_stats")
         horizon = action.shape[1] * action.shape[2]
 
-        if self.video_motion_gate_threshold > 0:
+        global_motion = None
+        if self.video_motion_gate_threshold > 0 or self.flow_budget_motion_ceiling > 0:
             if video_motion_stats is None or "global_mean" not in video_motion_stats:
-                raise RuntimeError("video motion gate requires draft global_mean")
+                raise RuntimeError("motion-aware routing requires draft global_mean")
             global_motion = float(video_motion_stats["global_mean"])
             if not np.isfinite(global_motion):
                 raise ValueError("draft global video motion must be finite")
+        if self.video_motion_gate_threshold > 0:
             if global_motion >= self.video_motion_gate_threshold:
                 self.force_full_reason = "video_motion_risk"
                 self.last_source = "replan"
@@ -609,9 +615,16 @@ class RealtimeFlashPolicy:
         self.pending_cache_source = "flash"
         self.last_source = "draft_flash"
         self.flash_rounds_since_full += 1
-        flow_budget_charge = self._flow_budget_charge(
+        flow_budget_charge_raw = self._flow_budget_charge(
             verify_response.get("distances"), accepted_prefix
         )
+        flow_budget_charge = flow_budget_charge_raw
+        flow_budget_motion_reset = False
+        if self.flow_budget_motion_ceiling > 0:
+            if global_motion > self.flow_budget_motion_ceiling:
+                self.flow_error_budget = 0.0
+                flow_budget_charge = 0.0
+                flow_budget_motion_reset = True
         self.flow_error_budget += flow_budget_charge
         if (
             self.force_full_reason is None
@@ -657,6 +670,9 @@ class RealtimeFlashPolicy:
             teacher_gripper_switch=teacher_gripper_switch,
             decoded_gripper_switch_step=switch_step,
             flow_budget_charge=flow_budget_charge,
+            flow_budget_charge_raw=flow_budget_charge_raw,
+            flow_budget_motion_ceiling=self.flow_budget_motion_ceiling,
+            flow_budget_motion_reset=flow_budget_motion_reset,
             flow_error_budget=self.flow_error_budget,
             flow_budget_refresh_count=self.flow_budget_refresh_count,
             teacher_burst_rounds_left=self.teacher_burst_rounds_left,

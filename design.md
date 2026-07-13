@@ -332,6 +332,29 @@ with a 0.18 single-round flow refresh. Delayed recovery and flow bursts remain
 off. This is a configuration composition of two already-tested signals; it
 requires no code change.
 
+That ungated composition regressed to `6/12` and raised teacher use to 22.73%.
+Twenty-three blind flow refreshes interfered with successful high-motion
+trajectories without improving `open_microwave`. Flow discrepancy must only
+accumulate inside a persistent low-motion regime.
+
+Offline replay of the motion-only run resets the flow budget whenever global
+motion exceeds 0.5. With threshold 0.4, it predicts zero refreshes in both
+successful `hanging_mug` episodes, one in the failed hanging episode, two to
+four per `open_microwave` episode, and zero in all `place_can_basket` and
+`turn_switch` episodes. The next policy therefore uses:
+
+```text
+if global_video_motion > 0.5:
+    flow_budget = 0
+else:
+    flow_budget += executed_action_flow_residual
+    if flow_budget >= 0.4:
+        schedule one teacher refresh
+```
+
+The immediate motion gate at 1.2 remains unchanged. The low-motion ceiling is
+disabled at zero and does not change the existing flow-budget default.
+
 ## Cross-Tau Gripper Consensus
 
 The original migration applies two independent phase fallbacks: the server

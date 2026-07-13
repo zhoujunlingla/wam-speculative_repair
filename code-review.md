@@ -598,3 +598,48 @@ No blocking correctness finding after review.
 
 Decision: allowed to proceed as shadow telemetry only. Online routing remains
 locked until whole-task holdout calibration and a matched Low10 x 20 run pass.
+
+## Model-Only Latency Profiling Review (2026-07-14)
+
+### Findings
+
+No blocking correctness finding remains after review.
+
+- The profiler is opt-in. With `profile_model_time` disabled, no CUDA event,
+  synchronization, response telemetry, or routing behavior is added.
+- Timings cover only model-side VAE encode, video/action DiT generation,
+  teacher action verification, and video/action cache-transformer forwards.
+  RPC, client, rendering, environment stepping, JSON, and queue time are not
+  included in `model_timing_ms`.
+- Speculative aggregation retains failed draft/replan cost, teacher cache
+  replay, repair holdout verification, initial draft priming, and teacher
+  generation. Role-prefixed keys prevent draft, verifier, and cache work from
+  being conflated.
+- The initial Teacher response reports 16 executed low-level actions rather
+  than the generated 32 because the RoboTwin client skips the conditioned
+  first frame. Later full chunks report 32. This closes the original action-Hz
+  overcount.
+- VAE camera inputs are transferred and encoded sequentially. The temporary
+  high-camera CUDA tensor is explicitly released before wrist-camera transfer,
+  preserving the default peak-memory behavior.
+
+### Residual Risk
+
+- CUDA-event timing and action Hz still require an exclusive-GPU real-model
+  smoke. Shared-GPU results are diagnostic only and cannot support a benchmark
+  claim.
+- The direct-only adapter is covered by the same response schema but not by a
+  dedicated unit test; the exclusive-GPU smoke must verify first-round 16 and
+  later-round 32 executed-action accounting.
+
+### Verification
+
+- Local `git diff --check`: passed.
+- Local `python3 -m py_compile`: passed for implementation and focused tests.
+- Isolated A800 review root:
+  `/mnt/afs/intern/manlichen/ivan/zhoujunl/tmp/model_profile_review`.
+- `/usr/bin/python -m pytest -q tests/test_realtime_flash_policy.py tests/test_run_realtime_flash_task.py tests/test_specverify.py tests/test_analyze_motion_score.py`
+  -> `54 passed in 1.35s`.
+
+Decision: allowed to proceed to an exclusive-GPU speed smoke. It is not yet
+approved as formal v1/a2, v2/a4, or speculative throughput evidence.

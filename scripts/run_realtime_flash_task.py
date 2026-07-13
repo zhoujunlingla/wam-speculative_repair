@@ -97,6 +97,9 @@ def read_metric(run_root: Path, task: str) -> dict:
 def source_summary(path: Path) -> dict:
     counts: dict[str, int] = {}
     latencies: dict[str, list[float]] = {}
+    model_components_ms: dict[str, float] = {}
+    model_forward_counts: dict[str, int] = {}
+    executed_action_steps = 0
     verify_k_counts: dict[str, int] = {}
     motion = {
         "high_proposals": 0,
@@ -114,6 +117,15 @@ def source_summary(path: Path) -> dict:
             counts[source] = counts.get(source, 0) + 1
             if row.get("elapsed_sec") is not None:
                 latencies.setdefault(source, []).append(float(row["elapsed_sec"]))
+            for name, value in row.get("model_timing_ms", {}).items():
+                model_components_ms[name] = (
+                    model_components_ms.get(name, 0.0) + float(value)
+                )
+            for name, value in row.get("model_forward_counts", {}).items():
+                model_forward_counts[name] = (
+                    model_forward_counts.get(name, 0) + int(value)
+                )
+            executed_action_steps += int(row.get("executed_action_steps", 0))
             active_tau = row.get("active_tau_timesteps")
             if active_tau:
                 key = str(len(active_tau))
@@ -139,12 +151,23 @@ def source_summary(path: Path) -> dict:
         motion["high_accepts"] / motion["high_proposals"]
         if motion["high_proposals"] else None
     )
+    model_only_total_ms = sum(model_components_ms.values())
     return {
         "counts": counts,
         "latency": stats,
         "teacher_action_rate": counts.get("teacher_full", 0) / action_total if action_total else None,
         "verify_k_counts": verify_k_counts,
         "motion_selective": motion,
+        "model_only": {
+            "total_ms": model_only_total_ms,
+            "executed_action_steps": executed_action_steps,
+            "action_hz": (
+                1000.0 * executed_action_steps / model_only_total_ms
+                if model_only_total_ms > 0 else None
+            ),
+            "components_ms": model_components_ms,
+            "forward_counts": model_forward_counts,
+        },
     }
 
 
@@ -177,6 +200,7 @@ def main() -> None:
     parser.add_argument("--repair-strength", type=float, default=0.5)
     parser.add_argument("--repair-max-step-rms", type=float, default=0.15)
     parser.add_argument("--repair-prefix-len", type=int, default=16)
+    parser.add_argument("--profile-model-only", action="store_true")
     parser.add_argument(
         "--teacher-gripper-fallback",
         action=argparse.BooleanOptionalAction,
@@ -219,6 +243,8 @@ def main() -> None:
         server_cmd.append("--motion-selective-verify")
     if args.repair_shadow:
         server_cmd.append("--repair-shadow")
+    if args.profile_model_only:
+        server_cmd.append("--profile-model-only")
     server_cmd.extend([
         "--repair-strength", str(args.repair_strength),
         "--repair-max-step-rms", str(args.repair_max_step_rms),

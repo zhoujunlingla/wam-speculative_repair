@@ -211,6 +211,7 @@ class RealtimeFlashPolicy:
         repair_strength: float = 0.5,
         repair_max_step_rms: float = 0.15,
         repair_prefix_len: int = 16,
+        profile_model_only: bool = False,
         rng: Optional[np.random.Generator] = None,
         repair_rng: Optional[np.random.Generator] = None,
         log_path: Optional[str] = None,
@@ -284,6 +285,7 @@ class RealtimeFlashPolicy:
         self.repair_strength = float(repair_strength)
         self.repair_max_step_rms = float(repair_max_step_rms)
         self.repair_prefix_len = int(repair_prefix_len)
+        self.profile_model_only = bool(profile_model_only)
         self.rng = rng or np.random.default_rng()
         self.repair_rng = repair_rng or np.random.default_rng()
         self.log_path = Path(log_path) if log_path else None
@@ -313,10 +315,22 @@ class RealtimeFlashPolicy:
         self._draft_primed = False
 
     def _call(self, model, request: dict) -> dict:
+        if self.profile_model_only:
+            request = dict(request)
+            request["profile_model_time"] = True
         response = model.infer(request)
         if not isinstance(response, dict):
             raise TypeError("model inference must return a dict")
         return response
+
+    @staticmethod
+    def _merge_model_profile(timing, counts, response, role) -> None:
+        for name, value in response.get("model_timing_ms", {}).items():
+            key = f"{role}.{name}"
+            timing[key] = timing.get(key, 0.0) + float(value)
+        for name, value in response.get("model_forward_counts", {}).items():
+            key = f"{role}.{name}"
+            counts[key] = counts.get(key, 0) + int(value)
 
     def _log(self, **record) -> None:
         if not self.log_path:
@@ -374,14 +388,19 @@ class RealtimeFlashPolicy:
             return "periodic"
         return None
 
-    def _replay_teacher_updates(self) -> int:
+    def _replay_teacher_updates(self) -> tuple[int, dict, dict]:
         replayed = 0
+        timing = {}
+        counts = {}
         while self.pending_teacher_cache_updates:
             request = self.pending_teacher_cache_updates[0]
-            self._call(self.teacher, request)
+            response = self._call(self.teacher, request)
+            self._merge_model_profile(
+                timing, counts, response, "teacher_cache_replay"
+            )
             self.pending_teacher_cache_updates.popleft()
             replayed += 1
-        return replayed
+        return replayed, timing, counts
 
     def _reset(self, request: dict) -> dict:
         start = time.perf_counter()
@@ -401,8 +420,19 @@ class RealtimeFlashPolicy:
         draft_request = dict(request)
         draft_request["compare_video_prediction"] = source == "flash"
         draft_response = self._call(self.draft, draft_request)
+        model_timing_ms = {}
+        model_forward_counts = {}
+        self._merge_model_profile(
+            model_timing_ms, model_forward_counts, draft_response, "draft_cache"
+        )
         if source == "full":
-            self._call(self.teacher, dict(request))
+            teacher_response = self._call(self.teacher, dict(request))
+            self._merge_model_profile(
+                model_timing_ms,
+                model_forward_counts,
+                teacher_response,
+                "teacher_cache",
+            )
         else:
             self.pending_teacher_cache_updates.append(dict(request))
 
@@ -444,6 +474,9 @@ class RealtimeFlashPolicy:
             delayed_error_triggered=delayed_error_triggered,
             delayed_error_trigger_count=self.delayed_error_trigger_count,
             delayed_error_teacher_rounds_left=self.delayed_error_teacher_rounds_left,
+            model_timing_ms=model_timing_ms,
+            model_forward_counts=model_forward_counts,
+            executed_action_steps=0,
             elapsed_sec=time.perf_counter() - start,
         )
         return {}
@@ -451,16 +484,33 @@ class RealtimeFlashPolicy:
     def _full(self, request: dict, reason: str) -> dict:
         start = time.perf_counter()
         flow_error_budget = self.flow_error_budget
-        replayed = self._replay_teacher_updates()
+        replayed, model_timing_ms, model_forward_counts = \
+            self._replay_teacher_updates()
         if not self._draft_primed:
             prime_request = dict(request)
             prime_request["prime_only"] = True
-            self._call(self.draft, prime_request)
+            prime_response = self._call(self.draft, prime_request)
+            self._merge_model_profile(
+                model_timing_ms,
+                model_forward_counts,
+                prime_response,
+                "draft_prime",
+            )
             self._draft_primed = True
 
         teacher_response = self._call(self.teacher, dict(request))
+        self._merge_model_profile(
+            model_timing_ms,
+            model_forward_counts,
+            teacher_response,
+            "teacher_generation",
+        )
         action = self._action(teacher_response)
         horizon = action.shape[1] * action.shape[2]
+        executed_action_steps = (
+            horizon - self.action_per_frame
+            if self.frame_st_id == 0 else horizon
+        )
         self.pending_cache_source = "full"
         self._stage_gripper(action)
         self.last_source = "teacher_full"
@@ -489,6 +539,9 @@ class RealtimeFlashPolicy:
             accepted_prefix=horizon,
             replayed_teacher_cache_updates=replayed,
             flow_error_budget_before_reset=flow_error_budget,
+            model_timing_ms=model_timing_ms,
+            model_forward_counts=model_forward_counts,
+            executed_action_steps=executed_action_steps,
             elapsed_sec=time.perf_counter() - start,
         )
         return response
@@ -582,6 +635,12 @@ class RealtimeFlashPolicy:
             "repair_shadow_gripper_force_teacher": bool(
                 holdout.get("gripper_force_teacher", False)
             ),
+            "repair_shadow_model_timing_ms": holdout.get(
+                "model_timing_ms", {}
+            ),
+            "repair_shadow_model_forward_counts": holdout.get(
+                "model_forward_counts", {}
+            ),
         }
 
     def _flash(self, request: dict) -> dict:
@@ -591,6 +650,14 @@ class RealtimeFlashPolicy:
         draft_request["return_video_motion_stats"] = True
         draft_request["track_video_prediction"] = True
         draft_response = self._call(self.draft, draft_request)
+        model_timing_ms = {}
+        model_forward_counts = {}
+        self._merge_model_profile(
+            model_timing_ms,
+            model_forward_counts,
+            draft_response,
+            "draft_generation",
+        )
         self._draft_primed = True
         action = self._action(draft_response)
         action_latent = draft_response.get("action_latent")
@@ -639,6 +706,9 @@ class RealtimeFlashPolicy:
                 verified_prefix=None,
                 video_motion_stats=video_motion_stats,
                 video_motion_gate_threshold=self.video_motion_gate_threshold,
+                model_timing_ms=model_timing_ms,
+                model_forward_counts=model_forward_counts,
+                executed_action_steps=0,
                 elapsed_sec=time.perf_counter() - start,
             )
             return response
@@ -667,6 +737,12 @@ class RealtimeFlashPolicy:
                 previous_phase, 1.0, -1.0
             ).astype(np.float32)
         verify_response = self._call(self.teacher, verify_request)
+        self._merge_model_profile(
+            model_timing_ms,
+            model_forward_counts,
+            verify_response,
+            "teacher_verify_primary",
+        )
         verified_prefix = self._accepted_prefix(action_latent, verify_response, horizon)
         raw_verified_prefix = verified_prefix
         verify_distances = verify_response.get("distances")
@@ -755,6 +831,20 @@ class RealtimeFlashPolicy:
             repair_shadow = self._shadow_repair_probe(
                 request, action_latent, verify_response, horizon
             )
+            repair_timing = {
+                "model_timing_ms": repair_shadow.pop(
+                    "repair_shadow_model_timing_ms", {}
+                ),
+                "model_forward_counts": repair_shadow.pop(
+                    "repair_shadow_model_forward_counts", {}
+                ),
+            }
+            self._merge_model_profile(
+                model_timing_ms,
+                model_forward_counts,
+                repair_timing,
+                "teacher_verify_repair_holdout",
+            )
 
         self.round_id += 1
         if accepted_prefix == 0:
@@ -778,6 +868,9 @@ class RealtimeFlashPolicy:
                 repair_shadow_eligible=repair_shadow_eligible,
                 **(repair_shadow or {}),
                 **verify_telemetry,
+                model_timing_ms=model_timing_ms,
+                model_forward_counts=model_forward_counts,
+                executed_action_steps=0,
                 elapsed_sec=time.perf_counter() - start,
             )
             return response
@@ -851,6 +944,9 @@ class RealtimeFlashPolicy:
             delayed_error_teacher_rounds_left=self.delayed_error_teacher_rounds_left,
             gripper_full_rounds_left=self.gripper_full_rounds_left,
             **verify_telemetry,
+            model_timing_ms=model_timing_ms,
+            model_forward_counts=model_forward_counts,
+            executed_action_steps=accepted_prefix,
             elapsed_sec=time.perf_counter() - start,
         )
         return response

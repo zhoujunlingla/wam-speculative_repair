@@ -69,10 +69,32 @@ class _FakeModel:
         self.calls.append(call)
         self.events.append((self.role, kind, request.get("tag")))
 
+        def profiled(response):
+            if not request.get("profile_model_time", False):
+                return response
+            names = {
+                "cache": {
+                    "vae_encode": 1.0,
+                    "kv_cache_video_transformer": 1.0,
+                    "kv_cache_action_transformer": 1.0,
+                },
+                "verify": {"teacher_action_verify": 2.0},
+                "prime": {"vae_encode": 1.0},
+                "action": {
+                    "video_dit": 10.0,
+                    "action_dit_generation": 5.0,
+                },
+            }.get(kind, {})
+            return {
+                **response,
+                "model_timing_ms": names,
+                "model_forward_counts": {name: 1 for name in names},
+            }
+
         if kind == "reset":
             self.cache.clear()
             self.frame_st_id = 0
-            return {}
+            return profiled({})
         if kind == "cache":
             self.cache.append(request["tag"])
             self.frame_st_id += int(np.asarray(request["state"]).shape[1])
@@ -80,11 +102,17 @@ class _FakeModel:
                 latent_nrmse = (
                     self.delayed_errors.popleft() if self.delayed_errors else 0.25
                 )
-                return {"delayed_video_error": {"latent_nrmse": latent_nrmse}}
-            return {}
+                return profiled({
+                    "delayed_video_error": {"latent_nrmse": latent_nrmse}
+                })
+            return profiled({})
         if kind == "verify":
             result = self.verify_results.popleft() if self.verify_results else 32
-            return dict(result) if isinstance(result, dict) else {"accepted_prefix": result}
+            response = (
+                dict(result) if isinstance(result, dict)
+                else {"accepted_prefix": result}
+            )
+            return profiled(response)
         response = {"action": self.action.copy()}
         if self.role == "draft":
             response["action_latent"] = self.action_latent.copy()
@@ -96,7 +124,7 @@ class _FakeModel:
                     "top_relative": 4.0,
                     "top_concentration": 0.5,
                 }
-        return response
+        return profiled(response)
 
 
 def _action_request():
@@ -197,6 +225,89 @@ def test_first_round_is_full_and_full_cache_update_becomes_anchor():
     assert teacher.cache == ["anchor"]
     assert policy.teacher_anchor_frame_st_id == 2
     assert not policy.pending_teacher_cache_updates
+
+
+def test_model_only_profile_aggregates_generation_and_cache_costs(tmp_path):
+    events = []
+    draft = _FakeModel("draft", events)
+    teacher = _FakeModel("teacher", events, verify_results=(32,))
+    log_path = tmp_path / "metrics.jsonl"
+    policy = RealtimeFlashPolicy(
+        draft,
+        teacher,
+        pf_interval=20,
+        profile_model_only=True,
+        log_path=log_path,
+        rng=np.random.default_rng(3),
+    )
+
+    policy.infer({"reset": True, "prompt": "test task"})
+    initial = policy.infer(_action_request())
+    policy.infer(_cache_request("anchor", initial["action"]))
+    flash = policy.infer(_action_request())
+
+    rows = [json.loads(line) for line in log_path.read_text().splitlines()]
+    full = next(row for row in rows if row["source"] == "teacher_full")
+    cache = next(row for row in rows if row["source"] == "full_cache_update")
+    draft_row = next(row for row in rows if row["source"] == "draft_flash")
+    assert full["model_timing_ms"]["draft_prime.vae_encode"] == 1.0
+    assert full["model_timing_ms"]["teacher_generation.video_dit"] == 10.0
+    assert cache["model_timing_ms"]["draft_cache.vae_encode"] == 1.0
+    assert cache["model_timing_ms"]["teacher_cache.vae_encode"] == 1.0
+    assert draft_row["model_timing_ms"]["draft_generation.video_dit"] == 10.0
+    assert draft_row["model_timing_ms"][
+        "teacher_verify_primary.teacher_action_verify"
+    ] == 2.0
+    assert full["executed_action_steps"] == 16
+    assert draft_row["executed_action_steps"] == 32
+    assert flash["accepted_prefix"] == 32
+    assert all(
+        call["request"].get("profile_model_time") is True
+        for call in draft.calls + teacher.calls
+    )
+
+
+def test_model_only_profile_preserves_replan_and_cache_replay_costs(tmp_path):
+    events = []
+    draft = _FakeModel("draft", events)
+    teacher = _FakeModel("teacher", events, verify_results=(32, 0))
+    log_path = tmp_path / "metrics.jsonl"
+    policy = RealtimeFlashPolicy(
+        draft,
+        teacher,
+        pf_interval=20,
+        profile_model_only=True,
+        log_path=log_path,
+        rng=np.random.default_rng(3),
+    )
+    policy.infer({"reset": True, "prompt": "test task"})
+    initial = policy.infer(_action_request())
+    policy.infer(_cache_request("anchor", initial["action"]))
+    flash = policy.infer(_action_request())
+    policy.infer(_cache_request("flash", flash["action"]))
+
+    rejected = policy.infer(_action_request())
+    full = policy.infer(_action_request())
+
+    rows = [json.loads(line) for line in log_path.read_text().splitlines()]
+    replan = next(
+        row for row in rows
+        if row["source"] == "replan" and row.get("fallback_reason") == "zero_prefix"
+    )
+    final_full = [row for row in rows if row["source"] == "teacher_full"][-1]
+    assert rejected["replan"] is True
+    assert full["action_source"] == "teacher_full"
+    assert replan["model_timing_ms"]["draft_generation.video_dit"] == 10.0
+    assert replan["model_timing_ms"][
+        "teacher_verify_primary.teacher_action_verify"
+    ] == 2.0
+    assert final_full["replayed_teacher_cache_updates"] == 1
+    assert final_full["model_timing_ms"][
+        "teacher_cache_replay.kv_cache_video_transformer"
+    ] == 1.0
+    assert final_full["model_timing_ms"][
+        "teacher_generation.action_dit_generation"
+    ] == 5.0
 
 
 def test_every_flash_verifies_against_last_full_and_queues_teacher_update():
@@ -945,6 +1056,7 @@ def test_zero_prefix_shadow_repair_uses_holdout_and_still_replans(tmp_path):
         teacher,
         pf_interval=20,
         repair_shadow=True,
+        profile_model_only=True,
         rng=np.random.default_rng(7),
         repair_rng=np.random.default_rng(8),
         log_path=log_path,
@@ -967,6 +1079,9 @@ def test_zero_prefix_shadow_repair_uses_holdout_and_still_replans(tmp_path):
     assert record["repair_shadow_eligible"] is True
     assert record["repair_shadow_holdout_prefix"] == 16
     assert record["repair_shadow_correction_max_rms"] <= 0.15
+    assert record["model_timing_ms"][
+        "teacher_verify_repair_holdout.teacher_action_verify"
+    ] == 2.0
     assert policy.pending_cache_source is None
 
 

@@ -121,6 +121,48 @@ class VA_Server:
             )
             self.streaming_vae_half = WanVAEStreamingWrapper(vae_half)
 
+        self._profile_model_time = False
+        self._model_timing_ms = {}
+        self._model_forward_counts = {}
+
+    def _start_model_timer(self, device=None):
+        if not self._profile_model_time:
+            return None
+        device = torch.device(device or self.device)
+        if device.type == 'cuda':
+            with torch.cuda.device(device):
+                event = torch.cuda.Event(enable_timing=True)
+                event.record(torch.cuda.current_stream(device))
+            return 'cuda', event, device
+        return 'cpu', time.perf_counter(), device
+
+    def _stop_model_timer(self, name, started):
+        if started is None:
+            return
+        timer_type, timer, device = started
+        if timer_type == 'cuda':
+            with torch.cuda.device(device):
+                ended = torch.cuda.Event(enable_timing=True)
+                ended.record(torch.cuda.current_stream(device))
+                ended.synchronize()
+            elapsed_ms = timer.elapsed_time(ended)
+        else:
+            elapsed_ms = (time.perf_counter() - timer) * 1000.0
+        self._model_timing_ms[name] = (
+            self._model_timing_ms.get(name, 0.0) + float(elapsed_ms)
+        )
+        self._model_forward_counts[name] = (
+            self._model_forward_counts.get(name, 0) + 1
+        )
+
+    def _profile_response(self, response):
+        if not self._profile_model_time:
+            return response
+        response = dict(response)
+        response['model_timing_ms'] = dict(self._model_timing_ms)
+        response['model_forward_counts'] = dict(self._model_forward_counts)
+        return response
+
     def _get_t5_prompt_embeds(
         self,
         prompt=None,
@@ -395,6 +437,7 @@ class VA_Server:
         )
         readonly_cache_indices = (0, 1) if guidance_scale > 1 else (0, )
 
+        started = self._start_model_timer()
         action_noise_pred = self.transformer(
             input_dict,
             update_cache=0,
@@ -402,6 +445,7 @@ class VA_Server:
             action_mode=True,
             readonly_cache_indices=readonly_cache_indices,
         )
+        self._stop_model_timer('teacher_action_verify', started)
 
         action_noise_pred = rearrange(action_noise_pred,
                                       'b (f n) c -> b c f n 1',
@@ -646,10 +690,18 @@ class VA_Server:
             videos_left_and_right = torch.cat(videos[1:],
                                               dim=0) / 255.0 * 2.0 - 1.0
             vae_device = next(self.streaming_vae.vae.parameters()).device
+            videos_high_device = videos_high.to(vae_device).to(self.dtype)
+            started = self._start_model_timer(vae_device)
             enc_out_high = self.streaming_vae.encode_chunk(
-                videos_high.to(vae_device).to(self.dtype))
+                videos_high_device)
+            self._stop_model_timer('vae_encode', started)
+            del videos_high_device
+            videos_left_and_right = videos_left_and_right.to(vae_device).to(
+                self.dtype)
+            started = self._start_model_timer(vae_device)
             enc_out_left_and_right = self.streaming_vae_half.encode_chunk(
-                videos_left_and_right.to(vae_device).to(self.dtype))
+                videos_left_and_right)
+            self._stop_model_timer('vae_encode', started)
             enc_out = torch.cat([
                 torch.cat(enc_out_left_and_right.split(1, dim=0), dim=-1),
                 enc_out_high
@@ -659,7 +711,9 @@ class VA_Server:
             videos = torch.cat(videos, dim=0) / 255.0 * 2.0 - 1.0
             vae_device = next(self.streaming_vae.vae.parameters()).device
             videos_chunk = videos.to(vae_device).to(self.dtype)
+            started = self._start_model_timer(vae_device)
             enc_out = self.streaming_vae.encode_chunk(videos_chunk)
+            self._stop_model_timer('vae_encode', started)
 
         mu, logvar = torch.chunk(enc_out, 2, dim=1)
         latents_mean = torch.tensor(self.vae.config.latents_mean).to(mu.device)
@@ -797,11 +851,15 @@ class VA_Server:
                     None,
                     frame_st_id=frame_st_id)
 
+                model_input = self._repeat_input_for_cfg(
+                    input_dict['latent_res_lst'])
+                started = self._start_model_timer()
                 video_noise_pred = self.transformer(
-                    self._repeat_input_for_cfg(input_dict['latent_res_lst']),
+                    model_input,
                     update_cache=1 if last_step else 0,
                     cache_name=self.cache_name,
                     action_mode=False)
+                self._stop_model_timer('video_dit', started)
 
                 if not last_step or video_step != -1:
                     video_noise_pred = data_seq_to_patch(
@@ -837,11 +895,15 @@ class VA_Server:
                     None,
                     action_cond,
                     frame_st_id=frame_st_id)
+                model_input = self._repeat_input_for_cfg(
+                    input_dict['action_res_lst'])
+                started = self._start_model_timer()
                 action_noise_pred = self.transformer(
-                    self._repeat_input_for_cfg(input_dict['action_res_lst']),
+                    model_input,
                     update_cache=1 if last_step else 0,
                     cache_name=self.cache_name,
                     action_mode=True)
+                self._stop_model_timer('action_dit_generation', started)
 
                 if not last_step:
                     action_noise_pred = rearrange(action_noise_pred,
@@ -908,21 +970,32 @@ class VA_Server:
         with (
                 torch.no_grad(),
         ):
-            self.transformer(self._repeat_input_for_cfg(input_dict['latent_res_lst']),
+            latent_input = self._repeat_input_for_cfg(
+                input_dict['latent_res_lst'])
+            started = self._start_model_timer()
+            self.transformer(latent_input,
                              update_cache=2,
                              cache_name=self.cache_name,
                              action_mode=False)
+            self._stop_model_timer('kv_cache_video_transformer', started)
 
-            self.transformer(self._repeat_input_for_cfg(input_dict['action_res_lst']),
+            action_input = self._repeat_input_for_cfg(
+                input_dict['action_res_lst'])
+            started = self._start_model_timer()
+            self.transformer(action_input,
                              update_cache=2,
                              cache_name=self.cache_name,
                              action_mode=True)
+            self._stop_model_timer('kv_cache_action_transformer', started)
         torch.cuda.empty_cache()
         self.frame_st_id += latent_model_input.shape[2]
         return delayed_video_error
 
     @torch.no_grad()
     def infer(self, obs):
+        self._profile_model_time = bool(obs.get('profile_model_time', False))
+        self._model_timing_ms = {}
+        self._model_forward_counts = {}
         reset = obs.get('reset', False)
         prompt = obs.get('prompt', None)
         compute_kv_cache = obs.get('compute_kv_cache', False)
@@ -932,12 +1005,12 @@ class VA_Server:
         if reset:
             logger.info(f"******************* Reset server ******************")
             self._reset(prompt=prompt)
-            return dict()
+            return self._profile_response(dict())
         elif prime_only:
             if self.frame_st_id != 0:
                 raise RuntimeError('prime_only is valid only before the first cache update')
             self.init_latent = self._encode_obs(obs)
-            return dict()
+            return self._profile_response(dict())
         elif verify_action:
             logger.info(
                 f"################# Verify Action Chunk #################")
@@ -962,7 +1035,7 @@ class VA_Server:
             )
             distances = verify_result.pop('distances')
             tau_timesteps = verify_result.pop('tau_timesteps')
-            return {
+            return self._profile_response({
                 **verify_result,
                 'tau_timesteps': tau_timesteps.numpy().tolist(),
                 'distances': distances.numpy(),
@@ -972,13 +1045,14 @@ class VA_Server:
                     torch.quantile(distances.flatten(), 0.95).item()),
                 'distance_by_tau_mean': distances.mean(
                     dim=(1, 2)).numpy().tolist(),
-            }
+            })
         elif compute_kv_cache:
             logger.info(
                 f"################# Compute KV Cache #################")
             delayed_video_error = self._compute_kv_cache(obs)
-            return ({'delayed_video_error': delayed_video_error}
-                    if delayed_video_error is not None else dict())
+            response = ({'delayed_video_error': delayed_video_error}
+                        if delayed_video_error is not None else dict())
+            return self._profile_response(response)
         else:
             logger.info(f"################# Infer One Chunk #################")
             action, video_latent = self._infer(obs, frame_st_id=self.frame_st_id)
@@ -993,7 +1067,7 @@ class VA_Server:
                     video_latent,
                     layout=('robotwin_tshape'
                             if self.env_type == 'robotwin_tshape' else None))
-            return result
+            return self._profile_response(result)
     
     def decode_one_video(self, latents, output_type):
         latents = latents.to(self.vae.dtype)

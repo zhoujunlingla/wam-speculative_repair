@@ -235,3 +235,29 @@ teacher quality with materially lower teacher use.
 Verification: isolated A800 review copy passed `40/40` focused tests; local
 Python compilation and `git diff --check` passed. Formal routing conclusions
 remain locked until B1 low10 x 20 completes.
+
+### Model-only profiling for gate and repair comparisons
+
+The existing policy `elapsed_sec` is retained as wall-time telemetry but is no
+longer treated as model-only speed. An opt-in profiler now measures completed
+CUDA work for VAE encoding, video/action generation DiT forwards, Teacher
+action-only verification, and video/action KV-cache transformer forwards.
+Speculative logs preserve failed draft/verify cost, Teacher cache replay, and
+executed low-level action counts so summaries can report actions per model
+second without RPC, rendering, or RoboTwin stepping.
+
+The profiler is disabled by default and therefore does not alter the active
+MCSV-B1 run. Validation in the isolated remote review copy
+`/mnt/afs/intern/manlichen/ivan/zhoujunl/tmp/model_profile_review` passed:
+
+```text
+/usr/bin/python -m pytest -q \
+  tests/test_realtime_flash_policy.py \
+  tests/test_run_realtime_flash_task.py \
+  tests/test_specverify.py \
+  tests/test_analyze_motion_score.py
+54 passed
+```
+
+An exclusive-GPU speed-only smoke is still required before using the metric in
+a benchmark claim.

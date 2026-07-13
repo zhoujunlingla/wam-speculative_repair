@@ -537,6 +537,29 @@ and AUPRC over `global_mean`, followed by a matched closed-loop low10 x 20 run.
 Motion never overrides a continuous zero prefix or a discrete gripper-phase
 disagreement.
 
+### Model-only latency profiling
+
+Closed-loop wall time is not the speed metric for the motion-gate comparison:
+it includes websocket transport, RoboTwin stepping, rendering, and client
+bookkeeping.  An opt-in profiling path records only GPU model work performed
+by each server request:
+
+- observation VAE encoding;
+- draft/Teacher video DiT generation;
+- draft/Teacher action DiT generation;
+- Teacher action-only verification;
+- video/action transformer forwards used to update KV cache.
+
+Profiling is disabled by default.  When enabled, CUDA events synchronize each
+named block so the reported duration is attributable to completed GPU work.
+The synchronization overhead makes this a dedicated profiling mode rather
+than the latency used by normal closed-loop evaluation.  Server responses
+return a flat `model_timing_ms` mapping, and the speculative policy logs the
+draft, verifier, Teacher-full, and cache-update mappings without folding RPC
+time into them.  Summaries report total model milliseconds, low-level executed
+actions per model second, and the component breakdown.  The existing
+`elapsed_sec` field remains a wall-time diagnostic and is not relabeled.
+
 ## Cross-Tau Gripper Consensus
 
 The original migration applies two independent phase fallbacks: the server

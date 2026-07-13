@@ -135,6 +135,51 @@ def _as_bcfh(action: np.ndarray) -> np.ndarray:
     return action
 
 
+def bounded_endpoint_repair(
+    draft_latent: np.ndarray,
+    teacher_endpoint_latent: np.ndarray,
+    *,
+    prefix_len: int = 16,
+    strength: float = 0.5,
+    max_step_rms: float = 0.15,
+    continuous_channels: Iterable[int] = range(14),
+) -> tuple[np.ndarray, float]:
+    """Move a continuous prefix toward a teacher endpoint with an RMS cap."""
+
+    draft = np.asarray(draft_latent, dtype=np.float32)
+    endpoint = np.asarray(teacher_endpoint_latent, dtype=np.float32)
+    if draft.shape != endpoint.shape or draft.ndim != 5 or draft.shape[-1] != 1:
+        raise ValueError("draft and endpoint must share shape [B,C,F,N,1]")
+    if draft.shape[0] != 1:
+        raise ValueError("repair supports one action chunk")
+    if (
+        not np.isfinite(strength)
+        or not 0 <= strength <= 1
+        or not np.isfinite(max_step_rms)
+        or max_step_rms <= 0
+    ):
+        raise ValueError("repair strength and max_step_rms are out of range")
+    channels = tuple(int(channel) for channel in continuous_channels)
+    if not channels or min(channels) < 0 or max(channels) >= draft.shape[1]:
+        raise ValueError("continuous_channels are invalid")
+
+    horizon = draft.shape[2] * draft.shape[3]
+    prefix_len = max(0, min(int(prefix_len), horizon))
+    candidate = draft.copy()
+    delta = np.zeros_like(draft)
+    delta[:, channels] = strength * (endpoint[:, channels] - draft[:, channels])
+    flat = delta[:, channels].transpose(0, 2, 3, 1, 4).reshape(
+        1, horizon, len(channels)
+    )
+    flat[:, prefix_len:] = 0
+    rms = np.sqrt(np.mean(np.square(flat, dtype=np.float32), axis=-1, keepdims=True))
+    scale = np.minimum(1.0, max_step_rms / np.maximum(rms, 1e-8))
+    flat *= scale
+    applied = flat.reshape(1, draft.shape[2], draft.shape[3], len(channels), 1)
+    candidate[:, channels] += applied.transpose(0, 3, 1, 2, 4)
+    return candidate, float(np.max(np.sqrt(np.mean(np.square(flat), axis=-1))))
+
+
 class RealtimeFlashPolicy:
     """First-full speculative policy with a last-full teacher reference."""
 
@@ -161,7 +206,12 @@ class RealtimeFlashPolicy:
         video_motion_gate_threshold: float = 0.0,
         gripper_full_window: int = 1,
         gripper_consensus: bool = False,
+        repair_shadow: bool = False,
+        repair_strength: float = 0.5,
+        repair_max_step_rms: float = 0.15,
+        repair_prefix_len: int = 16,
         rng: Optional[np.random.Generator] = None,
+        repair_rng: Optional[np.random.Generator] = None,
         log_path: Optional[str] = None,
     ) -> None:
         if pf_interval < 0:
@@ -188,6 +238,14 @@ class RealtimeFlashPolicy:
             raise ValueError("video_motion_gate_threshold must be non-negative")
         if gripper_full_window < 1:
             raise ValueError("gripper_full_window must be positive")
+        if not np.isfinite(repair_strength) or not 0 <= repair_strength <= 1:
+            raise ValueError("repair_strength must be in [0, 1]")
+        if (
+            not np.isfinite(repair_max_step_rms)
+            or repair_max_step_rms <= 0
+            or repair_prefix_len <= 0
+        ):
+            raise ValueError("repair bounds must be positive")
         tau_timesteps = tuple(float(timestep) for timestep in tau_timesteps)
         if not tau_timesteps:
             raise ValueError("tau_timesteps must be non-empty")
@@ -214,7 +272,12 @@ class RealtimeFlashPolicy:
         self.video_motion_gate_threshold = float(video_motion_gate_threshold)
         self.gripper_full_window = int(gripper_full_window)
         self.gripper_consensus = bool(gripper_consensus)
+        self.repair_shadow = bool(repair_shadow)
+        self.repair_strength = float(repair_strength)
+        self.repair_max_step_rms = float(repair_max_step_rms)
+        self.repair_prefix_len = int(repair_prefix_len)
         self.rng = rng or np.random.default_rng()
+        self.repair_rng = repair_rng or np.random.default_rng()
         self.log_path = Path(log_path) if log_path else None
         if self.log_path:
             self.log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -464,6 +527,55 @@ class RealtimeFlashPolicy:
             raise RuntimeError("teacher verification did not return a prefix or distances")
         return quantize_prefix(raw_prefix, self.action_per_frame, horizon)
 
+    def _shadow_repair_probe(
+        self,
+        request: dict,
+        action_latent: np.ndarray,
+        verify_response: dict,
+        horizon: int,
+    ) -> dict:
+        endpoint = verify_response.get("teacher_endpoint_latent")
+        if endpoint is None:
+            raise RuntimeError("shadow repair requires teacher_endpoint_latent")
+        candidate, correction_max_rms = bounded_endpoint_repair(
+            action_latent,
+            endpoint,
+            prefix_len=min(self.repair_prefix_len, horizon),
+            strength=self.repair_strength,
+            max_step_rms=self.repair_max_step_rms,
+            continuous_channels=verify_response.get(
+                "continuous_channels", range(14)
+            ),
+        )
+        holdout_request = dict(request)
+        holdout_request.update(
+            verify_action=True,
+            action_latent=candidate,
+            verify_noise=self.repair_rng.standard_normal(candidate.shape).astype(
+                np.float32
+            ),
+            threshold=self.threshold,
+            tau_timesteps=self.tau_timesteps,
+            frame_st_id=self.frame_st_id,
+            gripper_consensus=self.gripper_consensus,
+        )
+        if self.last_gripper is not None:
+            previous_phase = self.last_gripper >= self.gripper_threshold
+            holdout_request["previous_gripper"] = np.where(
+                previous_phase, 1.0, -1.0
+            ).astype(np.float32)
+        holdout = self._call(self.teacher, holdout_request)
+        return {
+            "repair_shadow_holdout_prefix": self._accepted_prefix(
+                candidate, holdout, horizon
+            ),
+            "repair_shadow_prefix_by_tau": holdout.get("prefix_by_tau"),
+            "repair_shadow_correction_max_rms": correction_max_rms,
+            "repair_shadow_gripper_force_teacher": bool(
+                holdout.get("gripper_force_teacher", False)
+            ),
+        }
+
     def _flash(self, request: dict) -> dict:
         start = time.perf_counter()
         draft_request = dict(request)
@@ -589,6 +701,20 @@ class RealtimeFlashPolicy:
             self.force_full_reason = "gripper_consensus"
             self.gripper_full_rounds_left = self.gripper_full_window
 
+        repair_shadow = None
+        repair_shadow_eligible = bool(
+            self.repair_shadow
+            and accepted_prefix == 0
+            and self.force_full_reason is None
+            and not teacher_gripper_switch
+            and gripper_consensus_failure is None
+            and switch_step is None
+        )
+        if repair_shadow_eligible:
+            repair_shadow = self._shadow_repair_probe(
+                request, action_latent, verify_response, horizon
+            )
+
         self.round_id += 1
         if accepted_prefix == 0:
             reason = self.force_full_reason or "zero_prefix"
@@ -607,6 +733,9 @@ class RealtimeFlashPolicy:
                 accepted_prefix=0,
                 verified_prefix=verified_prefix,
                 teacher_gripper_switch=teacher_gripper_switch,
+                repair_shadow_enabled=self.repair_shadow,
+                repair_shadow_eligible=repair_shadow_eligible,
+                **(repair_shadow or {}),
                 **verify_telemetry,
                 elapsed_sec=time.perf_counter() - start,
             )

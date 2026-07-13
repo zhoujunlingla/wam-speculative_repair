@@ -583,6 +583,20 @@ decision, and the extra model-forward timing.  The live prefix, replan, cache,
 and Teacher scheduling paths remain byte-for-byte unchanged.  The phase tensor
 is omitted from normal verifier responses when the flag is disabled.
 
+### Gripper phase response contract
+
+The verifier computes gripper phases from action latents with internal shape
+`[K, 2, F, N, 1]`. The trailing singleton is a latent-layout detail and must
+not cross the server boundary. When `return_gripper_phase` is enabled, the
+response contract is:
+
+- `gripper_phase_by_tau`: `[K, 2, F, N]`;
+- `draft_gripper_phase`: `[2, F, N]`.
+
+The policy keeps strict shape validation so a future server regression fails
+immediately. The server owns the one-time conversion at serialization; the
+policy does not silently accept both layouts.
+
 ### Model-only latency profiling
 
 Closed-loop wall time is not the speed metric for the motion-gate comparison:

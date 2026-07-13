@@ -663,9 +663,11 @@ class VA_Server:
         if return_gripper_phase:
             result.update(
                 gripper_phase_by_tau=
-                    reconstructed_gripper_phase.detach().cpu().tolist(),
+                    reconstructed_gripper_phase.squeeze(-1).detach().cpu().tolist(
+                    ),
                 draft_gripper_phase=
-                    draft_gripper_phase[0].detach().cpu().tolist(),
+                    draft_gripper_phase[0].squeeze(-1).detach().cpu().tolist(
+                    ),
             )
         return result
 

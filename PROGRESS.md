@@ -293,3 +293,12 @@ Next: collect Motion Gate V3 regional/saliency/history telemetry and tau=75
 gripper tie-break telemetry without changing routing, RNG, caches, or Teacher
 scheduling.  Online routing requires whole-task held-out improvement and an
 estimated early-conflict rescue lower bound of at least `35/224`.
+
+### Invalid V3 shadow launch: phase payload shape (2026-07-14)
+
+The first V3 shadow launch produced no valid completed trial. Its first
+conditional gripper probe failed because `VA_Server.verify_action_chunk`
+serialized internal `[K,2,F,N,1]` phase tensors unchanged, while the policy
+contract is `[K,2,F,N]`. The run is invalid benchmark evidence. The root fix
+removes the latent-only singleton at the server response boundary; the policy
+keeps strict validation so the same interface regression cannot pass silently.

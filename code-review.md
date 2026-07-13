@@ -730,3 +730,27 @@ still requires a fixed-workload or completed matched benchmark.
 Motion Gate V3 may proceed to telemetry-only shadow collection.  Online routing
 is not approved until the incomplete MCSV-B1 benchmark is closed and the
 shadow gates in `design.md` pass.
+
+## Gripper phase response contract fix (2026-07-14)
+
+### Finding
+
+The first V3 shadow run crashed on its first conditional tie-break because the
+server returned latent-layout phase tensors with a trailing singleton:
+`[K,2,F,N,1]` and `[2,F,N,1]`. The policy correctly enforces the documented
+transport contract `[K,2,F,N]` and `[2,F,N]`.
+
+### Review
+
+The fix is at the shared server serialization boundary and removes only the
+latent-only final dimension. It does not relax policy validation, change the
+phase values, alter verification, mutate caches, or change any live routing
+decision. No sibling response field uses this phase payload.
+
+### Verification
+
+- Local `python3 -m py_compile`: passed.
+- Local `git diff --check`: passed.
+- Focused A800 pytest: pending before restart.
+
+Decision: do not restart the V3 shadow until the focused A800 suite passes.

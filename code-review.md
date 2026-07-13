@@ -708,3 +708,25 @@ No blocking correctness finding remains after review.
 
 Decision: allowed for shadow telemetry only.  Online tie-break execution is not
 approved.
+
+## Model-only profiler evidence review (2026-07-14)
+
+### Findings
+
+No runtime code changed in this review.  The exclusive-GPU smoke completed and
+showed `draft=36.79`, `Teacher=36.05`, and `speculative=13.36` model-only
+action Hz.  The speculative result contradicts any claim that reducing only
+full-Teacher action rounds is sufficient for draft-like speed: unconditional
+K=2 verification, duplicate VAE/cache work, and extra short-prefix rounds must
+also be addressed.
+
+The TN=1 trajectories executed different action counts, so their aggregate Hz
+is diagnostic rather than a final matched throughput claim.  Component timing
+and forward counts are authoritative for locating the bottleneck; final speed
+still requires a fixed-workload or completed matched benchmark.
+
+### Decision
+
+Motion Gate V3 may proceed to telemetry-only shadow collection.  Online routing
+is not approved until the incomplete MCSV-B1 benchmark is closed and the
+shadow gates in `design.md` pass.

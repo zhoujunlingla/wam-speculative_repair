@@ -261,3 +261,35 @@ MCSV-B1 run. Validation in the isolated remote review copy
 
 An exclusive-GPU speed-only smoke is still required before using the metric in
 a benchmark claim.
+
+### Exclusive model-only profiler and selective-motion diagnostic (2026-07-14)
+
+- The exclusive GPU4 `turn_switch` TN=1 profiler completed for all three
+  modes.  Model-only throughput, including VAE, video/action DiT, verification,
+  and KV-cache transformer work, was `36.79 action Hz` for draft v1/a2,
+  `36.05 action Hz` for Teacher v2/a4, and `13.36 action Hz` for the current
+  speculative policy.  These are smoke measurements, not success estimates.
+- The speculative path spent `5987.9 ms` for 80 executed actions.  Duplicate
+  draft/Teacher VAE and cache work plus six Teacher action-verifier forwards
+  dominated the gap.  Lowering only the Teacher action-source rate cannot make
+  this implementation approach draft speed while every draft round still pays
+  K=2 verification and short prefixes increase the number of rounds.
+- The running MCSV-B1 selective-motion benchmark is not complete and remains
+  excluded from final claims.  Its completed tasks are `turn_switch 12/20`
+  versus hard-gate `14/20`, and `open_microwave 11/20` versus `9/20`.
+  The valid recovery shard for `hanging_mug` is currently `2/17`, versus the
+  hard-gate result `8/20`.
+- In the current hanging shard, 31 high-motion proposals were shortened from
+  a verified 32-action prefix to 16 actions.  The shorter closed-loop horizon
+  was followed by more gripper-consensus and zero-prefix events.  Therefore
+  `high motion -> always cap 16` is not approved for promotion even if it lowers
+  Teacher action-source.
+- GPT-5.5 technical review approved only the next shadow collection.  It did
+  not approve online early-gripper rescue, K=1, or unconditional 32-action cap
+  release.  Same-noise tau=75 is treated only as a cross-timestep phase
+  stability probe, and fixed-denominator Teacher savings remain estimates.
+
+Next: collect Motion Gate V3 regional/saliency/history telemetry and tau=75
+gripper tie-break telemetry without changing routing, RNG, caches, or Teacher
+scheduling.  Online routing requires whole-task held-out improvement and an
+estimated early-conflict rescue lower bound of at least `35/224`.

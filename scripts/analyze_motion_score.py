@@ -14,6 +14,7 @@ from typing import Callable, Iterable
 
 HIGH_ERROR_THRESHOLD = 0.55
 BASELINE_GATE_THRESHOLD = 1.2
+STRONG_TAIL_DISTANCE = 0.05
 
 
 def _task_from_path(path: Path) -> str:
@@ -21,7 +22,11 @@ def _task_from_path(path: Path) -> str:
     return name.removeprefix("specverify_")
 
 
-def audit_log(path: Path, run_name: str | None = None) -> tuple[list[dict], Counter]:
+def audit_log(
+    path: Path,
+    run_name: str | None = None,
+    verify_threshold: float | None = None,
+) -> tuple[list[dict], Counter]:
     """Pair each executed draft with its acknowledged delayed-error label."""
 
     task = _task_from_path(path)
@@ -54,16 +59,32 @@ def audit_log(path: Path, run_name: str | None = None) -> tuple[list[dict], Coun
                     continue
                 if round_id in pending:
                     audit["excluded_overwritten_proposal"] += 1
-                pending[round_id] = {
+                proposal = {
                     "run": run_name,
                     "task": task,
                     "episode": episode,
                     "round_id": round_id,
                     "proposal_line": line_number,
                     "accepted_prefix": int(record["accepted_prefix"]),
+                    "accepted_prefix_before_motion_cap": int(
+                        record.get(
+                            "accepted_prefix_before_motion_cap",
+                            record["accepted_prefix"],
+                        )
+                    ),
                     "fallback_reason": record.get("fallback_reason"),
+                    "verify_threshold": record.get(
+                        "verify_threshold", verify_threshold
+                    ),
+                    "prefix_by_tau": record.get("prefix_by_tau"),
+                    "verify_distances": record.get("verify_distances"),
+                    "gripper_consensus_failure_index": record.get(
+                        "gripper_consensus_failure_index"
+                    ),
                     **motion,
                 }
+                _add_verifier_margin(proposal, audit)
+                pending[round_id] = proposal
                 audit["executed_motion_proposal"] += 1
 
             if source != "flash_cache_update":
@@ -94,6 +115,43 @@ def audit_log(path: Path, run_name: str | None = None) -> tuple[list[dict], Coun
 
     audit["excluded_missing_cache_update"] += len(pending)
     return rows, audit
+
+
+def _add_verifier_margin(proposal: dict, audit: Counter) -> None:
+    """Attach full-prefix tail margin without changing pair eligibility."""
+
+    distances = proposal.get("verify_distances")
+    threshold = proposal.get("verify_threshold")
+    if distances is None or threshold is None:
+        audit["missing_verifier_margin"] += 1
+        return
+    if not isinstance(distances, list) or not distances:
+        audit["malformed_verifier_margin"] += 1
+        return
+    try:
+        threshold = float(threshold)
+        per_tau = [
+            [float(value) for frame in tau for value in frame]
+            for tau in distances
+        ]
+    except (TypeError, ValueError):
+        audit["malformed_verifier_margin"] += 1
+        return
+    if not math.isfinite(threshold) or threshold <= 0 or any(
+        not math.isfinite(value) for row in per_tau for value in row
+    ):
+        audit["malformed_verifier_margin"] += 1
+        return
+    if any(len(row) < 32 for row in per_tau):
+        audit["short_verifier_horizon"] += 1
+        return
+    tail_max = max(max(row[16:32]) for row in per_tau)
+    proposal.update(
+        verifier_tail_max=tail_max,
+        verifier_tail_margin=1.0 - tail_max / threshold,
+        verifier_tail_strong=tail_max <= STRONG_TAIL_DISTANCE,
+    )
+    audit["included_verifier_margin"] += 1
 
 
 def roc_auc(scores: list[float], labels: list[bool]) -> float | None:
@@ -286,13 +344,21 @@ def main(argv: Iterable[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("logs", nargs="+", type=Path)
     parser.add_argument("--output-dir", required=True, type=Path)
+    parser.add_argument(
+        "--verify-threshold",
+        type=float,
+        default=None,
+        help="explicit fallback for legacy logs that predate threshold telemetry",
+    )
     args = parser.parse_args(argv)
 
     rows: list[dict] = []
     audit = Counter()
     per_log = []
     for path in args.logs:
-        log_rows, log_audit = audit_log(path)
+        log_rows, log_audit = audit_log(
+            path, verify_threshold=args.verify_threshold
+        )
         rows.extend(log_rows)
         audit.update(log_audit)
         per_log.append({"path": str(path), "audit": dict(log_audit)})

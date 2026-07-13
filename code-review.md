@@ -532,3 +532,41 @@ success statistically compatible with the 73.0% hard-gate baseline, Teacher
 action-source below 21.63%, and lower model-forward latency.
 
 Decision: allowed to proceed to one matched low10 x 20 run with repair disabled.
+
+## Motion/verifier-margin telemetry review
+
+Scope: diagnostic-only logging and offline pairing support for a possible
+region-motion plus verifier-margin cap-release rule. No live routing rule is
+added.
+
+The first review found one blocking parser edge case: an empty distance tensor
+could divide by zero rather than remain visible as malformed telemetry. The
+parser now validates a non-empty list, finite positive threshold, finite
+distances, and at least 32 action entries per tau before deriving the tail
+margin. Missing, malformed, and short telemetry use separate audit counters and
+never remove an otherwise valid motion/delayed-error pair.
+
+No blocking finding remains:
+
+- the policy adds one scalar log field and does not alter inference control
+  flow, RNG, cache state, or response data;
+- legacy logs use a threshold only when the caller explicitly supplies
+  `--verify-threshold`;
+- the derived tail maximum is the maximum over actions 16:32 across every tau,
+  matching the verifier's `[K, 2, 16]` temporal order;
+- the analysis keeps task/run/episode identity and does not introduce a random
+  split or an online motion-v2 threshold;
+- missing or malformed verifier data cannot be misclassified as a strong
+  margin.
+
+Verification: an isolated copy on A800 passed `40/40` focused pytest cases.
+Local `py_compile` and `git diff --check` passed. Partial replay of 426 aligned
+B1 pairs completed with 427 valid margin records and one still-pending cache
+acknowledgement.
+
+Residual risk: delayed error after a 16-action cap cannot establish safety of
+the unexecuted second 16 actions. Offline margin analysis may nominate a rule,
+but a matched closed-loop low10 x 20 run remains mandatory.
+
+Decision: telemetry and offline analysis are approved. Motion-v2 remains
+shadow-only and no cap-release policy is approved yet.

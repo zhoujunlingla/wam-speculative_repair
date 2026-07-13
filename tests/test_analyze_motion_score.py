@@ -30,6 +30,13 @@ def test_audit_includes_only_executed_aligned_draft(tmp_path):
                 "source": "draft_flash",
                 "round_id": 2,
                 "accepted_prefix": 16,
+                "accepted_prefix_before_motion_cap": 32,
+                "verify_threshold": 0.15,
+                "prefix_by_tau": [32, 32],
+                "verify_distances": [
+                    [[0.01] * 16, [0.02] * 16],
+                    [[0.03] * 16, [0.04] * 16],
+                ],
                 "video_motion_stats": motion,
             },
             {
@@ -46,8 +53,103 @@ def test_audit_includes_only_executed_aligned_draft(tmp_path):
     assert len(rows) == 1
     assert rows[0]["episode"] == 0
     assert rows[0]["high_delayed_error"] is True
+    assert rows[0]["accepted_prefix_before_motion_cap"] == 32
+    assert rows[0]["verifier_tail_max"] == 0.04
+    assert rows[0]["verifier_tail_strong"] is True
     assert audit["included_pair"] == 1
+    assert audit["included_verifier_margin"] == 1
     assert audit["excluded_unexecuted_motion_proposal"] == 1
+
+
+def test_audit_keeps_pair_when_verifier_margin_is_missing(tmp_path):
+    log = tmp_path / "specverify_task.jsonl"
+    motion = {"global_mean": 0.4, "median": 0.2}
+    _write(
+        log,
+        [
+            {"source": "reset", "round_id": 0},
+            {
+                "source": "draft_flash",
+                "round_id": 1,
+                "accepted_prefix": 16,
+                "video_motion_stats": motion,
+            },
+            {
+                "source": "flash_cache_update",
+                "round_id": 1,
+                "cache_frame_count": 1,
+                "delayed_video_error": {"latent_nrmse": 0.2},
+            },
+        ],
+    )
+
+    rows, audit = audit_log(log, run_name="run")
+
+    assert len(rows) == 1
+    assert "verifier_tail_max" not in rows[0]
+    assert audit["missing_verifier_margin"] == 1
+
+
+def test_audit_rejects_empty_verifier_margin_without_dropping_pair(tmp_path):
+    log = tmp_path / "specverify_task.jsonl"
+    _write(
+        log,
+        [
+            {"source": "reset", "round_id": 0},
+            {
+                "source": "draft_flash",
+                "round_id": 1,
+                "accepted_prefix": 16,
+                "verify_threshold": 0.15,
+                "verify_distances": [],
+                "video_motion_stats": {"global_mean": 0.4, "median": 0.2},
+            },
+            {
+                "source": "flash_cache_update",
+                "round_id": 1,
+                "cache_frame_count": 1,
+                "delayed_video_error": {"latent_nrmse": 0.2},
+            },
+        ],
+    )
+
+    rows, audit = audit_log(log, run_name="run")
+
+    assert len(rows) == 1
+    assert "verifier_tail_max" not in rows[0]
+    assert audit["malformed_verifier_margin"] == 1
+
+
+def test_audit_uses_explicit_threshold_for_legacy_log(tmp_path):
+    log = tmp_path / "specverify_task.jsonl"
+    _write(
+        log,
+        [
+            {"source": "reset", "round_id": 0},
+            {
+                "source": "draft_flash",
+                "round_id": 1,
+                "accepted_prefix": 16,
+                "verify_distances": [
+                    [[0.01] * 16, [0.02] * 16],
+                    [[0.03] * 16, [0.04] * 16],
+                ],
+                "video_motion_stats": {"global_mean": 0.4, "median": 0.2},
+            },
+            {
+                "source": "flash_cache_update",
+                "round_id": 1,
+                "cache_frame_count": 1,
+                "delayed_video_error": {"latent_nrmse": 0.2},
+            },
+        ],
+    )
+
+    rows, audit = audit_log(log, run_name="run", verify_threshold=0.15)
+
+    assert rows[0]["verify_threshold"] == 0.15
+    assert rows[0]["verifier_tail_margin"] == 1.0 - 0.04 / 0.15
+    assert audit["included_verifier_margin"] == 1
 
 
 def test_audit_rejects_frame_alignment_mismatch(tmp_path):

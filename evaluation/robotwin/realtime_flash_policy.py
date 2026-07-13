@@ -673,6 +673,7 @@ class RealtimeFlashPolicy:
         if verify_distances is not None:
             verify_distances = np.asarray(verify_distances).tolist()
         verify_telemetry = {
+            "verify_threshold": self.threshold,
             "tau_timesteps": verify_response.get("tau_timesteps"),
             "prefix_by_tau": verify_response.get("prefix_by_tau"),
             "verify_distances": verify_distances,

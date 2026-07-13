@@ -619,6 +619,7 @@ def test_flash_logs_distances_without_changing_acceptance(tmp_path):
 
     assert accepted["accepted_prefix"] == 32
     assert record["prefix_by_tau"] == [32, 32]
+    assert record["verify_threshold"] == 0.15
     assert record["tau_timesteps"] == [50.0, 100.0]
     assert np.asarray(record["verify_distances"]).shape == (2, 2, 16)
     assert record["gripper_switch_indices_by_tau"] == [None, 7]

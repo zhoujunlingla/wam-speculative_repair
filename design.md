@@ -474,6 +474,32 @@ success no worse than `73.0%` by more than sampling uncertainty, fewer teacher
 actions than `21.63%`, and lower model-forward latency than the hard-gate run.
 Repair remains disabled until this gate passes.
 
+### Motion/verifier-margin shadow audit
+
+The next motion iteration is not allowed to route on `motion_v2` directly.
+While the selective-verification benchmark runs, telemetry and the offline
+pairing audit retain the existing verifier threshold, per-tau prefixes, and
+distance tensor. For a fully verified 32-action proposal the audit derives:
+
+```text
+tail_max = max verify distance over actions 16:32 and every tau
+tail_margin = 1 - tail_max / delta
+strong_tail = tail_max <= 0.05
+```
+
+These fields are diagnostic only. They test whether a high global-motion
+proposal can safely avoid the 16-action cap when both a held-out calibrated
+regional motion score is low and the full K=2 verifier has a strong tail
+margin. The audit must preserve task identity and use whole-task holdouts; it
+must not randomly split rounds. Because the current high-motion policy only
+executes the first 16 actions, its delayed video error cannot certify the
+unexecuted tail. Any cap-release rule therefore still requires a matched
+closed-loop low10 x 20 evaluation after offline calibration.
+
+The telemetry change must not alter routing, RNG, model calls, cache state, or
+the accepted prefix. Missing or malformed distance tensors remain visible in
+the audit rather than being silently treated as strong evidence.
+
 ## Cross-Tau Gripper Consensus
 
 The original migration applies two independent phase fallbacks: the server

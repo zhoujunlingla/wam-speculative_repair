@@ -198,3 +198,26 @@ teacher quality with materially lower teacher use.
   region-wise product of normalized median patch motion and spatial entropy.
   It cannot affect routing until complete low10 telemetry beats global mean at
   the same trigger budget.
+
+### Motion/verifier-margin audit instrumentation
+
+- The running MCSV-B1 benchmark is unchanged. Offline audit support now retains
+  the logged verifier threshold, per-tau prefix, distance tensor, pre-cap
+  prefix, and gripper-consensus status for each action-aligned delayed-error
+  pair. It derives the maximum K=2 residual over actions 16:32 and its margin
+  from `delta`; malformed or missing telemetry remains an explicit audit count.
+- Legacy logs require an explicit `--verify-threshold` argument. The analysis
+  never guesses a threshold that was not recorded in the log.
+- A partial audit over 426 aligned B1 pairs found eight high-global-motion
+  proposals whose continuous/gripper prefix was 32 before the motion cap. None
+  had `tail_max <= 0.05`; their tail residuals ranged from 0.0847 to 0.1190.
+  This is incomplete, task-imbalanced evidence, but it already shows that a
+  margin-only cap release at 0.05 has zero expected coverage. Region-aware
+  telemetry is still required before any cap-release policy is considered.
+- The local policy change only logs `verify_threshold`; it does not change
+  routing, model calls, RNG, cache state, or the accepted prefix. The active
+  remote B1 process was not modified or restarted.
+
+Verification: isolated A800 review copy passed `40/40` focused tests; local
+Python compilation and `git diff --check` passed. Formal routing conclusions
+remain locked until B1 low10 x 20 completes.

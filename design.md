@@ -323,6 +323,15 @@ gripper consensus, and the PF=20 ceiling. This tests whether a sparse WAM-
 specific pre-execution gate can replace blind teacher refreshes. The gate is
 disabled by threshold zero.
 
+The motion-only pilot reached `8/12` with 14.57% teacher actions. It improved
+`hanging_mug` from 0/3 to 2/3 and preserved 3/3 `place_can_basket`, but
+`open_microwave` fell from 3/3 under the 0.18 flow-refresh policy to 1/3.
+Global motion and cumulative endpoint drift detect complementary failures.
+The next configuration therefore combines the unchanged motion threshold 1.2
+with a 0.18 single-round flow refresh. Delayed recovery and flow bursts remain
+off. This is a configuration composition of two already-tested signals; it
+requires no code change.
+
 ## Cross-Tau Gripper Consensus
 
 The original migration applies two independent phase fallbacks: the server

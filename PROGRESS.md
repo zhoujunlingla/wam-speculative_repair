@@ -138,3 +138,15 @@ teacher quality with materially lower teacher use.
   0.867. A threshold of 1.2 selects 6.7% of draft rounds at 83.3% precision.
   The next pilot gates these drafts before execution and disables blind flow-
   budget refresh; delayed error remains shadow-only.
+
+### Pre-execution motion gate pilot
+
+- The motion-only policy scored `8/12 = 66.7%`: `hanging_mug 2/3`,
+  `turn_switch 2/3`, `place_can_basket 3/3`, and `open_microwave 1/3`.
+- Teacher action-source was `36/247 = 14.57%`, meeting the sub-15% routing
+  target. Draft/teacher action latency p50 was `0.422s/1.123s`.
+- Six high-motion drafts were rejected before execution. The task-level shift
+  supports complementary failure modes: immediate video motion protects
+  `hanging_mug`, while `open_microwave` needs low-motion cumulative refresh.
+- The next no-code configuration combines motion threshold 1.2 with a 0.18
+  single flow refresh. Delayed recovery and repeated flow bursts remain off.

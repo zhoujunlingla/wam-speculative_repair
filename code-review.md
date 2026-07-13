@@ -394,3 +394,15 @@ Verification: remote policy/launcher/specverify suite `35 passed`; local
 Decision: allowed to run a four-task TN=3 pilot with motion threshold 1.2,
 flow-budget disabled, delayed recovery disabled, and delayed-error telemetry,
 K=2 endpoint verification, PF=20, and gripper consensus retained.
+
+## Hybrid Motion/Flow Configuration Review
+
+Configuration-only change; no source behavior changed. It composes the tested
+pre-execution motion gate with the existing tested 0.18 single flow refresh.
+Delayed recovery and flow bursts remain disabled, so the two teacher triggers
+cannot create an unreviewed multi-round counter interaction. Existing K=2
+verification, PF20, and gripper consensus are unchanged.
+
+Decision: allowed to run the same four-task TN=3 pilot. Compare both success
+and teacher action-source against motion-only (`8/12`, 14.57%) and delayed-
+route (`8/12`, 28.77%).

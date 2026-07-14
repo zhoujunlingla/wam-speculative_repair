@@ -97,6 +97,13 @@ def read_metric(run_root: Path, task: str) -> dict:
 def source_summary(path: Path) -> dict:
     counts: dict[str, int] = {}
     latencies: dict[str, list[float]] = {}
+    repair = {
+        "eligible": 0,
+        "attempted": 0,
+        "executed": 0,
+        "action_only_forwards": 0,
+        "kinds": {},
+    }
     if path.exists():
         for line in path.read_text(errors="replace").splitlines():
             try:
@@ -105,6 +112,15 @@ def source_summary(path: Path) -> dict:
                 continue
             source = str(row.get("source", "unknown"))
             counts[source] = counts.get(source, 0) + 1
+            repair["eligible"] += int(bool(row.get("repair_eligible", False)))
+            repair["attempted"] += int(bool(row.get("repair_attempted", False)))
+            repair["executed"] += int(bool(row.get("repair_executed", False)))
+            repair["action_only_forwards"] += int(
+                row.get("repair_action_only_forwards", 0) or 0
+            )
+            if row.get("repair_kind"):
+                kind = str(row["repair_kind"])
+                repair["kinds"][kind] = repair["kinds"].get(kind, 0) + 1
             if row.get("elapsed_sec") is not None:
                 latencies.setdefault(source, []).append(float(row["elapsed_sec"]))
     stats = {}
@@ -120,6 +136,7 @@ def source_summary(path: Path) -> dict:
         "counts": counts,
         "latency": stats,
         "teacher_action_rate": counts.get("teacher_full", 0) / action_total if action_total else None,
+        "repair": repair,
     }
 
 

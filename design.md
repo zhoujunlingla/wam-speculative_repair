@@ -468,3 +468,14 @@ first or second tau is responsible for each rejected prefix.
 - Run a long-episode smoke with server and renderer memory recorded; no
   per-probe temporary KV cache may remain allocated.
 - Run direct draft and teacher smokes before speculative evaluation.
+
+## ACP Low10x20 Runner
+
+The pool runner is orchestration only. It assigns the ten clean tasks to eight
+A800 workers, invokes the existing one-task launcher, and merges task summaries.
+It must not alter model configs or policy defaults. The formal repair command
+pins the completed Motion-on controls (`K=2`, tau 50/100, delta 0.15, PF=20,
+motion gate 1.2, gripper consensus) and adds only the two reviewed repair flags.
+Merged artifacts include per-task success, Teacher action-source rate, repair
+eligibility/attempt/execution counts, repair kinds, extra verifier forwards,
+and per-source latency.

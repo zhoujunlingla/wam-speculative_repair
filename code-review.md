@@ -351,6 +351,27 @@ formal low10x20 run is allowed only after smoke evidence contains at least one
 eligible repair or proves the path remains safely dormant; no benchmark claim
 may combine pre-fix and post-fix consensus behavior.
 
+## ACP Low10x20 Orchestration Review
+
+No blocking finding remains. The new shell runner only shards the fixed ten
+tasks and calls the existing one-task launcher. It pins the completed Motion-on
+control values and adds the reviewed gripper/zero-prefix repair flags; model
+configs, checkpoints, client protocol, seed, task config, and render environment
+remain owned by existing code.
+
+Safety checks: fresh run/result roots are mandatory, each GPU owns one server
+and client at a unique port, failures propagate through the final exit status,
+and unrelated processes are never inspected or terminated by the runner.
+Summary merging reads only completed per-task JSON artifacts and includes both
+success and repair/source telemetry.
+
+Verification: local and remote `bash -n` passed; local `py_compile` and
+`git diff --check` passed; remote combined suite passed `51/51`.
+
+Decision: allowed to submit a one-task TN=1 pool smoke. The formal 8xA800
+low10x20 job may start only after the smoke reaches rendering and returns a
+valid summary with no cache, reset, action-shape, or non-finite error.
+
 ## Progress Evidence Update Review
 
 Documentation-only update. It records completed artifacts and explicitly marks

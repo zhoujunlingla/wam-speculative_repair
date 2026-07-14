@@ -61,12 +61,14 @@ The repair experiment has two separately gated stages:
    channels remain byte-identical. An independent Gaussian K=2 holdout must
    accept the complete chunk before the policy executes a conservative
    16-action repaired prefix.
-2. **Zero-prefix flow-state projection.** A pure continuous zero-prefix may
-   use the low-noise teacher endpoint residual to make one bounded correction
-   to the noisy flow state, followed by one teacher action-only corrector.
-   Only the first 16 actions of continuous channels may change; gripper and
-   suffix remain unchanged. A separate Gaussian K=2 holdout must recover at
-   least 16 actions before execution.
+2. **Zero-prefix flow-endpoint projection.** A pure continuous zero-prefix may
+   use the mean low-noise teacher endpoint already returned by the primary
+   action-flow verifier. The draft moves once along that endpoint residual,
+   with a per-step trust-region cap. This reuses the existing flow probe and
+   avoids a second construction forward. Only the first 16 actions of
+   continuous channels may change; gripper and suffix remain unchanged. A
+   separate Gaussian K=2 holdout must recover at least 16 actions before
+   execution.
 
 Rejected repairs cannot mutate cache state, frame ids, pending gripper state,
 or the primary verifier RNG. Accepted repaired actions use the normal draft

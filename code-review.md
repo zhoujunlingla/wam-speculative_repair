@@ -302,6 +302,55 @@ Allowed to proceed to a real-model smoke. Do not launch the formal low10x20
 comparison until the smoke records a repair attempt, preserves cache ordering,
 and completes without reset, render, shape, or non-finite-value errors.
 
+## Zero-Prefix Endpoint Repair And Holdout Hardening Review
+
+### Findings First
+
+The review found one blocking inherited acceptance bug and three experiment
+validity issues. All are fixed in the reviewed diff.
+
+1. In consensus mode, `--no-teacher-gripper-fallback` could make the policy
+   read `accepted_prefix_before_gripper` and bypass the server's final gripper
+   consensus prefix. Both primary acceptance and repair holdout now use the
+   final server prefix whenever consensus is enabled. Repair holdouts always
+   prefer final `accepted_prefix`, independent of the legacy fallback switch.
+2. Shadow probes shared the executable repair RNG. A dedicated `shadow_rng`
+   now guarantees that enabling counterfactual logging cannot change later
+   repair candidates or actions.
+3. The gripper helper implements a 2-of-3 vote and therefore requires exactly
+   two primary probes plus one tiebreak probe. Invalid K is now rejected at
+   configuration time instead of silently disabling repair.
+4. Gripper repair budget is consumed only after the primary continuous prefix
+   covers the full horizon. Telemetry now records eligibility, attempts,
+   action-only repair forwards, holdout prefix, correction norm, and execution.
+
+The zero-prefix path reuses the teacher flow endpoint already produced by the
+primary verifier. It changes only the first aligned 16-action block of the 14
+continuous latent channels, caps per-step RMS, freezes gripper/suffix values,
+and executes only after a fresh K=2 holdout recovers at least 16 actions.
+Malformed/non-finite candidates fail closed to the existing teacher replan.
+
+Residual risk is medium: endpoint projection can improve verifier agreement
+without improving contact semantics. The formal result must therefore report
+accepted-repair episode success, not merely repair acceptance.
+
+### Verification
+
+- Local `py_compile`: passed.
+- `git diff --check`: passed.
+- Remote policy/launcher/verifier suite: `50 passed`.
+- Added regression coverage for final-prefix gripper rejection under
+  `--no-teacher-gripper-fallback`, K contract, shadow RNG isolation, accepted
+  zero-prefix execution, failed holdout replan, trust-region bound, and cache
+  source state.
+
+### Decision
+
+Allowed to proceed to real-model smoke with the frozen Motion-on controls. A
+formal low10x20 run is allowed only after smoke evidence contains at least one
+eligible repair or proves the path remains safely dormant; no benchmark claim
+may combine pre-fix and post-fix consensus behavior.
+
 ## Progress Evidence Update Review
 
 Documentation-only update. It records completed artifacts and explicitly marks

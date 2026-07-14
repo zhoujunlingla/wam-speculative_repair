@@ -149,6 +149,7 @@ def main() -> None:
     parser.add_argument("--gripper-consensus", action="store_true")
     parser.add_argument("--gripper-repair", action="store_true")
     parser.add_argument("--gripper-repair-tau", type=float, default=75.0)
+    parser.add_argument("--zero-prefix-repair", action="store_true")
     parser.add_argument("--repair-max-per-episode", type=int, default=2)
     parser.add_argument("--repair-shadow", action="store_true")
     parser.add_argument("--repair-strength", type=float, default=0.5)
@@ -194,6 +195,8 @@ def main() -> None:
         server_cmd.append("--gripper-consensus")
     if args.gripper_repair:
         server_cmd.append("--gripper-repair")
+    if args.zero_prefix_repair:
+        server_cmd.append("--zero-prefix-repair")
     server_cmd.extend([
         "--gripper-repair-tau", str(args.gripper_repair_tau),
         "--repair-max-per-episode", str(args.repair_max_per_episode),
@@ -286,6 +289,7 @@ def main() -> None:
         "gripper_consensus": args.gripper_consensus,
         "gripper_repair": args.gripper_repair,
         "gripper_repair_tau": args.gripper_repair_tau,
+        "zero_prefix_repair": args.zero_prefix_repair,
         "repair_max_per_episode": args.repair_max_per_episode,
         "repair_shadow": args.repair_shadow,
         "repair_strength": args.repair_strength,

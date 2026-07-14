@@ -423,7 +423,8 @@ class VA_Server:
                             verify_seed=None,
                             previous_gripper=None,
                             gripper_threshold=0.0,
-                            gripper_consensus=False):
+                            gripper_consensus=False,
+                            return_gripper_phase=False):
         """Verify one normalized draft and return its teacher-tail stitch."""
 
         if draft_actions.ndim != 5 or draft_actions.shape[0] != 1 or \
@@ -576,7 +577,7 @@ class VA_Server:
             teacher_endpoint.detach()).astype(np.float32, copy=False)
         stitched_action = self.postprocess_action(
             stitched_action_latent.detach()).astype(np.float32, copy=False)
-        return {
+        result = {
             'accepted_prefix': accepted_prefix,
             'accepted_prefix_before_gripper': accepted_before_gripper,
             'raw_prefix': raw_prefix,
@@ -615,6 +616,16 @@ class VA_Server:
             'gripper_consensus_failure_index': consensus_failure_index,
             'fallback_required': accepted_prefix == 0,
         }
+        if return_gripper_phase:
+            result.update(
+                gripper_phase_by_tau=reconstructed_gripper_phase[
+                    ..., 0
+                ].detach().cpu().tolist(),
+                draft_gripper_phase=draft_gripper_phase[
+                    0, ..., 0
+                ].detach().cpu().tolist(),
+            )
+        return result
 
     def _encode_obs(self, obs):
         images = obs['obs']
@@ -959,6 +970,7 @@ class VA_Server:
                 previous_gripper=obs.get('previous_gripper'),
                 gripper_threshold=float(obs.get('gripper_threshold', 0.0)),
                 gripper_consensus=bool(obs.get('gripper_consensus', False)),
+                return_gripper_phase=bool(obs.get('return_gripper_phase', False)),
             )
             distances = verify_result.pop('distances')
             tau_timesteps = verify_result.pop('tau_timesteps')

@@ -147,6 +147,9 @@ def main() -> None:
     parser.add_argument("--video-motion-gate-threshold", type=float, default=0.0)
     parser.add_argument("--gripper-full-window", type=int, default=1)
     parser.add_argument("--gripper-consensus", action="store_true")
+    parser.add_argument("--gripper-repair", action="store_true")
+    parser.add_argument("--gripper-repair-tau", type=float, default=75.0)
+    parser.add_argument("--repair-max-per-episode", type=int, default=2)
     parser.add_argument("--repair-shadow", action="store_true")
     parser.add_argument("--repair-strength", type=float, default=0.5)
     parser.add_argument("--repair-max-step-rms", type=float, default=0.15)
@@ -189,6 +192,12 @@ def main() -> None:
     ]
     if args.gripper_consensus:
         server_cmd.append("--gripper-consensus")
+    if args.gripper_repair:
+        server_cmd.append("--gripper-repair")
+    server_cmd.extend([
+        "--gripper-repair-tau", str(args.gripper_repair_tau),
+        "--repair-max-per-episode", str(args.repair_max_per_episode),
+    ])
     if args.repair_shadow:
         server_cmd.append("--repair-shadow")
     server_cmd.extend([
@@ -275,6 +284,9 @@ def main() -> None:
         "video_motion_gate_threshold": args.video_motion_gate_threshold,
         "gripper_full_window": args.gripper_full_window,
         "gripper_consensus": args.gripper_consensus,
+        "gripper_repair": args.gripper_repair,
+        "gripper_repair_tau": args.gripper_repair_tau,
+        "repair_max_per_episode": args.repair_max_per_episode,
         "repair_shadow": args.repair_shadow,
         "repair_strength": args.repair_strength,
         "repair_max_step_rms": args.repair_max_step_rms,

@@ -4,6 +4,7 @@ from pathlib import Path
 import sys
 
 import numpy as np
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -11,6 +12,7 @@ from evaluation.robotwin.realtime_flash_policy import (
     RealtimeFlashPolicy,
     bounded_endpoint_repair,
     first_gripper_switch,
+    gripper_phase_snap_repair,
     infer_with_replan,
     longest_safe_prefix,
     normalized_l2_step_distances,
@@ -161,6 +163,74 @@ def test_bounded_endpoint_repair_changes_only_continuous_prefix():
     assert np.allclose(candidate[:, :14, 0], 0.1)
     assert np.array_equal(candidate[:, :14, 1], draft[:, :14, 1])
     assert np.array_equal(candidate[:, 14:], draft[:, 14:])
+
+
+def test_gripper_phase_snap_changes_only_small_majority_disagreement():
+    latent = np.zeros((1, 30, 2, 16, 1), dtype=np.float32)
+    latent[:, 28:30] = -1.0
+    draft_phase = np.zeros((2, 2, 16), dtype=bool)
+    draft_phase[:, 0, 5:] = True
+    draft_phase[:, 1] = True
+    latent[0, 28:30, :, :, 0] = np.where(draft_phase, 1.0, -1.0)
+    teacher_phase = draft_phase.copy()
+    teacher_phase[:, 0, 4] = True
+
+    repaired = gripper_phase_snap_repair(
+        latent,
+        np.stack((teacher_phase, teacher_phase)),
+        teacher_phase[None],
+        draft_phase,
+        previous_phase=np.array([False, False]),
+    )
+
+    assert repaired is not None
+    candidate, edit_count = repaired
+    assert edit_count == 2
+    assert np.array_equal(candidate[:, :28], latent[:, :28])
+    assert np.array_equal(candidate[:, 28:30, 0, 4, 0], np.ones((1, 2)))
+    unchanged = np.ones((2, 2, 16), dtype=bool)
+    unchanged[:, 0, 4] = False
+    assert np.array_equal(
+        candidate[0, 28:30, :, :, 0][unchanged],
+        latent[0, 28:30, :, :, 0][unchanged],
+    )
+
+
+def test_gripper_phase_snap_rejects_multi_transition_pulse():
+    latent = np.zeros((1, 30, 2, 16, 1), dtype=np.float32)
+    draft_phase = np.zeros((2, 2, 16), dtype=bool)
+    pulse = draft_phase.copy()
+    pulse[:, 0, 0] = True
+
+    assert gripper_phase_snap_repair(
+        latent,
+        np.stack((pulse, pulse)),
+        pulse[None],
+        draft_phase,
+        previous_phase=np.array([False, False]),
+    ) is None
+
+
+def test_gripper_phase_snap_respects_conditioned_frame_offset():
+    latent = np.zeros((1, 30, 3, 16, 1), dtype=np.float32)
+    latent[:, 28:30] = -1.0
+    draft_phase = np.zeros((2, 2, 16), dtype=bool)
+    teacher_phase = draft_phase.copy()
+    teacher_phase[:, 1, -1] = True
+
+    repaired = gripper_phase_snap_repair(
+        latent,
+        np.stack((teacher_phase, teacher_phase)),
+        teacher_phase[None],
+        draft_phase,
+        frame_offset=1,
+    )
+
+    assert repaired is not None
+    candidate, edit_count = repaired
+    assert edit_count == 2
+    assert np.array_equal(candidate[:, :, 0], latent[:, :, 0])
+    assert np.array_equal(candidate[0, 28:30, 2, -1, 0], np.ones(2))
 
 
 def test_gripper_switch_finds_first_transition_not_only_endpoints():
@@ -871,6 +941,98 @@ def test_zero_prefix_shadow_repair_uses_holdout_and_still_replans(tmp_path):
     assert record["repair_shadow_holdout_prefix"] == 16
     assert record["repair_shadow_correction_max_rms"] <= 0.15
     assert policy.pending_cache_source is None
+
+
+def test_gripper_phase_repair_executes_independently_verified_prefix(tmp_path):
+    events = []
+    draft_action = _action(switch_step=5, value=0.25)
+    draft_action[15, 0, 5:] = 1.0
+    draft = _FakeModel("draft", events, action=draft_action)
+    draft_phase = np.zeros((2, 2, 16), dtype=bool)
+    draft_phase[:, 0, 5:] = True
+    draft_phase[:, 1] = True
+    draft.action_latent[:, 28:30] = np.where(
+        draft_phase[None, :, :, :, None], 1.0, -1.0
+    )
+    teacher_phase = draft_phase.copy()
+    teacher_phase[:, 0, 4] = True
+    repaired_action = draft_action.copy()
+    repaired_action[[7, 15], 0, 4] = 1.0
+    teacher = _FakeModel(
+        "teacher",
+        events,
+        verify_results=(
+            {
+                "accepted_prefix": 0,
+                "accepted_prefix_before_gripper": 32,
+                "gripper_consensus_failure_index": 4,
+                "gripper_phase_by_tau": np.stack(
+                    (teacher_phase, teacher_phase)
+                ).tolist(),
+                "draft_gripper_phase": draft_phase.tolist(),
+                "gripper_channels": [28, 29],
+            },
+            {
+                "accepted_prefix": 32,
+                "accepted_prefix_before_gripper": 32,
+                "gripper_phase_by_tau": teacher_phase[None].tolist(),
+            },
+            {
+                "accepted_prefix": 32,
+                "accepted_prefix_before_gripper": 32,
+                "prefix_by_tau": [32, 32],
+                "stitched_action": repaired_action,
+                "distances": np.zeros((2, 2, 16), dtype=np.float32),
+            },
+        ),
+    )
+    log_path = tmp_path / "metrics.jsonl"
+    policy = RealtimeFlashPolicy(
+        draft,
+        teacher,
+        pf_interval=20,
+        gripper_consensus=True,
+        gripper_repair=True,
+        rng=np.random.default_rng(7),
+        repair_rng=np.random.default_rng(8),
+        log_path=log_path,
+    )
+    policy.infer({"reset": True, "prompt": "test task"})
+    initial = policy.infer(_action_request())
+    policy.infer(_cache_request("anchor", initial["action"]))
+
+    response = policy.infer(_action_request())
+
+    verifies = [call for call in teacher.calls if call["kind"] == "verify"]
+    record = json.loads(log_path.read_text().splitlines()[-1])
+    assert len(verifies) == 3
+    assert verifies[0]["request"]["return_gripper_phase"] is True
+    assert verifies[1]["request"]["tau_timesteps"] == (75.0,)
+    assert np.array_equal(
+        verifies[0]["request"]["verify_noise"],
+        verifies[1]["request"]["verify_noise"],
+    )
+    assert not np.array_equal(
+        verifies[0]["request"]["verify_noise"],
+        verifies[2]["request"]["verify_noise"],
+    )
+    assert response["action_source"] == "draft_flash"
+    assert response["accepted_prefix"] == 16
+    assert np.array_equal(response["action"], repaired_action[:, :1])
+    assert record["repair_executed"] is True
+    assert record["repair_kind"] == "gripper_phase_snap"
+    assert record["repair_holdout_prefix"] == 32
+    assert record["repair_phase_edit_count"] == 2
+    assert policy.force_full_reason is None
+
+
+def test_gripper_repair_requires_consensus():
+    with pytest.raises(ValueError, match="requires gripper consensus"):
+        RealtimeFlashPolicy(
+            _FakeModel("draft", []),
+            _FakeModel("teacher", []),
+            gripper_repair=True,
+        )
 
 
 def test_direct_response_is_not_retried():

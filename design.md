@@ -42,6 +42,43 @@ the candidate remains phase-safe, and accepted shadow candidates correlate
 with episode recovery. The dedicated RNG is required so enabling shadow mode
 does not alter the primary verifier noise stream or baseline actions.
 
+## Motion-Baseline Repair Experiment
+
+The frozen quality reference is the completed hard-motion low10 x 20 run:
+`146/200 = 73.0%`, with `728/3366 = 21.63%` full-Teacher action rounds.
+Its full-path reasons were initial anchor 200, video motion 109, gripper
+consensus 304, zero prefix 90, and periodic refresh 25. Initial, motion, and
+periodic paths remain unchanged; only gripper-consensus and continuous
+zero-prefix fallbacks are eligible for repair.
+
+The repair experiment has two separately gated stages:
+
+1. **Gripper phase snap.** When all primary tau probes accept the full
+   continuous chunk but disagree with the draft gripper phase, a same-noise
+   tau=75 probe supplies a 2-of-3 phase vote. The candidate may change only
+   latent gripper channels 28/29, at no more than two action positions, and
+   only when each channel has at most one phase transition. Continuous action
+   channels remain byte-identical. An independent Gaussian K=2 holdout must
+   accept the complete chunk before the policy executes a conservative
+   16-action repaired prefix.
+2. **Zero-prefix flow-state projection.** A pure continuous zero-prefix may
+   use the low-noise teacher endpoint residual to make one bounded correction
+   to the noisy flow state, followed by one teacher action-only corrector.
+   Only the first 16 actions of continuous channels may change; gripper and
+   suffix remain unchanged. A separate Gaussian K=2 holdout must recover at
+   least 16 actions before execution.
+
+Rejected repairs cannot mutate cache state, frame ids, pending gripper state,
+or the primary verifier RNG. Accepted repaired actions use the normal draft
+cache acknowledgement path, and the client must return the repaired action
+that was actually executed. Full-Teacher action-source, action-only repair
+forward count, repair eligibility, independent holdout acceptance, correction
+norm, and repaired-episode outcome are reported separately.
+
+Promotion requires at least `150/200` success (stretch goal `151/200`) and
+full-Teacher action-source below 15%. Shadow acceptance alone is not evidence
+of task rescue; every executable stage requires a matched closed-loop run.
+
 ## Runtime State Machine
 
 1. Reset both model caches and all speculative state.

@@ -252,6 +252,56 @@ Decision: allowed to proceed to a two-task smoke with video-motion routing kept
 disabled. Raw video-motion statistics remain shadow-only because their observed
 AUC is approximately random (`0.52`-`0.58`).
 
+## Motion-Baseline Gripper Phase-Snap Repair Review
+
+### Scope
+
+Add one opt-in repair path to the frozen Motion-on SpecVerify policy. The path
+is entered only when the continuous endpoint verifier accepts the whole chunk
+but cross-tau gripper consensus rejects it. A third same-noise tau probe forms a
+2-of-3 phase vote; at most two discrete phase cells may be snapped. The result
+must then pass the unchanged K=2 verifier with an independent Gaussian probe.
+
+### Findings
+
+No blocking static finding remains.
+
+- The existing behavior is unchanged unless both `--gripper-consensus` and
+  `--gripper-repair` are enabled.
+- The repair cannot alter continuous action channels, conditioned history, or
+  the unverified suffix. It rejects pulses and any candidate with more than one
+  phase transition per gripper channel.
+- The construction probe deliberately reuses primary noise, but execution is
+  gated by a dedicated RNG and a fresh K=2 holdout. This avoids the prior
+  same-question repair/reverify bias.
+- A successful repair executes only one 16-action temporal unit and returns the
+  teacher-verifier's decoded stitched candidate. Cache acknowledgement remains
+  on the existing draft path and therefore corresponds to the action actually
+  returned to the client.
+- Failed or malformed repair probes fail closed into the pre-existing teacher
+  fallback. The per-episode attempt budget bounds the added teacher forwards.
+
+Residual experiment risk is medium. Agreement among flow probes certifies only
+the discrete action phase, not successful contact. The low10x20 run must report
+repair-attempt count, independent holdout acceptance, accepted-repair episode
+success, teacher source rate, and latency; raw repair acceptance is not a
+quality claim.
+
+### Verification
+
+- Local `py_compile`: passed before sync.
+- `git diff --check`: passed.
+- Remote policy/launcher/verifier suite: `44 passed`.
+- Tests cover phase-only edits, pulse rejection, conditioned-frame offset,
+  independent holdout noise, successful 16-step execution, and the opt-in
+  configuration guard.
+
+### Decision
+
+Allowed to proceed to a real-model smoke. Do not launch the formal low10x20
+comparison until the smoke records a repair attempt, preserves cache ordering,
+and completes without reset, render, shape, or non-finite-value errors.
+
 ## Progress Evidence Update Review
 
 Documentation-only update. It records completed artifacts and explicitly marks

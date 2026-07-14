@@ -574,3 +574,80 @@ replan, and absence of pending cache state. A real-model smoke reached
 Decision: allowed to run a four-task TN=5 counterfactual audit. Do not enable
 execution unless independent holdout prefix recovery has useful episode-level
 predictive value.
+
+## Flow-Consistent Repair Final Review
+
+### Scope
+
+Add a complete repair layer to the frozen Motion-on SpecVerify policy:
+teacher-flow midpoint/RK2 repair for pure continuous zero-prefix rejection,
+bounded discrete phase-snap repair for gripper consensus, independent K=2
+holdout verification, exact 16/32 prefix execution, task-outcome accounting,
+and a guarded low10 x 20 launcher.
+
+### Findings Resolved
+
+1. The first review found that finite midpoint inputs could still produce a
+   non-finite full-interval RK2 endpoint. The server now checks the midpoint,
+   midpoint velocity, and final RK2 endpoint separately. Any non-finite value
+   returns `flow_repair_eligible=false` with a rejection reason and preserves
+   the original Teacher fallback; an invalid latent is never sent into the next
+   model forward.
+2. Gripper repair originally charged K holdout forwards before knowing whether
+   the tie-break probe could construct a candidate. The probe now returns the
+   actual construction and holdout counts on every early-exit path. Summary
+   acceptance is `executed / holdout_evaluated`, not
+   `executed / attempted`.
+3. Gripper holdout semantics now match the design: an independently verified
+   prefix of 16 executes 16, a prefix of 32 executes 32, and zero falls back to
+   the Teacher. A partial phase rejection schedules the existing Teacher phase
+   window rather than clearing it.
+4. Independent repair holdouts explicitly set `flow_repair=false`; a caller
+   cannot accidentally nest construction inside the unchanged verifier.
+5. Repair telemetry separates primary verifier, candidate construction, and
+   holdout action-only forwards. Model-only reporting sums action/replan and
+   cache model time, reports executed low-level actions, and derives both
+   action-path and end-to-end model Hz.
+6. Episode repair success is joined only when reset ids and visualization
+   episode ids are an exact match. The formal merge requires all ten tasks,
+   exactly TN=20 each, zero client errors, valid artifacts, and identical
+   policy parameters; incomplete artifacts are written with
+   `complete=false` and the launcher exits nonzero.
+7. The formal launcher requires an explicit reviewed `CODE_COMMIT`, preventing
+   a dirty worktree from being mislabeled as its old HEAD. The experiment is
+   explicitly labeled as the combined
+   `motion-on+gripper-phase-snap+zero-prefix-flow-rk2` policy, so it is not
+   falsely attributed to FCR alone.
+
+### Residual Risk
+
+Research risk remains medium. Flow-consistent action repair can improve
+Teacher-manifold agreement without proving contact success, and discrete phase
+agreement is not a force/contact sensor. Promotion therefore depends on final
+episode success and Teacher usage, not repair acceptance alone. The dedicated
+repair tau=150 costs two construction forwards; measured model Hz must include
+them.
+
+### Verification
+
+- Local `py_compile`, `bash -n`, and `git diff --check`: passed.
+- A800 focused suite: `59 passed` in `1.51s`.
+- Tests cover RK2 endpoint semantics, continuous-axis caps, gripper/suffix
+  preservation, independent holdout RNG, exact 16/32 execution, gripper early
+  exit accounting, non-finite fail-closed policy behavior, episode alignment,
+  repaired-episode success, and model-time aggregation.
+- A first real-model smoke reached `Render Well`, executed a three-probe
+  gripper repair, and continued cache updates without OOM or state mutation.
+  It was started before the final accounting-only fixes and is diagnostic, not
+  benchmark evidence. A final reviewed-commit smoke remains required before
+  low10 x 20.
+- The unchanged full read-only-cache suite still requires the configured model
+  environment; default host Python cannot collect it because of the existing
+  `diffusers`/`bitsandbytes`/`triton` dependency conflict.
+
+### Decision
+
+Allowed to create the reviewed commit and run one final real-model smoke from
+that exact code. Formal low10 x 20 is allowed only after the final smoke has a
+valid artifact, no cache/reset/render error, and at least one repair path is
+observed or a dedicated server-level FCR probe succeeds.

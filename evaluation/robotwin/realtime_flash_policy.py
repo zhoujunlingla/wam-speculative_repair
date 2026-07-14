@@ -283,6 +283,9 @@ class RealtimeFlashPolicy:
         gripper_repair: bool = False,
         gripper_repair_tau: float = 75.0,
         zero_prefix_repair: bool = False,
+        flow_consistent_repair: bool = False,
+        flow_repair_tau: float = 0.0,
+        flow_repair_max_axis_delta: float = 0.2,
         repair_max_per_episode: int = 2,
         repair_shadow: bool = False,
         repair_strength: float = 0.5,
@@ -321,11 +324,23 @@ class RealtimeFlashPolicy:
             raise ValueError("gripper repair requires gripper consensus")
         if zero_prefix_repair and repair_shadow:
             raise ValueError("zero-prefix repair and shadow repair are mutually exclusive")
-        if zero_prefix_repair and (
+        if zero_prefix_repair and flow_consistent_repair:
+            raise ValueError("endpoint and flow-consistent repairs are mutually exclusive")
+        if (zero_prefix_repair or flow_consistent_repair) and (
             repair_prefix_len < action_per_frame
             or repair_prefix_len % action_per_frame != 0
         ):
             raise ValueError("zero-prefix repair length must align to action frames")
+        if (
+            not np.isfinite(flow_repair_tau)
+            or not 0 <= flow_repair_tau <= 1000
+        ):
+            raise ValueError("flow repair tau must be in [0, 1000]")
+        if (
+            not np.isfinite(flow_repair_max_axis_delta)
+            or flow_repair_max_axis_delta <= 0
+        ):
+            raise ValueError("flow repair axis bound must be positive")
         if not np.isfinite(gripper_repair_tau) or gripper_repair_tau <= 0:
             raise ValueError("gripper repair tau must be positive")
         if repair_max_per_episode < 1:
@@ -373,6 +388,9 @@ class RealtimeFlashPolicy:
         self.gripper_repair = bool(gripper_repair)
         self.gripper_repair_tau = float(gripper_repair_tau)
         self.zero_prefix_repair = bool(zero_prefix_repair)
+        self.flow_consistent_repair = bool(flow_consistent_repair)
+        self.flow_repair_tau = float(flow_repair_tau)
+        self.flow_repair_max_axis_delta = float(flow_repair_max_axis_delta)
         self.repair_max_per_episode = int(repair_max_per_episode)
         self.repair_shadow = bool(repair_shadow)
         self.repair_strength = float(repair_strength)
@@ -654,6 +672,7 @@ class RealtimeFlashPolicy:
         holdout_request = dict(request)
         holdout_request.update(
             verify_action=True,
+            flow_repair=False,
             action_latent=candidate,
             verify_noise=self.shadow_rng.standard_normal(candidate.shape).astype(
                 np.float32
@@ -719,18 +738,30 @@ class RealtimeFlashPolicy:
         action_latent: np.ndarray,
         verify_response: dict,
         horizon: int,
-    ) -> dict | None:
+    ) -> dict:
         if int(verify_response.get("accepted_prefix_before_gripper", 0)) < horizon:
-            return None
+            return {
+                "accepted": False,
+                "construction_forwards": 0,
+                "holdout_forwards": 0,
+                "rejection_reason": "primary_continuous_prefix",
+            }
         tiebreak_request = dict(verify_request)
         tiebreak_request.update(
             tau_timesteps=(self.gripper_repair_tau,),
             gripper_consensus=False,
             return_gripper_phase=True,
+            flow_repair=False,
         )
         tiebreak = self._call(self.teacher, tiebreak_request)
+        result = {
+            "accepted": False,
+            "construction_forwards": 1,
+            "holdout_forwards": 0,
+        }
         if int(tiebreak.get("accepted_prefix_before_gripper", 0)) < horizon:
-            return None
+            result["rejection_reason"] = "tiebreak_continuous_prefix"
+            return result
         try:
             repaired = gripper_phase_snap_repair(
                 action_latent,
@@ -744,20 +775,24 @@ class RealtimeFlashPolicy:
                 else self.last_gripper >= self.gripper_threshold,
             )
         except (TypeError, ValueError):
-            return None
+            result["rejection_reason"] = "invalid_phase_probe"
+            return result
         if repaired is None:
-            return None
+            result["rejection_reason"] = "no_bounded_phase_candidate"
+            return result
         candidate, edit_count = repaired
         holdout, holdout_prefix = self._independent_repair_verify(
             request, candidate, horizon
         )
-        return {
-            "candidate": candidate,
-            "holdout": holdout,
-            "holdout_prefix": holdout_prefix,
-            "phase_edit_count": edit_count,
-            "accepted": holdout_prefix >= horizon,
-        }
+        result.update(
+            candidate=candidate,
+            holdout=holdout,
+            holdout_prefix=holdout_prefix,
+            phase_edit_count=edit_count,
+            holdout_forwards=len(self.tau_timesteps),
+            accepted=holdout_prefix >= self.action_per_frame,
+        )
+        return result
 
     def _zero_prefix_repair_probe(
         self,
@@ -790,6 +825,29 @@ class RealtimeFlashPolicy:
             "accepted": holdout_prefix >= min(self.repair_prefix_len, horizon),
         }
 
+    def _flow_consistent_repair_probe(
+        self,
+        request: dict,
+        verify_response: dict,
+        horizon: int,
+    ) -> dict | None:
+        candidate = verify_response.get("flow_repair_candidate_latent")
+        if candidate is None or not verify_response.get("flow_repair_eligible", False):
+            return None
+        candidate = np.asarray(candidate, dtype=np.float32)
+        if not np.isfinite(candidate).all():
+            return None
+        holdout, holdout_prefix = self._independent_repair_verify(
+            request, candidate, horizon
+        )
+        return {
+            "candidate": candidate,
+            "holdout": holdout,
+            "holdout_prefix": holdout_prefix,
+            "stats": verify_response.get("flow_repair_stats") or {},
+            "accepted": holdout_prefix >= self.action_per_frame,
+        }
+
     def _flash(self, request: dict) -> dict:
         start = time.perf_counter()
         draft_request = dict(request)
@@ -805,6 +863,12 @@ class RealtimeFlashPolicy:
         action_latent = np.asarray(action_latent)
         video_motion_stats = draft_response.get("video_motion_stats")
         horizon = action.shape[1] * action.shape[2]
+        switch_step = first_gripper_switch(
+            action,
+            self.gripper_channels,
+            self.gripper_threshold,
+            previous=self.last_gripper,
+        )
 
         global_motion = None
         if self.video_motion_gate_threshold > 0 or self.flow_budget_motion_ceiling > 0:
@@ -846,6 +910,15 @@ class RealtimeFlashPolicy:
             frame_st_id=self.frame_st_id,
             gripper_consensus=self.gripper_consensus,
             return_gripper_phase=self.gripper_repair,
+            flow_repair=(
+                self.flow_consistent_repair
+                and self.repair_count < self.repair_max_per_episode
+                and switch_step is None
+            ),
+            flow_repair_tau=self.flow_repair_tau,
+            flow_repair_prefix_len=self.repair_prefix_len,
+            flow_repair_max_axis_delta=self.flow_repair_max_axis_delta,
+            flow_repair_max_step_rms=self.repair_max_step_rms,
         )
         if self.last_gripper is not None:
             previous_phase = self.last_gripper >= self.gripper_threshold
@@ -894,12 +967,6 @@ class RealtimeFlashPolicy:
             self.force_full_reason = "teacher_gripper_switch"
             self.gripper_full_rounds_left = self.gripper_full_window
 
-        switch_step = first_gripper_switch(
-            action,
-            self.gripper_channels,
-            self.gripper_threshold,
-            previous=self.last_gripper,
-        )
         accepted_prefix = verified_prefix
         if (
             switch_step is not None
@@ -921,9 +988,16 @@ class RealtimeFlashPolicy:
         repair_holdout_prefix = None
         repair_phase_edit_count = None
         repair_correction_max_rms = None
+        primary_flow_repair_stats = verify_response.get("flow_repair_stats") or {}
+        repair_flow_stats = (
+            dict(primary_flow_repair_stats) if primary_flow_repair_stats else None
+        )
         repair_eligible = False
         repair_attempted = False
-        repair_action_only_forwards = 0
+        repair_construction_forwards = int(
+            primary_flow_repair_stats.get("construction_forward_count", 0)
+        )
+        repair_holdout_forwards = 0
         if (
             self.gripper_repair
             and gripper_consensus_failure is not None
@@ -932,34 +1006,87 @@ class RealtimeFlashPolicy:
         ):
             repair_eligible = True
             repair_attempted = True
-            repair_action_only_forwards += 1 + len(self.tau_timesteps)
             self.repair_count += 1
             repair = self._gripper_repair_probe(
                 request, verify_request, action_latent, verify_response, horizon
             )
-            if repair is not None:
+            repair_construction_forwards += int(
+                repair.get("construction_forwards", 0)
+            )
+            repair_holdout_forwards += int(repair.get("holdout_forwards", 0))
+            if repair.get("holdout_prefix") is not None:
                 repair_holdout_prefix = int(repair["holdout_prefix"])
                 repair_phase_edit_count = int(repair["phase_edit_count"])
-                if repair["accepted"]:
+            if repair["accepted"]:
+                action_latent = repair["candidate"]
+                verify_response = repair["holdout"]
+                verified_prefix = repair_holdout_prefix
+                accepted_prefix = min(repair_holdout_prefix, horizon)
+                action = np.asarray(verify_response["stitched_action"])
+                switch_step = first_gripper_switch(
+                    action,
+                    self.gripper_channels,
+                    self.gripper_threshold,
+                    previous=self.last_gripper,
+                )
+                gripper_consensus_failure = verify_response.get(
+                    "gripper_consensus_failure_index"
+                )
+                teacher_gripper_switch = bool(
+                    verify_response.get("gripper_force_teacher", False)
+                )
+                self.force_full_reason = (
+                    "gripper_consensus"
+                    if gripper_consensus_failure is not None
+                    else None
+                )
+                self.gripper_full_rounds_left = (
+                    self.gripper_full_window
+                    if gripper_consensus_failure is not None
+                    else 0
+                )
+                repair_executed = True
+                repair_kind = "gripper_phase_snap"
+
+        if (
+            self.flow_consistent_repair
+            and accepted_prefix == 0
+            and self.force_full_reason is None
+            and not teacher_gripper_switch
+            and gripper_consensus_failure is None
+            and switch_step is None
+            and self.repair_count < self.repair_max_per_episode
+        ):
+            repair_eligible = bool(
+                verify_response.get("flow_repair_eligible", False)
+            )
+            if repair_eligible:
+                repair_attempted = True
+                repair_holdout_forwards += len(self.tau_timesteps)
+                self.repair_count += 1
+                repair = self._flow_consistent_repair_probe(
+                    request, verify_response, horizon
+                )
+                if repair is not None:
+                    repair_holdout_prefix = int(repair["holdout_prefix"])
+                    repair_flow_stats = dict(repair["stats"])
+                if repair is not None and repair["accepted"]:
                     action_latent = repair["candidate"]
                     verify_response = repair["holdout"]
                     verified_prefix = repair_holdout_prefix
-                    accepted_prefix = min(self.action_per_frame, horizon)
+                    accepted_prefix = min(repair_holdout_prefix, horizon)
                     action = np.asarray(verify_response["stitched_action"])
-                    switch_step = first_gripper_switch(
-                        action,
-                        self.gripper_channels,
-                        self.gripper_threshold,
-                        previous=self.last_gripper,
-                    )
-                    gripper_consensus_failure = None
                     teacher_gripper_switch = bool(
                         verify_response.get("gripper_force_teacher", False)
                     )
-                    self.force_full_reason = None
-                    self.gripper_full_rounds_left = 0
+                    gripper_consensus_failure = verify_response.get(
+                        "gripper_consensus_failure_index"
+                    )
+                    if gripper_consensus_failure is not None:
+                        self.force_full_reason = "gripper_consensus"
+                        self.gripper_full_rounds_left = self.gripper_full_window
                     repair_executed = True
-                    repair_kind = "gripper_phase_snap"
+                    repair_kind = "zero_prefix_flow_rk2"
 
         if (
             self.zero_prefix_repair
@@ -972,7 +1099,7 @@ class RealtimeFlashPolicy:
         ):
             repair_eligible = True
             repair_attempted = True
-            repair_action_only_forwards += len(self.tau_timesteps)
+            repair_holdout_forwards += len(self.tau_timesteps)
             self.repair_count += 1
             try:
                 repair = self._zero_prefix_repair_probe(
@@ -1033,9 +1160,16 @@ class RealtimeFlashPolicy:
                 repair_holdout_prefix=repair_holdout_prefix,
                 repair_phase_edit_count=repair_phase_edit_count,
                 repair_correction_max_rms=repair_correction_max_rms,
+                repair_flow_stats=repair_flow_stats,
                 repair_eligible=repair_eligible,
                 repair_attempted=repair_attempted,
-                repair_action_only_forwards=repair_action_only_forwards,
+                primary_verify_forwards=len(self.tau_timesteps),
+                repair_construction_forwards=repair_construction_forwards,
+                repair_holdout_forwards=repair_holdout_forwards,
+                repair_holdout_evaluated=repair_holdout_forwards > 0,
+                repair_action_only_forwards=(
+                    repair_construction_forwards + repair_holdout_forwards
+                ),
                 **(repair_shadow or {}),
                 **verify_telemetry,
                 elapsed_sec=time.perf_counter() - start,
@@ -1115,9 +1249,16 @@ class RealtimeFlashPolicy:
             repair_holdout_prefix=repair_holdout_prefix,
             repair_phase_edit_count=repair_phase_edit_count,
             repair_correction_max_rms=repair_correction_max_rms,
+            repair_flow_stats=repair_flow_stats,
             repair_eligible=repair_eligible,
             repair_attempted=repair_attempted,
-            repair_action_only_forwards=repair_action_only_forwards,
+            primary_verify_forwards=len(self.tau_timesteps),
+            repair_construction_forwards=repair_construction_forwards,
+            repair_holdout_forwards=repair_holdout_forwards,
+            repair_holdout_evaluated=repair_holdout_forwards > 0,
+            repair_action_only_forwards=(
+                repair_construction_forwards + repair_holdout_forwards
+            ),
             **verify_telemetry,
             elapsed_sec=time.perf_counter() - start,
         )

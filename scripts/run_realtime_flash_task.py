@@ -94,16 +94,50 @@ def read_metric(run_root: Path, task: str) -> dict:
     }
 
 
-def source_summary(path: Path) -> dict:
+def read_episode_outcomes(run_root: Path, task: str) -> dict[int, bool]:
+    root = run_root / "results" / "stseed-10000" / "visualization" / task
+    videos = sorted(
+        root.glob("*.mp4"),
+        key=lambda path: int(path.name.split("_", 1)[0]),
+    ) if root.exists() else []
+    outcomes = {}
+    for path in videos:
+        label = path.stem.rsplit("_", 1)[-1]
+        if label in {"True", "False"}:
+            episode_id = int(path.name.split("_", 1)[0])
+            outcomes[episode_id] = label == "True"
+    return outcomes
+
+
+def source_summary(
+    path: Path,
+    episode_outcomes: dict[int, bool] | None = None,
+) -> dict:
     counts: dict[str, int] = {}
     latencies: dict[str, list[float]] = {}
     repair = {
         "eligible": 0,
         "attempted": 0,
         "executed": 0,
+        "primary_verify_forwards": 0,
+        "construction_forwards": 0,
+        "holdout_forwards": 0,
+        "holdout_evaluated": 0,
         "action_only_forwards": 0,
         "kinds": {},
+        "episodes_executed": 0,
+        "episodes_success": 0,
+        "episode_success_rate": None,
+        "episode_kinds": {},
+        "episode_log_count": 0,
+        "episode_outcome_count": 0,
+        "episode_alignment_valid": episode_outcomes is None,
     }
+    episodes = []
+    current_episode = None
+    action_model_elapsed_sec = 0.0
+    cache_model_elapsed_sec = 0.0
+    executed_action_count = 0
     if path.exists():
         for line in path.read_text(errors="replace").splitlines():
             try:
@@ -111,18 +145,69 @@ def source_summary(path: Path) -> dict:
             except json.JSONDecodeError:
                 continue
             source = str(row.get("source", "unknown"))
+            if source == "reset":
+                if current_episode is not None:
+                    episodes.append(current_episode)
+                current_episode = {"repair_executed": False, "kinds": set()}
             counts[source] = counts.get(source, 0) + 1
             repair["eligible"] += int(bool(row.get("repair_eligible", False)))
             repair["attempted"] += int(bool(row.get("repair_attempted", False)))
             repair["executed"] += int(bool(row.get("repair_executed", False)))
+            repair["primary_verify_forwards"] += int(
+                row.get("primary_verify_forwards", 0) or 0
+            )
+            repair["construction_forwards"] += int(
+                row.get("repair_construction_forwards", 0) or 0
+            )
+            repair["holdout_forwards"] += int(
+                row.get("repair_holdout_forwards", 0) or 0
+            )
+            repair["holdout_evaluated"] += int(
+                bool(row.get("repair_holdout_evaluated", False))
+            )
             repair["action_only_forwards"] += int(
                 row.get("repair_action_only_forwards", 0) or 0
             )
             if row.get("repair_kind"):
                 kind = str(row["repair_kind"])
                 repair["kinds"][kind] = repair["kinds"].get(kind, 0) + 1
+                if current_episode is not None and row.get("repair_executed", False):
+                    current_episode["repair_executed"] = True
+                    current_episode["kinds"].add(kind)
             if row.get("elapsed_sec") is not None:
-                latencies.setdefault(source, []).append(float(row["elapsed_sec"]))
+                elapsed = float(row["elapsed_sec"])
+                latencies.setdefault(source, []).append(elapsed)
+                if source in {"draft_flash", "teacher_full", "replan"}:
+                    action_model_elapsed_sec += elapsed
+                elif source.endswith("_cache_update"):
+                    cache_model_elapsed_sec += elapsed
+            if source in {"draft_flash", "teacher_full"}:
+                executed_action_count += int(row.get("accepted_prefix", 0) or 0)
+    if current_episode is not None:
+        episodes.append(current_episode)
+    repair["episode_log_count"] = len(episodes)
+    if episode_outcomes is not None:
+        repair["episode_outcome_count"] = len(episode_outcomes)
+        repair["episode_alignment_valid"] = (
+            set(episode_outcomes) == set(range(len(episodes)))
+        )
+    if episode_outcomes is not None and repair["episode_alignment_valid"]:
+        for episode_id, episode in enumerate(episodes):
+            if not episode["repair_executed"]:
+                continue
+            success = episode_outcomes[episode_id]
+            repair["episodes_executed"] += 1
+            repair["episodes_success"] += int(success)
+            for kind in episode["kinds"]:
+                stats = repair["episode_kinds"].setdefault(
+                    kind, {"episodes": 0, "success": 0}
+                )
+                stats["episodes"] += 1
+                stats["success"] += int(success)
+        if repair["episodes_executed"]:
+            repair["episode_success_rate"] = (
+                repair["episodes_success"] / repair["episodes_executed"]
+            )
     stats = {}
     for source, values in latencies.items():
         values.sort()
@@ -132,10 +217,25 @@ def source_summary(path: Path) -> dict:
             "p90_sec": values[round((len(values) - 1) * 0.9)],
         }
     action_total = counts.get("teacher_full", 0) + counts.get("draft_flash", 0)
+    total_model_elapsed_sec = action_model_elapsed_sec + cache_model_elapsed_sec
     return {
         "counts": counts,
         "latency": stats,
         "teacher_action_rate": counts.get("teacher_full", 0) / action_total if action_total else None,
+        "model_time": {
+            "action_sec": action_model_elapsed_sec,
+            "cache_sec": cache_model_elapsed_sec,
+            "total_sec": total_model_elapsed_sec,
+            "executed_actions": executed_action_count,
+            "action_path_hz": (
+                executed_action_count / action_model_elapsed_sec
+                if action_model_elapsed_sec else None
+            ),
+            "end_to_end_model_hz": (
+                executed_action_count / total_model_elapsed_sec
+                if total_model_elapsed_sec else None
+            ),
+        },
         "repair": repair,
     }
 
@@ -167,6 +267,9 @@ def main() -> None:
     parser.add_argument("--gripper-repair", action="store_true")
     parser.add_argument("--gripper-repair-tau", type=float, default=75.0)
     parser.add_argument("--zero-prefix-repair", action="store_true")
+    parser.add_argument("--flow-consistent-repair", action="store_true")
+    parser.add_argument("--flow-repair-tau", type=float, default=0.0)
+    parser.add_argument("--flow-repair-max-axis-delta", type=float, default=0.2)
     parser.add_argument("--repair-max-per-episode", type=int, default=2)
     parser.add_argument("--repair-shadow", action="store_true")
     parser.add_argument("--repair-strength", type=float, default=0.5)
@@ -214,6 +317,8 @@ def main() -> None:
         server_cmd.append("--gripper-repair")
     if args.zero_prefix_repair:
         server_cmd.append("--zero-prefix-repair")
+    if args.flow_consistent_repair:
+        server_cmd.append("--flow-consistent-repair")
     server_cmd.extend([
         "--gripper-repair-tau", str(args.gripper_repair_tau),
         "--repair-max-per-episode", str(args.repair_max_per_episode),
@@ -224,6 +329,8 @@ def main() -> None:
         "--repair-strength", str(args.repair_strength),
         "--repair-max-step-rms", str(args.repair_max_step_rms),
         "--repair-prefix-len", str(args.repair_prefix_len),
+        "--flow-repair-max-axis-delta", str(args.flow_repair_max_axis_delta),
+        "--flow-repair-tau", str(args.flow_repair_tau),
     ])
     if not args.teacher_gripper_fallback:
         server_cmd.append("--no-teacher-gripper-fallback")
@@ -285,6 +392,17 @@ def main() -> None:
         server_log.close()
 
     metric = read_metric(args.run_root, args.task)
+    outcomes = read_episode_outcomes(args.run_root, args.task)
+    policy_summary = source_summary(metrics_log, outcomes)
+    artifact_errors = []
+    if metric["total_num"] and not policy_summary["repair"][
+        "episode_alignment_valid"
+    ]:
+        artifact_errors.append(
+            "episode reset/video ids do not align: "
+            f"logs={policy_summary['repair']['episode_log_count']} "
+            f"videos={policy_summary['repair']['episode_outcome_count']}"
+        )
     summary = {
         "mode": args.mode,
         "task": args.task,
@@ -307,6 +425,9 @@ def main() -> None:
         "gripper_repair": args.gripper_repair,
         "gripper_repair_tau": args.gripper_repair_tau,
         "zero_prefix_repair": args.zero_prefix_repair,
+        "flow_consistent_repair": args.flow_consistent_repair,
+        "flow_repair_tau": args.flow_repair_tau,
+        "flow_repair_max_axis_delta": args.flow_repair_max_axis_delta,
         "repair_max_per_episode": args.repair_max_per_episode,
         "repair_shadow": args.repair_shadow,
         "repair_strength": args.repair_strength,
@@ -316,8 +437,10 @@ def main() -> None:
         "started_at": started,
         "ended_at": datetime.now().isoformat(timespec="seconds"),
         "client_rc": client_rc,
+        "artifact_valid": not artifact_errors,
+        "artifact_errors": artifact_errors,
         "metric": metric,
-        "policy": source_summary(metrics_log),
+        "policy": policy_summary,
     }
     for root in (args.run_root, args.result_root):
         (root / f"summary_{args.task}.json").write_text(json.dumps(summary, indent=2))
@@ -325,7 +448,7 @@ def main() -> None:
         if path.exists():
             shutil.copy2(path, args.result_root / "logs" / path.name)
     print(json.dumps(summary, indent=2), flush=True)
-    if client_rc != 0 or metric["total_num"] < args.test_num:
+    if client_rc != 0 or metric["total_num"] < args.test_num or artifact_errors:
         raise SystemExit(client_rc or 2)
 
 

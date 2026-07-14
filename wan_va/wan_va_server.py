@@ -38,7 +38,9 @@ from utils import (
 )
 from specverify import (
     action_verify_frame_start,
+    bounded_continuous_prefix_repair,
     build_verify_action_input,
+    flow_euler_step,
     gripper_consensus_prefix,
     gripper_switch_info,
     latent_prediction_error_stats,
@@ -49,7 +51,9 @@ from specverify import (
     quantize_prefix_to_frame_boundary,
     sample_verify_noise_like,
     scheduler_add_noise_batched,
+    scheduler_sigma_and_timestep,
     scheduler_step_to_final_batched,
+    scheduler_timestep_at_sigma,
     stitch_action_prefix,
 )
 
@@ -424,7 +428,12 @@ class VA_Server:
                             previous_gripper=None,
                             gripper_threshold=0.0,
                             gripper_consensus=False,
-                            return_gripper_phase=False):
+                            return_gripper_phase=False,
+                            flow_repair=False,
+                            flow_repair_tau=0.0,
+                            flow_repair_prefix_len=16,
+                            flow_repair_max_axis_delta=0.2,
+                            flow_repair_max_step_rms=0.15):
         """Verify one normalized draft and return its teacher-tail stitch."""
 
         if draft_actions.ndim != 5 or draft_actions.shape[0] != 1 or \
@@ -570,6 +579,129 @@ class VA_Server:
             accepted_prefix = 0
             stitched_action_latent = teacher_endpoint
 
+        flow_repair_candidate = None
+        flow_repair_stats = None
+        flow_repair_eligible = bool(
+            flow_repair
+            and accepted_before_gripper == 0
+            and not draft_switch['has_switch']
+            and not any_reconstructed_switch
+        )
+        if flow_repair_eligible:
+            requested_repair_timestep = float(flow_repair_tau)
+            if requested_repair_timestep <= 0:
+                probe_sigmas = torch.stack([
+                    scheduler_sigma_and_timestep(
+                        self.verify_scheduler,
+                        timestep,
+                        device=self.device,
+                        dtype=self.dtype,
+                    )[0]
+                    for timestep in tau_timesteps
+                ])
+                probe_index = int(torch.argmin(probe_sigmas).item())
+                requested_repair_timestep = float(
+                    tau_timesteps[probe_index].item())
+            matching_probe = torch.nonzero(
+                torch.isclose(
+                    tau_timesteps,
+                    torch.tensor(
+                        requested_repair_timestep,
+                        device=self.device,
+                        dtype=tau_timesteps.dtype,
+                    ),
+                ),
+                as_tuple=False,
+            ).flatten()
+            sigma_start, repair_timestep = scheduler_sigma_and_timestep(
+                self.verify_scheduler,
+                requested_repair_timestep,
+                device=self.device,
+                dtype=self.dtype,
+            )
+            if matching_probe.numel():
+                probe_index = int(matching_probe[0].item())
+                z_start = z_tau[probe_index:probe_index + 1]
+                velocity_start = velocity[probe_index:probe_index + 1]
+                construction_forward_count = 0
+            else:
+                repair_clean = draft.clone()
+                repair_noise = shared_noise.clone()
+                if conditioned_frame_count:
+                    repair_clean[:, :, :conditioned_frame_count] = 0
+                    repair_noise[:, :, :conditioned_frame_count] = 0
+                z_start = scheduler_add_noise_batched(
+                    scheduler=self.verify_scheduler,
+                    clean=repair_clean,
+                    noise=repair_noise,
+                    timesteps=repair_timestep.reshape(1),
+                )
+                velocity_start = self.forward_action_only_verify(
+                    z_start,
+                    repair_timestep.reshape(1),
+                    frame_st_id=frame_st_id,
+                    cache_name=cache_name,
+                )
+                construction_forward_count = 1
+            midpoint_timestep, sigma_mid = scheduler_timestep_at_sigma(
+                self.verify_scheduler,
+                sigma_start.float() * 0.5,
+                device=self.device,
+            )
+            sigma_mid = sigma_mid.to(dtype=self.dtype)
+            z_mid = flow_euler_step(
+                z_start, velocity_start, sigma_start, sigma_mid
+            )
+            flow_repair_stats = {
+                'repair_timestep': float(repair_timestep.item()),
+                'repair_sigma': float(sigma_start.float().item()),
+                'midpoint_timestep': float(midpoint_timestep.item()),
+                'midpoint_sigma': float(sigma_mid.float().item()),
+                'construction_forward_count': construction_forward_count,
+                'reused_primary_probe': bool(matching_probe.numel()),
+            }
+            if not torch.isfinite(z_mid).all():
+                flow_repair_eligible = False
+                flow_repair_stats['rejection_reason'] = 'non_finite_flow_state'
+            else:
+                velocity_mid = self.forward_action_only_verify(
+                    z_mid,
+                    midpoint_timestep.reshape(1),
+                    frame_st_id=frame_st_id,
+                    cache_name=cache_name,
+                )
+                construction_forward_count += 1
+                flow_repair_stats['construction_forward_count'] = \
+                    construction_forward_count
+                if not torch.isfinite(velocity_mid).all():
+                    flow_repair_eligible = False
+                    flow_repair_stats['rejection_reason'] = \
+                        'non_finite_flow_state'
+                else:
+                    raw_rk2_endpoint = flow_euler_step(
+                        z_start, velocity_mid, sigma_start, 0.0
+                    )
+                    if not torch.isfinite(raw_rk2_endpoint).all():
+                        flow_repair_eligible = False
+                        flow_repair_stats['rejection_reason'] = \
+                            'non_finite_flow_endpoint'
+                    else:
+                        raw_rk2_endpoint[:, ~self.action_mask] = 0
+                        if conditioned_frame_count:
+                            raw_rk2_endpoint[
+                                :, :, :conditioned_frame_count
+                            ] = draft[:, :, :conditioned_frame_count]
+                        flow_repair_candidate, bounded_stats = \
+                            bounded_continuous_prefix_repair(
+                            draft,
+                            raw_rk2_endpoint,
+                            prefix_len=int(flow_repair_prefix_len),
+                            conditioned_frame_count=conditioned_frame_count,
+                            max_axis_delta=float(flow_repair_max_axis_delta),
+                            max_step_rms=float(flow_repair_max_step_rms),
+                        )
+                        flow_repair_stats.update(bounded_stats)
+
         teacher_endpoint_np = teacher_endpoint.detach().float().cpu().numpy()
         stitched_action_latent_np = stitched_action_latent.detach().float().cpu(
         ).numpy()
@@ -615,6 +747,10 @@ class VA_Server:
             'gripper_consensus_prefix': consensus_prefix,
             'gripper_consensus_failure_index': consensus_failure_index,
             'fallback_required': accepted_prefix == 0,
+            'flow_repair_eligible': flow_repair_eligible,
+            'flow_repair_candidate_latent': None if flow_repair_candidate is None
+                else flow_repair_candidate.detach().float().cpu().numpy(),
+            'flow_repair_stats': flow_repair_stats,
         }
         if return_gripper_phase:
             result.update(
@@ -971,6 +1107,14 @@ class VA_Server:
                 gripper_threshold=float(obs.get('gripper_threshold', 0.0)),
                 gripper_consensus=bool(obs.get('gripper_consensus', False)),
                 return_gripper_phase=bool(obs.get('return_gripper_phase', False)),
+                flow_repair=bool(obs.get('flow_repair', False)),
+                flow_repair_tau=float(obs.get('flow_repair_tau', 0.0)),
+                flow_repair_prefix_len=int(
+                    obs.get('flow_repair_prefix_len', 16)),
+                flow_repair_max_axis_delta=float(
+                    obs.get('flow_repair_max_axis_delta', 0.2)),
+                flow_repair_max_step_rms=float(
+                    obs.get('flow_repair_max_step_rms', 0.15)),
             )
             distances = verify_result.pop('distances')
             tau_timesteps = verify_result.pop('tau_timesteps')

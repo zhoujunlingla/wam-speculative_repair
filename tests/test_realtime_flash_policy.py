@@ -1031,6 +1031,114 @@ def test_zero_prefix_repair_failed_holdout_keeps_teacher_replan(tmp_path):
     assert policy.pending_cache_source is None
 
 
+def test_flow_consistent_repair_executes_exact_independent_holdout_prefix(tmp_path):
+    events = []
+    draft = _FakeModel("draft", events)
+    candidate = np.zeros((1, 30, 2, 16, 1), dtype=np.float32)
+    candidate[:, :14, 0] = 0.1
+    repaired_action = _action(value=0.3)
+    teacher = _FakeModel(
+        "teacher",
+        events,
+        verify_results=(
+            {
+                "accepted_prefix": 0,
+                "accepted_prefix_before_gripper": 0,
+                "flow_repair_eligible": True,
+                "flow_repair_candidate_latent": candidate,
+                "flow_repair_stats": {
+                    "repair_timestep": 50.0,
+                    "midpoint_timestep": 25.0,
+                    "construction_forward_count": 1,
+                },
+            },
+            {
+                "accepted_prefix": 32,
+                "prefix_by_tau": [32, 32],
+                "stitched_action": repaired_action,
+                "distances": np.zeros((2, 2, 16), dtype=np.float32),
+            },
+        ),
+    )
+    log_path = tmp_path / "metrics.jsonl"
+    policy = RealtimeFlashPolicy(
+        draft,
+        teacher,
+        pf_interval=20,
+        flow_consistent_repair=True,
+        rng=np.random.default_rng(7),
+        repair_rng=np.random.default_rng(8),
+        log_path=log_path,
+    )
+    policy.infer({"reset": True, "prompt": "test task"})
+    initial = policy.infer(_action_request())
+    policy.infer(_cache_request("anchor", initial["action"]))
+
+    response = policy.infer(_action_request())
+
+    verifies = [call for call in teacher.calls if call["kind"] == "verify"]
+    record = json.loads(log_path.read_text().splitlines()[-1])
+    assert len(verifies) == 2
+    assert verifies[0]["request"]["flow_repair"] is True
+    assert not np.array_equal(
+        verifies[0]["request"]["verify_noise"],
+        verifies[1]["request"]["verify_noise"],
+    )
+    assert response["action_source"] == "draft_flash"
+    assert response["accepted_prefix"] == 32
+    assert np.array_equal(response["action"], repaired_action)
+    assert record["repair_executed"] is True
+    assert record["repair_kind"] == "zero_prefix_flow_rk2"
+    assert record["repair_holdout_prefix"] == 32
+    assert record["primary_verify_forwards"] == 2
+    assert record["repair_construction_forwards"] == 1
+    assert record["repair_holdout_forwards"] == 2
+    assert record["repair_action_only_forwards"] == 3
+    assert record["repair_flow_stats"]["midpoint_timestep"] == 25.0
+
+
+def test_flow_consistent_repair_nonfinite_state_fails_closed(tmp_path):
+    events = []
+    teacher = _FakeModel(
+        "teacher",
+        events,
+        verify_results=(
+            {
+                "accepted_prefix": 0,
+                "accepted_prefix_before_gripper": 0,
+                "flow_repair_eligible": False,
+                "flow_repair_candidate_latent": None,
+                "flow_repair_stats": {
+                    "construction_forward_count": 1,
+                    "rejection_reason": "non_finite_flow_state",
+                },
+            },
+        ),
+    )
+    log_path = tmp_path / "metrics.jsonl"
+    policy = RealtimeFlashPolicy(
+        _FakeModel("draft", events),
+        teacher,
+        pf_interval=20,
+        flow_consistent_repair=True,
+        log_path=log_path,
+    )
+    policy.infer({"reset": True, "prompt": "test task"})
+    initial = policy.infer(_action_request())
+    policy.infer(_cache_request("anchor", initial["action"]))
+
+    response = policy.infer(_action_request())
+
+    record = json.loads(log_path.read_text().splitlines()[-1])
+    assert response["replan"] is True
+    assert response["fallback_reason"] == "zero_prefix"
+    assert record["repair_attempted"] is False
+    assert record["repair_construction_forwards"] == 1
+    assert record["repair_holdout_forwards"] == 0
+    assert record["repair_flow_stats"]["rejection_reason"] == \
+        "non_finite_flow_state"
+
+
 def test_zero_prefix_repair_rejects_unaligned_prefix_length():
     with pytest.raises(ValueError, match="align to action frames"):
         RealtimeFlashPolicy(
@@ -1070,7 +1178,10 @@ def test_shadow_probe_does_not_consume_executable_repair_rng():
     assert np.array_equal(teacher.calls[1]["request"]["verify_noise"], expected)
 
 
-def test_gripper_phase_repair_executes_independently_verified_prefix(tmp_path):
+@pytest.mark.parametrize("holdout_prefix", [16, 32])
+def test_gripper_phase_repair_executes_independently_verified_prefix(
+    tmp_path, holdout_prefix
+):
     events = []
     draft_action = _action(switch_step=5, value=0.25)
     draft_action[15, 0, 5:] = 1.0
@@ -1105,9 +1216,9 @@ def test_gripper_phase_repair_executes_independently_verified_prefix(tmp_path):
                 "gripper_phase_by_tau": teacher_phase[None].tolist(),
             },
             {
-                "accepted_prefix": 32,
+                "accepted_prefix": holdout_prefix,
                 "accepted_prefix_before_gripper": 32,
-                "prefix_by_tau": [32, 32],
+                "prefix_by_tau": [holdout_prefix, holdout_prefix],
                 "stitched_action": repaired_action,
                 "distances": np.zeros((2, 2, 16), dtype=np.float32),
             },
@@ -1144,12 +1255,16 @@ def test_gripper_phase_repair_executes_independently_verified_prefix(tmp_path):
         verifies[2]["request"]["verify_noise"],
     )
     assert response["action_source"] == "draft_flash"
-    assert response["accepted_prefix"] == 16
-    assert np.array_equal(response["action"], repaired_action[:, :1])
+    assert response["accepted_prefix"] == holdout_prefix
+    expected_action = repaired_action if holdout_prefix == 32 \
+        else repaired_action[:, :1]
+    assert np.array_equal(response["action"], expected_action)
     assert record["repair_executed"] is True
     assert record["repair_kind"] == "gripper_phase_snap"
-    assert record["repair_holdout_prefix"] == 32
+    assert record["repair_holdout_prefix"] == holdout_prefix
     assert record["repair_phase_edit_count"] == 2
+    assert record["repair_construction_forwards"] == 1
+    assert record["repair_holdout_forwards"] == 2
     assert policy.force_full_reason is None
 
 
@@ -1205,6 +1320,47 @@ def test_gripper_repair_holdout_cannot_bypass_final_gripper_rejection():
     assert response["fallback_reason"] == "gripper_consensus"
     assert response["verified_prefix"] == 0
     assert policy.pending_cache_source is None
+
+
+def test_gripper_repair_early_exit_counts_only_tiebreak_forward(tmp_path):
+    events = []
+    teacher = _FakeModel(
+        "teacher",
+        events,
+        verify_results=(
+            {
+                "accepted_prefix": 0,
+                "accepted_prefix_before_gripper": 32,
+                "gripper_consensus_failure_index": 4,
+            },
+            {
+                "accepted_prefix": 16,
+                "accepted_prefix_before_gripper": 16,
+            },
+        ),
+    )
+    log_path = tmp_path / "metrics.jsonl"
+    policy = RealtimeFlashPolicy(
+        _FakeModel("draft", events),
+        teacher,
+        pf_interval=20,
+        gripper_consensus=True,
+        gripper_repair=True,
+        log_path=log_path,
+    )
+    policy.infer({"reset": True, "prompt": "test task"})
+    initial = policy.infer(_action_request())
+    policy.infer(_cache_request("anchor", initial["action"]))
+
+    response = policy.infer(_action_request())
+
+    record = json.loads(log_path.read_text().splitlines()[-1])
+    assert response["replan"] is True
+    assert response["fallback_reason"] == "gripper_consensus"
+    assert record["repair_construction_forwards"] == 1
+    assert record["repair_holdout_forwards"] == 0
+    assert record["repair_holdout_evaluated"] is False
+    assert record["repair_action_only_forwards"] == 1
 
 
 def test_gripper_repair_requires_consensus():

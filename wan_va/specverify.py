@@ -246,6 +246,130 @@ def scheduler_step_to_final_batched(
     ], dim=0)
 
 
+def scheduler_sigma_and_timestep(
+    scheduler: FlowMatchScheduler,
+    timestep: float | torch.Tensor,
+    *,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return the scheduler-grid sigma and canonical timestep nearest ``timestep``."""
+
+    value = torch.as_tensor(timestep, dtype=torch.float32).flatten()
+    if value.numel() != 1 or not torch.isfinite(value).all():
+        raise ValueError("timestep must be one finite scalar")
+    index = torch.argmin((scheduler.timesteps - value.cpu()).abs())
+    sigma = scheduler.sigmas[index].to(device=device, dtype=dtype)
+    canonical = scheduler.timesteps[index].to(device=device, dtype=torch.float32)
+    return sigma, canonical
+
+
+def scheduler_timestep_at_sigma(
+    scheduler: FlowMatchScheduler,
+    sigma: float | torch.Tensor,
+    *,
+    device: torch.device,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return the scheduler-grid timestep and sigma nearest ``sigma``."""
+
+    value = torch.as_tensor(sigma, dtype=torch.float32).flatten()
+    if value.numel() != 1 or not torch.isfinite(value).all():
+        raise ValueError("sigma must be one finite scalar")
+    index = torch.argmin((scheduler.sigmas - value.cpu()).abs())
+    canonical_sigma = scheduler.sigmas[index].to(device=device)
+    timestep = scheduler.timesteps[index].to(device=device, dtype=torch.float32)
+    return timestep, canonical_sigma
+
+
+def flow_euler_step(
+    sample: torch.Tensor,
+    velocity: torch.Tensor,
+    sigma_from: float | torch.Tensor,
+    sigma_to: float | torch.Tensor,
+) -> torch.Tensor:
+    """Advance one flow state using an explicit velocity and sigma interval."""
+
+    if sample.shape != velocity.shape:
+        raise ValueError("sample and velocity must have identical shape")
+    sigma_from = torch.as_tensor(
+        sigma_from, device=sample.device, dtype=sample.dtype
+    )
+    sigma_to = torch.as_tensor(sigma_to, device=sample.device, dtype=sample.dtype)
+    if sigma_from.numel() != 1 or sigma_to.numel() != 1:
+        raise ValueError("flow step sigmas must be scalar")
+    if not torch.isfinite(sigma_from).all() or not torch.isfinite(sigma_to).all():
+        raise ValueError("flow step sigmas must be finite")
+    return sample + velocity * (sigma_to - sigma_from)
+
+
+def bounded_continuous_prefix_repair(
+    draft: torch.Tensor,
+    target: torch.Tensor,
+    *,
+    prefix_len: int,
+    conditioned_frame_count: int,
+    max_axis_delta: float,
+    max_step_rms: float,
+    continuous_channels=CONTINUOUS_CHANNELS,
+) -> tuple[torch.Tensor, dict[str, float]]:
+    """Move a continuous action prefix toward ``target`` under explicit bounds."""
+
+    if draft.ndim != 5 or draft.shape[0] != 1 or draft.shape[-1] != 1:
+        raise ValueError("draft must have shape [1, C, F, N, 1]")
+    if target.shape != draft.shape:
+        raise ValueError("target must match draft")
+    if not torch.isfinite(draft).all() or not torch.isfinite(target).all():
+        raise ValueError("repair inputs must be finite")
+    if prefix_len <= 0 or conditioned_frame_count < 0:
+        raise ValueError("repair prefix bounds are invalid")
+    if not math.isfinite(float(max_axis_delta)) or max_axis_delta <= 0:
+        raise ValueError("max_axis_delta must be positive")
+    if not math.isfinite(float(max_step_rms)) or max_step_rms <= 0:
+        raise ValueError("max_step_rms must be positive")
+
+    channels = tuple(int(channel) for channel in continuous_channels)
+    if not channels or min(channels) < 0 or max(channels) >= draft.shape[1]:
+        raise ValueError("continuous channel index is outside the action tensor")
+    actions_per_frame = draft.shape[3]
+    total_actions = draft.shape[2] * actions_per_frame
+    start = min(conditioned_frame_count * actions_per_frame, total_actions)
+    end = min(max(int(prefix_len), start), total_actions)
+    candidate = draft.clone()
+    if end <= start:
+        return candidate, {
+            "raw_max_axis_delta": 0.0,
+            "applied_max_axis_delta": 0.0,
+            "applied_max_step_rms": 0.0,
+            "clipped_fraction": 0.0,
+        }
+
+    draft_flat = draft[:, channels, :, :, 0].reshape(1, len(channels), -1)
+    target_flat = target[:, channels, :, :, 0].reshape(1, len(channels), -1)
+    raw_delta = target_flat[:, :, start:end] - draft_flat[:, :, start:end]
+    axis_bounded = raw_delta.clamp(-max_axis_delta, max_axis_delta)
+    step_rms = axis_bounded.float().square().mean(dim=1, keepdim=True).sqrt()
+    scale = (max_step_rms / step_rms.clamp_min(1e-8)).clamp(max=1.0)
+    bounded_delta = axis_bounded * scale.to(axis_bounded)
+    candidate_flat = candidate[:, channels, :, :, 0].reshape(
+        1, len(channels), -1
+    )
+    candidate_flat[:, :, start:end] = (
+        draft_flat[:, :, start:end] + bounded_delta
+    )
+    candidate[:, channels, :, :, 0] = candidate_flat.reshape(
+        1, len(channels), draft.shape[2], actions_per_frame
+    )
+
+    applied_rms = bounded_delta.float().square().mean(dim=1).sqrt()
+    clipped = (bounded_delta - raw_delta).abs() > 1e-6
+    return candidate, {
+        "raw_max_axis_delta": float(raw_delta.abs().max().item()),
+        "applied_max_axis_delta": float(bounded_delta.abs().max().item()),
+        "applied_max_step_rms": float(applied_rms.max().item()),
+        "clipped_fraction": float(clipped.float().mean().item()),
+    }
+
+
 def normalized_l2_distances(
     reconstructed: torch.Tensor,
     draft: torch.Tensor,

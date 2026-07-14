@@ -1170,12 +1170,15 @@ def test_shadow_probe_does_not_consume_executable_repair_rng():
     response = {"teacher_endpoint_latent": latent.copy()}
 
     policy._shadow_repair_probe(_action_request(), latent, response, 32)
-    policy._independent_repair_verify(_action_request(), latent, 32)
+    holdout_request = _action_request()
+    holdout_request["flow_repair"] = True
+    policy._independent_repair_verify(holdout_request, latent, 32)
 
     expected = np.random.default_rng(8).standard_normal(latent.shape).astype(
         np.float32
     )
     assert np.array_equal(teacher.calls[1]["request"]["verify_noise"], expected)
+    assert teacher.calls[1]["request"]["flow_repair"] is False
 
 
 @pytest.mark.parametrize("holdout_prefix", [16, 32])

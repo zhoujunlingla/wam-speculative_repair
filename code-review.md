@@ -603,7 +603,8 @@ and a guarded low10 x 20 launcher.
    the Teacher. A partial phase rejection schedules the existing Teacher phase
    window rather than clearing it.
 4. Independent repair holdouts explicitly set `flow_repair=false`; a caller
-   cannot accidentally nest construction inside the unchanged verifier.
+   cannot accidentally nest construction inside the unchanged verifier. A
+   regression test passes an inherited true value and verifies it is cleared.
 5. Repair telemetry separates primary verifier, candidate construction, and
    holdout action-only forwards. Model-only reporting sums action/replan and
    cache model time, reports executed low-level actions, and derives both
@@ -613,7 +614,10 @@ and a guarded low10 x 20 launcher.
    exactly TN=20 each, zero client errors, valid artifacts, and identical
    policy parameters; incomplete artifacts are written with
    `complete=false` and the launcher exits nonzero.
-7. The formal launcher requires an explicit reviewed `CODE_COMMIT`, preventing
+7. The formal launcher rejects any `TEST_NUM` other than 20, any checkout whose
+   `HEAD` differs from `CODE_COMMIT`, and any dirty tracked or untracked file.
+   Provenance is therefore checked before GPU processes or result roots exist.
+8. The formal launcher requires an explicit reviewed `CODE_COMMIT`, preventing
    a dirty worktree from being mislabeled as its old HEAD. The experiment is
    explicitly labeled as the combined
    `motion-on+gripper-phase-snap+zero-prefix-flow-rk2` policy, so it is not
@@ -631,6 +635,8 @@ them.
 ### Verification
 
 - Local `py_compile`, `bash -n`, and `git diff --check`: passed.
+- Formal-launch negative gates reject TN other than 20, a mismatched commit, and
+  a dirty checkout before creating run roots: passed.
 - A800 focused suite: `59 passed` in `1.51s`.
 - Tests cover RK2 endpoint semantics, continuous-axis caps, gripper/suffix
   preservation, independent holdout RNG, exact 16/32 execution, gripper early

@@ -708,6 +708,7 @@ class RealtimeFlashPolicy:
         holdout_request = dict(request)
         holdout_request.update(
             verify_action=True,
+            flow_repair=False,
             action_latent=candidate,
             verify_noise=self.repair_rng.standard_normal(candidate.shape).astype(
                 np.float32

@@ -15,6 +15,19 @@ if [[ "$GPU_COUNT" != "8" ]]; then
   echo "This matched low10 runner requires GPU_COUNT=8" >&2
   exit 2
 fi
+if [[ "$TEST_NUM" != "20" ]]; then
+  echo "This formal low10 runner requires TEST_NUM=20" >&2
+  exit 2
+fi
+ACTUAL_COMMIT=$(git -C "$CODE" rev-parse HEAD)
+if [[ "$ACTUAL_COMMIT" != "$CODE_COMMIT" ]]; then
+  echo "CODE_COMMIT=$CODE_COMMIT does not match checkout $ACTUAL_COMMIT" >&2
+  exit 2
+fi
+if [[ -n "$(git -C "$CODE" status --porcelain --untracked-files=all)" ]]; then
+  echo "Formal evaluation requires a clean code checkout" >&2
+  exit 2
+fi
 if [[ -e "$RUN_ROOT" || -e "$RESULT_ROOT" ]]; then
   echo "Refusing to reuse an experiment root" >&2
   exit 2

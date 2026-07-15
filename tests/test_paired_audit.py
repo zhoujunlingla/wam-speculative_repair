@@ -24,12 +24,15 @@ def test_trace_comparison_accepts_identical_behavior_with_shadow_telemetry(tmp_p
         "adaptive_k_certificate_matches_full": True,
     }) + "\n")
 
-    off_decisions, off_caches, _ = load_trace(off)
-    shadow_decisions, shadow_caches, conflicts = load_trace(shadow)
+    off_decisions, off_caches, _, off_certificates = load_trace(off)
+    shadow_decisions, shadow_caches, conflicts, shadow_certificates = \
+        load_trace(shadow)
 
     assert first_difference(off_decisions, shadow_decisions) is None
     assert first_difference(off_caches, shadow_caches) is None
     assert conflicts == 0
+    assert off_certificates == 0
+    assert shadow_certificates == 1
 
 
 def test_trace_comparison_detects_action_and_certificate_conflict(tmp_path):
@@ -42,14 +45,16 @@ def test_trace_comparison_detects_action_and_certificate_conflict(tmp_path):
     shadow.write_text(json.dumps({
         "source": "draft_flash", "executed_action_hash": "b",
         "accepted_prefix": 32, "cache_hash": "c", "frame_st_id": 0,
+        "adaptive_k_certificate_kind": "pass",
         "adaptive_k_certificate_matches_full": False,
     }) + "\n")
 
-    off_decisions, _, _ = load_trace(off)
-    shadow_decisions, _, conflicts = load_trace(shadow)
+    off_decisions, _, _, _ = load_trace(off)
+    shadow_decisions, _, conflicts, certificates = load_trace(shadow)
 
     assert first_difference(off_decisions, shadow_decisions) is not None
     assert conflicts == 1
+    assert certificates == 1
 
 
 def test_trace_comparison_rejects_empty_or_unhashed_evidence(tmp_path):
@@ -64,6 +69,36 @@ def test_trace_comparison_rejects_empty_or_unhashed_evidence(tmp_path):
     }) + "\n")
     with pytest.raises(ValueError, match="missing action hash"):
         load_trace(unhashed)
+
+    malformed = tmp_path / "malformed.jsonl"
+    malformed.write_text(json.dumps({
+        "source": "draft_flash", "executed_action_hash": "action",
+        "accepted_prefix": 32, "cache_hash": "cache",
+        "adaptive_k_certificate_kind": "pass",
+        "adaptive_k_certificate_matches_full": None,
+    }) + "\n")
+    with pytest.raises(ValueError, match="malformed adaptive-K certificate"):
+        load_trace(malformed)
+
+    orphan = tmp_path / "orphan.jsonl"
+    orphan.write_text(json.dumps({
+        "source": "draft_flash", "executed_action_hash": "action",
+        "accepted_prefix": 32, "cache_hash": "cache",
+        "adaptive_k_certificate_kind": None,
+        "adaptive_k_certificate_matches_full": False,
+    }) + "\n")
+    with pytest.raises(ValueError, match="orphan adaptive-K match"):
+        load_trace(orphan)
+
+    unsupported = tmp_path / "unsupported.jsonl"
+    unsupported.write_text(json.dumps({
+        "source": "draft_flash", "executed_action_hash": "action",
+        "accepted_prefix": 32, "cache_hash": "cache",
+        "adaptive_k_certificate_kind": "fail",
+        "adaptive_k_certificate_matches_full": True,
+    }) + "\n")
+    with pytest.raises(ValueError, match="unsupported adaptive-K"):
+        load_trace(unsupported)
 
 
 def test_manifest_validation_fails_closed_on_task_or_count(tmp_path):

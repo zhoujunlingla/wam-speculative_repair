@@ -425,9 +425,7 @@ class VA_Server:
                             verify_seed=None,
                             previous_gripper=None,
                             gripper_threshold=0.0,
-                            gripper_consensus=False,
-                            adaptive_k_shadow=False,
-                            adaptive_k_distance_threshold=0.05):
+                            gripper_consensus=False):
         """Verify one normalized draft and return its teacher-tail stitch."""
 
         if draft_actions.ndim != 5 or draft_actions.shape[0] != 1 or \
@@ -445,10 +443,6 @@ class VA_Server:
             raise ValueError('tau_timesteps must be non-empty')
         if gripper_consensus and tau_timesteps.numel() < 2:
             raise ValueError('gripper consensus requires at least two tau probes')
-        if (not np.isfinite(adaptive_k_distance_threshold)
-                or adaptive_k_distance_threshold < 0):
-            raise ValueError('adaptive K distance threshold must be non-negative')
-
         draft = draft_actions.to(device=self.device, dtype=self.dtype).clone()
         draft[:, ~self.action_mask] = 0
         batch_size = tau_timesteps.numel()
@@ -576,99 +570,6 @@ class VA_Server:
             accepted_prefix = 0
             stitched_action_latent = teacher_endpoint
 
-        adaptive_k_certificate_kind = None
-        adaptive_k_fail_reason = None
-        adaptive_k_certificate_matches_full = None
-        sentinel_distance_max = None
-        sentinel_full_prefix = None
-        sentinel_continuous_prefix = None
-        sentinel_gripper_prefix = None
-        sentinel_accepted_prefix = None
-        sentinel_gripper_failure_index = None
-        sentinel_phase_agreement = None
-        sentinel_gripper_switch = None
-        if adaptive_k_shadow:
-            sentinel_distances = distances[:1]
-            sentinel_valid_distances = sentinel_distances[
-                :, conditioned_frame_count:, :
-            ]
-            sentinel_raw_prefix, _, _ = longest_prefix_min_over_k(
-                sentinel_valid_distances, threshold
-            )
-            sentinel_continuous_prefix = quantize_prefix_to_frame_boundary(
-                conditioned_frame_count * self.action_per_frame
-                + sentinel_raw_prefix,
-                action_per_frame=self.action_per_frame,
-                frame_chunk_size=self.job_config.frame_chunk_size,
-            )
-            sentinel_distance_max = float(
-                sentinel_valid_distances.max().float().item()
-            )
-            sentinel_full_prefix = bool(
-                sentinel_raw_prefix == sentinel_valid_distances.numel()
-            )
-            sentinel_phase_agreement = bool(torch.all(
-                (reconstructed[
-                    :1, gripper_channels, conditioned_frame_count:
-                ] >= gripper_threshold)
-                == (draft_batch[
-                    :1, gripper_channels, conditioned_frame_count:
-                ] >= gripper_threshold)
-            ).item())
-            sentinel_reconstructed_switch = gripper_switch_info(
-                reconstructed[:1],
-                previous=previous_gripper,
-                threshold=gripper_threshold,
-            )
-            sentinel_gripper_switch = bool(
-                sentinel_reconstructed_switch['has_switch']
-                or draft_switch['has_switch']
-            )
-            sentinel_accepted_prefix = sentinel_continuous_prefix
-            if gripper_consensus:
-                # ponytail: the consensus helper requires K>=2. Repeating the
-                # first probe preserves the K1 OR decision without a new API.
-                sentinel_gripper_raw, sentinel_gripper_failure_index = \
-                    gripper_consensus_prefix(
-                        reconstructed[:1].repeat(2, 1, 1, 1, 1),
-                        draft,
-                        max_prefix=sentinel_continuous_prefix,
-                        threshold=gripper_threshold,
-                    )
-                sentinel_gripper_prefix = quantize_prefix_to_frame_boundary(
-                    sentinel_gripper_raw,
-                    action_per_frame=self.action_per_frame,
-                    frame_chunk_size=self.job_config.frame_chunk_size,
-                )
-                sentinel_accepted_prefix = min(
-                    sentinel_continuous_prefix, sentinel_gripper_prefix
-                )
-
-            pass_certificate = bool(
-                sentinel_distance_max <= adaptive_k_distance_threshold
-                and sentinel_full_prefix
-                and sentinel_phase_agreement
-                and not sentinel_gripper_switch
-            )
-            if sentinel_continuous_prefix == 0:
-                adaptive_k_fail_reason = 'continuous'
-            elif gripper_consensus and sentinel_gripper_prefix == 0:
-                adaptive_k_fail_reason = 'gripper_consensus'
-            if pass_certificate:
-                adaptive_k_certificate_kind = 'pass'
-                adaptive_k_certificate_matches_full = bool(
-                    accepted_prefix == draft.shape[2] * draft.shape[3]
-                )
-            elif adaptive_k_fail_reason is not None:
-                adaptive_k_certificate_kind = 'fail'
-                adaptive_k_certificate_matches_full = bool(
-                    accepted_prefix == 0
-                    and bool(sentinel_reconstructed_switch['has_switch'])
-                    == bool(any_reconstructed_switch)
-                    and sentinel_gripper_failure_index
-                    == consensus_failure_index
-                )
-
         teacher_endpoint_np = teacher_endpoint.detach().float().cpu().numpy()
         stitched_action_latent_np = stitched_action_latent.detach().float().cpu(
         ).numpy()
@@ -717,23 +618,6 @@ class VA_Server:
             'requested_verify_k': int(batch_size),
             'effective_verify_k': int(batch_size),
             'primary_verify_forwards': int(batch_size),
-            'adaptive_k_shadow': bool(adaptive_k_shadow),
-            'adaptive_k_distance_threshold': float(
-                adaptive_k_distance_threshold),
-            'adaptive_k_certificate_kind': adaptive_k_certificate_kind,
-            'adaptive_k_fail_reason': adaptive_k_fail_reason,
-            'adaptive_k_certificate_matches_full':
-                adaptive_k_certificate_matches_full,
-            'adaptive_k_sentinel_distance_max': sentinel_distance_max,
-            'adaptive_k_sentinel_full_prefix': sentinel_full_prefix,
-            'adaptive_k_sentinel_continuous_prefix':
-                sentinel_continuous_prefix,
-            'adaptive_k_sentinel_gripper_prefix': sentinel_gripper_prefix,
-            'adaptive_k_sentinel_accepted_prefix': sentinel_accepted_prefix,
-            'adaptive_k_sentinel_gripper_failure_index':
-                sentinel_gripper_failure_index,
-            'adaptive_k_sentinel_phase_agreement': sentinel_phase_agreement,
-            'adaptive_k_sentinel_gripper_switch': sentinel_gripper_switch,
         }
 
     def _encode_obs(self, obs):
@@ -1102,9 +986,6 @@ class VA_Server:
                 previous_gripper=obs.get('previous_gripper'),
                 gripper_threshold=float(obs.get('gripper_threshold', 0.0)),
                 gripper_consensus=bool(obs.get('gripper_consensus', False)),
-                adaptive_k_shadow=bool(obs.get('adaptive_k_shadow', False)),
-                adaptive_k_distance_threshold=float(
-                    obs.get('adaptive_k_distance_threshold', 0.05)),
             )
             distances = verify_result.pop('distances')
             tau_timesteps = verify_result.pop('tau_timesteps')

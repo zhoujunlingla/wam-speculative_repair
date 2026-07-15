@@ -436,3 +436,23 @@ are excluded from live latency measurement.
 Success-rate recovery is explicitly out of scope. Adaptive-K reduces verifier
 compute but cannot make a false-accepted draft correct. Any later work on
 success belongs to a separate false-accept verifier branch.
+
+### TN=1 isolation failure and corrective design
+
+The first paired smoke failed before the 20-scene run: shadow CUDA work inside
+the teacher server changed the later draft cache write, followed by a different
+executed action. Shadow instrumentation must therefore live above the model
+boundary. The corrected shadow has these constraints:
+
+- off and shadow send the exact same request to the K=2 teacher verifier;
+- the server performs no adaptive-K tensor operation or allocation;
+- the policy computes a pass-only candidate from the already-returned CPU K=2
+  telemetry and compares it with the final policy decision tuple;
+- fail candidates are omitted until the response exposes enough K1 gripper
+  state to reproduce the full policy decision without inference;
+- a declared candidate must carry a strict boolean match, and paired validation
+  requires both zero conflicts and nonzero candidate coverage.
+
+The failed TN=1 artifacts remain preserved as negative evidence. The same
+manifest and GPU are reused after the corrective commit; the 20-scene run is
+still blocked until the repeated TN=1 trace is exactly equivalent.

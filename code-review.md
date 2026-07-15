@@ -485,3 +485,58 @@ is not implemented and is not approved by this review.
 - Synthetic paired trace and adaptive summary checks passed.
 - Local `pytest` is unavailable; the full focused pytest suite must pass in the
   A800 runtime before any RoboTwin smoke.
+
+## Adaptive-K Host-Only Corrective Review (2026-07-16)
+
+### Findings
+
+- **P1 fixed:** shadow-only teacher-server tensor work changed later cache and
+  action hashes despite leaving the immediate K=2 decision unchanged. Adaptive
+  candidate logic now runs in the policy after the unchanged K=2 response and
+  performs only NumPy/host operations. The obsolete adaptive branch and its
+  request parameters were deleted from the teacher server, making accidental
+  shadow CUDA execution impossible through this API.
+- **P1 fixed:** the previous fail certificate compared an internal failure
+  index instead of the final policy decision. Fail candidates are removed; the
+  remaining pass candidate predicts the exact source, full action hash, prefix,
+  and fallback reason.
+- **P1 fixed:** candidate matching previously happened before gripper fallback
+  fields were written. Matching now uses the completed response, so a gripper
+  fallback cannot be reported as a pass match.
+- **P1 fixed:** malformed certificate rows could be ignored by the comparator.
+  Every declared certificate must carry a strict boolean match.
+- **P2 fixed:** zero-conflict shadow runs with zero coverage could pass. The
+  comparator now also requires at least one declared shadow certificate.
+- **P1 fixed after independent review:** incoming action requests could retain
+  stale adaptive fields. The policy now strips both fields before constructing
+  the teacher request, in addition to the server-side branch deletion.
+- **P1 fixed after independent review:** malformed host telemetry could raise
+  only in shadow mode. Candidate parsing now abstains on nonintegral K values,
+  nonfinite/nonintegral prefixes, malformed arrays, reordered tau values,
+  threshold mismatch, or missing shared-noise semantics.
+- **P1 fixed after independent review:** the comparator accepted unknown/fail
+  kinds and orphan match values. Its only legal schemas are now `(None, None)`
+  and `("pass", bool)`, and any off-side certificate invalidates the run.
+- **P2 fixed after independent review:** a nominal K=2 response did not prove it
+  was the configured probe pair. Candidates now require exact K counters, tau
+  values and order, verifier threshold, and shared-noise flag.
+
+### Residual Risk
+
+- The pass condition remains an empirical candidate, not a proof about the
+  entire flow trajectory. Live mode is prohibited until both the repeated TN=1
+  and formal paired TN=20 traces are exactly equivalent with zero conflicts.
+- Host-only telemetry must remain derived from the unchanged K=2 response. No
+  adaptive flag may be forwarded into the teacher server during shadow runs.
+- The compact cache fingerprint is not bytewise, but off and shadow execute the
+  same audit operations and it already detected the original isolation failure.
+
+### Checks and Decision
+
+- Local `python3 -m py_compile` and `git diff --check` pass.
+- Direct policy checks cover request stripping, strict candidate parsing, and
+  final policy-log match/conflict behavior; a synthetic comparator smoke covers
+  identical off/shadow decisions with nonzero pass coverage.
+- Local pytest is unavailable and must be run in the A800 environment.
+- Decision: code may be pushed for remote tests and the same-manifest TN=1
+  rerun only. Formal TN=20 and live mode are not yet approved.

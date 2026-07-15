@@ -185,3 +185,25 @@ teacher quality with materially lower teacher use.
 - Live adaptive-K remains intentionally absent. Next gate is remote pytest,
   manifest TN=1 smoke, then 20-scene off/shadow paired evaluation for
   `hanging_mug` and `open_microwave`.
+
+## 2026-07-16: TN=1 shadow isolation failure
+
+- The first same-manifest off/shadow smoke failed the exact-equivalence gate.
+  Shadow produced one certificate conflict; the first cache mismatch appeared
+  at trace index 29 and the following draft action diverged at decision 17.
+- The root cause was shadow-only CUDA tensor work inside the shared
+  draft/teacher process. Read-only verifier inputs were insufficient because
+  the extra allocations and kernels changed later allocator/workspace state.
+- The fail-certificate matcher also compared an internal first-failure witness,
+  even when K1 and K2 produced the same final policy fallback. This was not a
+  policy-level certificate.
+- The corrective implementation keeps the K=2 teacher request and CUDA path
+  byte-for-byte identical between off and shadow. A host-only policy helper now
+  derives only conservative K1 pass candidates from returned CPU telemetry and
+  compares their predicted action hash, prefix, source, and fallback reason
+  with the completed K=2 policy decision.
+- Fail candidates are intentionally omitted. The comparator now fails closed
+  on malformed matches and requires nonzero candidate coverage in addition to
+  zero conflicts and exact action/cache traces.
+- Formal TN=20 and live adaptive-K remain blocked. The next action is remote
+  tests followed by a repeat of the same TN=1 manifest on the same GPU.

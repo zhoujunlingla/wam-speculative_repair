@@ -11,17 +11,34 @@ from pathlib import Path
 DECISION_SOURCES = {"teacher_full", "draft_flash", "replan"}
 
 
-def load_trace(path: Path) -> tuple[list[dict], list[dict], int]:
+def load_trace(path: Path) -> tuple[list[dict], list[dict], int, int]:
     decisions = []
     caches = []
     conflicts = 0
+    certificates = 0
     lines = path.read_text().splitlines()
     if not lines:
         raise ValueError(f"empty audit trace: {path}")
     for line_number, line in enumerate(lines, 1):
         row = json.loads(line)
-        if row.get("adaptive_k_certificate_matches_full") is False:
-            conflicts += 1
+        certificate_kind = row.get("adaptive_k_certificate_kind")
+        certificate_match = row.get("adaptive_k_certificate_matches_full")
+        if certificate_kind is None:
+            if certificate_match is not None:
+                raise ValueError(
+                    f"orphan adaptive-K match in {path}:{line_number}"
+                )
+        elif certificate_kind == "pass":
+            if type(certificate_match) is not bool:
+                raise ValueError(
+                    f"malformed adaptive-K certificate in {path}:{line_number}"
+                )
+            certificates += 1
+            conflicts += int(not certificate_match)
+        else:
+            raise ValueError(
+                f"unsupported adaptive-K certificate kind in {path}:{line_number}"
+            )
         if row.get("source") in DECISION_SOURCES:
             if (
                 row.get("source") != "replan"
@@ -45,7 +62,7 @@ def load_trace(path: Path) -> tuple[list[dict], list[dict], int]:
         })
     if not decisions:
         raise ValueError(f"audit trace has no action decisions: {path}")
-    return decisions, caches, conflicts
+    return decisions, caches, conflicts, certificates
 
 
 def first_difference(left: list[dict], right: list[dict]):
@@ -65,8 +82,10 @@ def main() -> None:
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
 
-    off_decisions, off_caches, off_conflicts = load_trace(args.off)
-    shadow_decisions, shadow_caches, shadow_conflicts = load_trace(args.shadow)
+    off_decisions, off_caches, off_conflicts, off_certificates = \
+        load_trace(args.off)
+    shadow_decisions, shadow_caches, shadow_conflicts, shadow_certificates = \
+        load_trace(args.shadow)
     report = {
         "off": str(args.off),
         "shadow": str(args.shadow),
@@ -76,11 +95,16 @@ def main() -> None:
         "cache_difference": first_difference(off_caches, shadow_caches),
         "off_certificate_conflicts": off_conflicts,
         "shadow_certificate_conflicts": shadow_conflicts,
+        "off_certificates": off_certificates,
+        "shadow_certificates": shadow_certificates,
     }
     report["equivalent"] = bool(
         report["decision_difference"] is None
         and report["cache_difference"] is None
+        and off_conflicts == 0
+        and off_certificates == 0
         and shadow_conflicts == 0
+        and shadow_certificates > 0
     )
     rendered = json.dumps(report, indent=2)
     if args.output:

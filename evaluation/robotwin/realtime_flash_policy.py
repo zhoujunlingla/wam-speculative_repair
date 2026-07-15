@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import operator
 import time
 from collections import deque
 from pathlib import Path
@@ -135,6 +136,142 @@ def longest_safe_prefix(
     failures = np.flatnonzero(~passing)
     raw_prefix = horizon if failures.size == 0 else int(failures[0])
     return quantize_prefix(raw_prefix, action_per_frame, horizon)
+
+
+def adaptive_k_pass_candidate(
+    verify_response: dict,
+    draft_action: np.ndarray,
+    *,
+    enabled: bool,
+    verify_threshold: float,
+    candidate_threshold: float,
+    expected_tau_timesteps: Iterable[float],
+    action_per_frame: int,
+    gripper_channels: Iterable[int],
+    gripper_threshold: float,
+    previous_gripper=None,
+) -> tuple[dict, Optional[dict]]:
+    """Build a host-only K1 pass candidate from a completed K2 response."""
+
+    telemetry = {
+        "adaptive_k_shadow": bool(enabled),
+        "adaptive_k_certificate_kind": None,
+        "adaptive_k_fail_reason": None,
+        "adaptive_k_certificate_matches_full": None,
+        "adaptive_k_sentinel_distance_max": None,
+        "adaptive_k_sentinel_full_prefix": None,
+        "adaptive_k_sentinel_continuous_prefix": None,
+        "adaptive_k_sentinel_gripper_prefix": None,
+        "adaptive_k_sentinel_accepted_prefix": None,
+        "adaptive_k_sentinel_gripper_failure_index": None,
+        "adaptive_k_sentinel_phase_agreement": None,
+        "adaptive_k_sentinel_gripper_switch": None,
+    }
+    if not enabled:
+        return telemetry, None
+
+    required_k = 2
+    try:
+        observed_k = []
+        for key in (
+            "requested_verify_k", "effective_verify_k", "primary_verify_forwards"
+        ):
+            raw_value = verify_response[key]
+            if isinstance(raw_value, (bool, np.bool_)):
+                return telemetry, None
+            observed_k.append(operator.index(raw_value))
+        observed_k = tuple(observed_k)
+        distances = np.asarray(
+            verify_response.get("distances"), dtype=np.float32
+        )
+        prefixes = np.asarray(
+            verify_response.get("prefix_by_tau"), dtype=np.float64
+        )
+        agreements = np.asarray(
+            verify_response.get("gripper_phase_agreement_by_tau"),
+            dtype=np.float64,
+        )
+        observed_tau = np.asarray(
+            verify_response.get("tau_timesteps"), dtype=np.float64
+        )
+        expected_tau = np.asarray(
+            tuple(expected_tau_timesteps), dtype=np.float64
+        )
+        observed_threshold = float(verify_response["threshold"])
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return telemetry, None
+    if observed_k != (required_k, required_k, required_k):
+        return telemetry, None
+    switch_indices = verify_response.get("gripper_switch_indices_by_tau")
+    if (
+        distances.ndim < 2
+        or distances.shape[0] != required_k
+        or prefixes.shape != (required_k,)
+        or agreements.shape != (required_k,)
+        or observed_tau.shape != (required_k,)
+        or expected_tau.shape != (required_k,)
+        or not isinstance(switch_indices, (list, tuple))
+        or len(switch_indices) != required_k
+        or not np.all(np.isfinite(distances))
+        or not np.all(np.isfinite(prefixes))
+        or not np.all(np.isfinite(agreements))
+        or not np.all(np.isfinite(observed_tau))
+        or not np.array_equal(observed_tau, expected_tau)
+        or not np.isfinite(observed_threshold)
+        or observed_threshold != float(verify_threshold)
+        or verify_response.get("shared_noise") is not True
+        or not np.all(prefixes == np.floor(prefixes))
+    ):
+        return telemetry, None
+
+    draft_action = np.asarray(draft_action)
+    if draft_action.ndim != 3:
+        return telemetry, None
+    horizon = int(draft_action.shape[1] * draft_action.shape[2])
+    if distances[0].size != horizon:
+        return telemetry, None
+    first_distances = distances[0].reshape(-1)
+    distance_max = float(np.max(first_distances))
+    continuous_prefix = quantize_prefix(
+        int(prefixes[0]), action_per_frame, horizon
+    )
+    phase_agreement = bool(float(agreements[0]) == 1.0)
+    decoded_switch = first_gripper_switch(
+        draft_action,
+        channels=gripper_channels,
+        threshold=gripper_threshold,
+        previous=previous_gripper,
+    )
+    has_gripper_switch = bool(
+        switch_indices[0] is not None
+        or verify_response.get("draft_gripper_switch_index") is not None
+        or decoded_switch is not None
+    )
+    full_prefix = continuous_prefix == horizon
+    telemetry.update(
+        adaptive_k_sentinel_distance_max=distance_max,
+        adaptive_k_sentinel_full_prefix=full_prefix,
+        adaptive_k_sentinel_continuous_prefix=continuous_prefix,
+        adaptive_k_sentinel_accepted_prefix=continuous_prefix,
+        adaptive_k_sentinel_phase_agreement=phase_agreement,
+        adaptive_k_sentinel_gripper_switch=has_gripper_switch,
+    )
+    if not (
+        full_prefix
+        and distance_max <= min(float(verify_threshold), float(candidate_threshold))
+        and phase_agreement
+        and not has_gripper_switch
+    ):
+        return telemetry, None
+
+    telemetry["adaptive_k_certificate_kind"] = "pass"
+    predicted = {
+        "source": "draft_flash",
+        "executed_action_hash": _stable_digest(draft_action),
+        "accepted_prefix": horizon,
+        "fallback_reason": None,
+    }
+    return telemetry, predicted
 
 
 def infer_with_replan(model, request: dict) -> dict:
@@ -619,6 +756,8 @@ class RealtimeFlashPolicy:
                 return response
 
         verify_request = dict(request)
+        verify_request.pop("adaptive_k_shadow", None)
+        verify_request.pop("adaptive_k_distance_threshold", None)
         verify_request.update(
             verify_action=True,
             action_latent=action_latent,
@@ -627,8 +766,6 @@ class RealtimeFlashPolicy:
             tau_timesteps=self.tau_timesteps,
             frame_st_id=self.frame_st_id,
             gripper_consensus=self.gripper_consensus,
-            adaptive_k_shadow=self.adaptive_k_shadow,
-            adaptive_k_distance_threshold=self.adaptive_k_distance_threshold,
         )
         if self.last_gripper is not None:
             previous_phase = self.last_gripper >= self.gripper_threshold
@@ -637,6 +774,24 @@ class RealtimeFlashPolicy:
             ).astype(np.float32)
         verify_response = self._call(self.teacher, verify_request)
         verified_prefix = self._accepted_prefix(action_latent, verify_response, horizon)
+        switch_step = first_gripper_switch(
+            action,
+            self.gripper_channels,
+            self.gripper_threshold,
+            previous=self.last_gripper,
+        )
+        adaptive_telemetry, adaptive_prediction = adaptive_k_pass_candidate(
+            verify_response,
+            action,
+            enabled=self.adaptive_k_shadow,
+            verify_threshold=self.threshold,
+            candidate_threshold=self.adaptive_k_distance_threshold,
+            expected_tau_timesteps=self.tau_timesteps,
+            action_per_frame=self.action_per_frame,
+            gripper_channels=self.gripper_channels,
+            gripper_threshold=self.gripper_threshold,
+            previous_gripper=self.last_gripper,
+        )
         verify_distances = verify_response.get("distances")
         if verify_distances is not None:
             verify_distances = np.asarray(verify_distances).tolist()
@@ -665,40 +820,7 @@ class RealtimeFlashPolicy:
             "primary_verify_forwards": verify_response.get(
                 "primary_verify_forwards"
             ),
-            "adaptive_k_shadow": verify_response.get("adaptive_k_shadow"),
-            "adaptive_k_certificate_kind": verify_response.get(
-                "adaptive_k_certificate_kind"
-            ),
-            "adaptive_k_fail_reason": verify_response.get(
-                "adaptive_k_fail_reason"
-            ),
-            "adaptive_k_certificate_matches_full": verify_response.get(
-                "adaptive_k_certificate_matches_full"
-            ),
-            "adaptive_k_sentinel_distance_max": verify_response.get(
-                "adaptive_k_sentinel_distance_max"
-            ),
-            "adaptive_k_sentinel_full_prefix": verify_response.get(
-                "adaptive_k_sentinel_full_prefix"
-            ),
-            "adaptive_k_sentinel_continuous_prefix": verify_response.get(
-                "adaptive_k_sentinel_continuous_prefix"
-            ),
-            "adaptive_k_sentinel_gripper_prefix": verify_response.get(
-                "adaptive_k_sentinel_gripper_prefix"
-            ),
-            "adaptive_k_sentinel_accepted_prefix": verify_response.get(
-                "adaptive_k_sentinel_accepted_prefix"
-            ),
-            "adaptive_k_sentinel_gripper_failure_index": verify_response.get(
-                "adaptive_k_sentinel_gripper_failure_index"
-            ),
-            "adaptive_k_sentinel_phase_agreement": verify_response.get(
-                "adaptive_k_sentinel_phase_agreement"
-            ),
-            "adaptive_k_sentinel_gripper_switch": verify_response.get(
-                "adaptive_k_sentinel_gripper_switch"
-            ),
+            **adaptive_telemetry,
         }
 
         teacher_gripper_switch = bool(
@@ -716,12 +838,6 @@ class RealtimeFlashPolicy:
             self.force_full_reason = "teacher_gripper_switch"
             self.gripper_full_rounds_left = self.gripper_full_window
 
-        switch_step = first_gripper_switch(
-            action,
-            self.gripper_channels,
-            self.gripper_threshold,
-            previous=self.last_gripper,
-        )
         accepted_prefix = verified_prefix
         if (
             switch_step is not None
@@ -743,6 +859,15 @@ class RealtimeFlashPolicy:
             reason = self.force_full_reason or "zero_prefix"
             self.force_full_reason = reason
             self.last_source = "replan"
+            if adaptive_prediction is not None:
+                verify_telemetry["adaptive_k_certificate_matches_full"] = bool(
+                    adaptive_prediction == {
+                        "source": self.last_source,
+                        "executed_action_hash": None,
+                        "accepted_prefix": 0,
+                        "fallback_reason": reason,
+                    }
+                )
             response = {
                 "replan": True,
                 "action_source": self.last_source,
@@ -794,6 +919,9 @@ class RealtimeFlashPolicy:
                 self.teacher_burst_rounds_left = self.flow_budget_burst_rounds
                 self.flow_budget_bursts_used += 1
         executed_action = slice_action_prefix(action, accepted_prefix)
+        executed_action_hash = (
+            _stable_digest(executed_action) if self.equivalence_audit else None
+        )
         self._stage_gripper(executed_action)
         response = {
             "action": executed_action,
@@ -812,15 +940,21 @@ class RealtimeFlashPolicy:
                 fallback_reason="gripper_switch",
                 gripper_switch_step=switch_step,
             )
+        if adaptive_prediction is not None:
+            verify_telemetry["adaptive_k_certificate_matches_full"] = bool(
+                adaptive_prediction == {
+                    "source": self.last_source,
+                    "executed_action_hash": _stable_digest(executed_action),
+                    "accepted_prefix": accepted_prefix,
+                    "fallback_reason": response.get("fallback_reason"),
+                }
+            )
         self._log(
             source=self.last_source,
             fallback_reason=response.get("fallback_reason"),
             accepted_prefix=accepted_prefix,
             verified_prefix=verified_prefix,
-            executed_action_hash=(
-                _stable_digest(executed_action)
-                if self.equivalence_audit else None
-            ),
+            executed_action_hash=executed_action_hash,
             teacher_gripper_switch=teacher_gripper_switch,
             decoded_gripper_switch_step=switch_step,
             flow_budget_charge=flow_budget_charge,

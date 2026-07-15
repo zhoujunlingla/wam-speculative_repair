@@ -657,3 +657,53 @@ Allowed to create the reviewed commit and run one final real-model smoke from
 that exact code. Formal low10 x 20 is allowed only after the final smoke has a
 valid artifact, no cache/reset/render error, and at least one repair path is
 observed or a dedicated server-level FCR probe succeeds.
+
+## 2026-07-15 FlowGuard Near-Miss Shadow Review
+
+### Findings
+
+No blocking correctness finding remains after review.
+
+1. **Fixed, high experiment-validity risk:** the initial implementation used
+   the complete K=2 prefix when labeling the first probe. Classification now
+   derives its continuous prefix only from `distances[0]`; a regression test
+   proves that a K1 pass is still labeled as such when K2 rejects it.
+2. **Fixed, high safety risk:** a continuous K1 pass could originally hide a
+   gripper-phase disagreement. The classifier now consumes only first-probe
+   gripper agreement/switch telemetry and routes such rounds to `ambiguous`.
+3. **Low runtime risk:** FlowGuard is shadow-only. It uses a dedicated RNG,
+   never replaces the action, never changes cache/frame state, and is mutually
+   exclusive with every executable repair path.
+4. **Low comparison risk:** Probe A constructs the candidate. Probe B is
+   independent of A, while the original and repaired candidates share the
+   exact same B noise. This removes the same-exam circularity found in earlier
+   repair runs.
+5. **Medium research risk:** endpoint residual improvement is only evidence of
+   local Teacher-flow agreement. It is not evidence of task success. The
+   summary therefore labels avoided full rollouts as a projected upper bound
+   and separately reports improved/equal/worsened Probe-B prefixes.
+6. **Medium compute risk:** every eligible near miss costs four extra
+   action-only forwards for the paired K=2 Probe B. A repair is not promotable
+   unless projected full-Teacher savings exceed this cost in measured model
+   time.
+
+### Verification
+
+- Local `py_compile`: passed.
+- Local `git diff --check`: passed.
+- A800 focused suite:
+  `pytest -q tests/test_realtime_flash_policy.py tests/test_run_realtime_flash_task.py tests/test_specverify.py`:
+  `65 passed in 2.89s`.
+- Tests cover first-probe-only classification, K1/K2 disagreement telemetry,
+  phase-risk ambiguity, bounded decaying repair windows, independent A/B
+  noise, paired-B noise equality, unchanged replan behavior, and summary
+  aggregation.
+
+### Decision
+
+Allowed to run a Motion-on matched shadow audit. Executable FlowGuard repair
+is blocked until valid paired-B rescue is at least 20%, no candidate worsens
+the original paired-B prefix, and the projected savings remain positive after
+counting all extra action-only forwards. WCAS V0 and FlowGuard must be reported
+separately: WCAS can reduce verifier NFE without changing `R_full`/`R_anyT`;
+FlowGuard can reduce `R_full` only after a later closed-loop execution test.

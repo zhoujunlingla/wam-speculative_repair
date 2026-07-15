@@ -182,6 +182,138 @@ def bounded_endpoint_repair(
     return candidate, float(np.max(np.sqrt(np.mean(np.square(flat), axis=-1))))
 
 
+def classify_flowguard_probe(
+    verify_response: dict,
+    *,
+    threshold: float,
+    repair_threshold: float,
+    action_per_frame: int,
+    horizon: int,
+) -> dict:
+    """Classify the first probe without changing the baseline K-probe result."""
+
+    distances = np.asarray(verify_response.get("distances"), dtype=np.float32)
+    if distances.ndim != 3 or distances.shape[0] < 1:
+        return {"flowguard_class": "ambiguous", "flowguard_reason": "missing_distances"}
+    conditioned_frames = int(verify_response.get("conditioned_frame_count", 0))
+    first_probe = distances[0, conditioned_frames:].reshape(-1)
+    first_probe = first_probe[:horizon]
+    if not np.isfinite(first_probe).all() or first_probe.size < horizon:
+        return {"flowguard_class": "ambiguous", "flowguard_reason": "invalid_distances"}
+
+    failures = np.flatnonzero(first_probe >= float(threshold))
+    first_probe_prefix = int(min(failures[0], horizon) if failures.size else horizon)
+    phase_agreement = verify_response.get("gripper_phase_agreement_by_tau") or []
+    switch_indices = verify_response.get("gripper_switch_indices_by_tau") or []
+    first_probe_phase_risk = bool(
+        verify_response.get("draft_gripper_switch_index") is not None
+        or (switch_indices and switch_indices[0] is not None)
+        or (phase_agreement and float(phase_agreement[0]) < 1.0)
+    )
+    full_prefix = int(verify_response.get("accepted_prefix", 0) or 0)
+    result = {
+        "flowguard_first_probe_prefix": first_probe_prefix,
+        "flowguard_first_fail_index": None,
+        "flowguard_first_fail_distance": None,
+        "flowguard_repair_threshold": float(repair_threshold),
+        "flowguard_first_probe_phase_risk": first_probe_phase_risk,
+        "flowguard_full_verify_prefix": full_prefix,
+        "flowguard_k1_continuous_would_accept": bool(
+            first_probe_prefix >= min(action_per_frame, horizon)
+        ),
+        "flowguard_k1_false_accept": bool(
+            first_probe_prefix >= min(action_per_frame, horizon)
+            and full_prefix < min(action_per_frame, horizon)
+        ),
+    }
+    if first_probe_phase_risk:
+        result.update(flowguard_class="ambiguous", flowguard_reason="phase_risk")
+        return result
+    if first_probe_prefix >= min(action_per_frame, horizon):
+        result.update(flowguard_class="pass", flowguard_reason="executable_prefix")
+        return result
+
+    first_fail = int(failures[0])
+    residual = float(first_probe[first_fail])
+    result.update(
+        flowguard_first_fail_index=first_fail,
+        flowguard_first_fail_distance=residual,
+    )
+    if residual >= repair_threshold:
+        result.update(flowguard_class="clear_fail", flowguard_reason="large_residual")
+        return result
+
+    result.update(flowguard_class="near_miss", flowguard_reason="bounded_residual")
+    return result
+
+
+def flowguard_near_miss_repair(
+    draft_latent: np.ndarray,
+    teacher_endpoint_latent: np.ndarray,
+    *,
+    first_fail_index: int,
+    conditioned_frame_count: int,
+    threshold: float,
+    residual: float,
+    action_per_frame: int = 16,
+    margin: float = 0.005,
+    max_strength: float = 0.5,
+    max_step_rms: float = 0.15,
+    tail_weight: float = 0.25,
+    continuous_channels: Iterable[int] = range(14),
+) -> tuple[np.ndarray, dict]:
+    """Build the smallest bounded endpoint move for one near-miss window."""
+
+    draft = np.asarray(draft_latent, dtype=np.float32)
+    horizon = draft.shape[2] * draft.shape[3]
+    absolute_start = conditioned_frame_count * action_per_frame + int(first_fail_index)
+    window_end = min(
+        ((absolute_start // action_per_frame) + 1) * action_per_frame,
+        horizon,
+    )
+    if not 0 <= absolute_start < window_end:
+        raise ValueError("near-miss repair window is outside the action latent")
+    if not 0 <= tail_weight <= 1:
+        raise ValueError("tail_weight must be in [0, 1]")
+    if not np.isfinite(residual) or residual <= threshold:
+        raise ValueError("near-miss residual must exceed the accept threshold")
+
+    target = max(float(threshold) - float(margin), 0.0)
+    strength = float(np.clip(1.0 - target / residual, 0.0, max_strength))
+    base, _ = bounded_endpoint_repair(
+        draft,
+        teacher_endpoint_latent,
+        prefix_len=window_end,
+        strength=strength,
+        max_step_rms=max_step_rms,
+        continuous_channels=continuous_channels,
+    )
+    delta = base - draft
+    channels = tuple(int(channel) for channel in continuous_channels)
+    flat = delta[:, channels].transpose(0, 2, 3, 1, 4).reshape(
+        1, horizon, len(channels)
+    )
+    flat[:, :absolute_start] = 0
+    flat[:, window_end:] = 0
+    weights = np.linspace(
+        1.0,
+        tail_weight,
+        window_end - absolute_start,
+        dtype=np.float32,
+    )
+    flat[:, absolute_start:window_end] *= weights[None, :, None]
+    candidate = draft.copy()
+    applied = flat.reshape(1, draft.shape[2], draft.shape[3], len(channels), 1)
+    candidate[:, channels] += applied.transpose(0, 3, 1, 2, 4)
+    correction_rms = np.sqrt(np.mean(np.square(flat), axis=-1))
+    return candidate, {
+        "flowguard_dynamic_strength": strength,
+        "flowguard_window_start": absolute_start,
+        "flowguard_window_end": window_end,
+        "flowguard_correction_max_rms": float(correction_rms.max()),
+    }
+
+
 def gripper_phase_snap_repair(
     draft_latent: np.ndarray,
     primary_phases,
@@ -291,6 +423,10 @@ class RealtimeFlashPolicy:
         repair_strength: float = 0.5,
         repair_max_step_rms: float = 0.15,
         repair_prefix_len: int = 16,
+        flowguard_nearmiss_shadow: bool = False,
+        flowguard_repair_threshold: float = 0.18,
+        flowguard_repair_margin: float = 0.005,
+        flowguard_repair_tail_weight: float = 0.25,
         rng: Optional[np.random.Generator] = None,
         repair_rng: Optional[np.random.Generator] = None,
         shadow_rng: Optional[np.random.Generator] = None,
@@ -324,6 +460,13 @@ class RealtimeFlashPolicy:
             raise ValueError("gripper repair requires gripper consensus")
         if zero_prefix_repair and repair_shadow:
             raise ValueError("zero-prefix repair and shadow repair are mutually exclusive")
+        if flowguard_nearmiss_shadow and (
+            repair_shadow
+            or zero_prefix_repair
+            or flow_consistent_repair
+            or gripper_repair
+        ):
+            raise ValueError("FlowGuard shadow must run without another repair path")
         if zero_prefix_repair and flow_consistent_repair:
             raise ValueError("endpoint and flow-consistent repairs are mutually exclusive")
         if (zero_prefix_repair or flow_consistent_repair) and (
@@ -347,6 +490,21 @@ class RealtimeFlashPolicy:
             raise ValueError("repair_max_per_episode must be positive")
         if not np.isfinite(repair_strength) or not 0 <= repair_strength <= 1:
             raise ValueError("repair_strength must be in [0, 1]")
+        if (
+            not np.isfinite(flowguard_repair_threshold)
+            or flowguard_repair_threshold <= threshold
+        ):
+            raise ValueError("FlowGuard repair threshold must exceed accept threshold")
+        if (
+            not np.isfinite(flowguard_repair_margin)
+            or not 0 <= flowguard_repair_margin < threshold
+        ):
+            raise ValueError("FlowGuard repair margin must be in [0, threshold)")
+        if (
+            not np.isfinite(flowguard_repair_tail_weight)
+            or not 0 <= flowguard_repair_tail_weight <= 1
+        ):
+            raise ValueError("FlowGuard tail weight must be in [0, 1]")
         if (
             not np.isfinite(repair_max_step_rms)
             or repair_max_step_rms <= 0
@@ -396,6 +554,10 @@ class RealtimeFlashPolicy:
         self.repair_strength = float(repair_strength)
         self.repair_max_step_rms = float(repair_max_step_rms)
         self.repair_prefix_len = int(repair_prefix_len)
+        self.flowguard_nearmiss_shadow = bool(flowguard_nearmiss_shadow)
+        self.flowguard_repair_threshold = float(flowguard_repair_threshold)
+        self.flowguard_repair_margin = float(flowguard_repair_margin)
+        self.flowguard_repair_tail_weight = float(flowguard_repair_tail_weight)
         self.rng = rng or np.random.default_rng()
         self.repair_rng = repair_rng or np.random.default_rng()
         self.shadow_rng = shadow_rng or np.random.default_rng()
@@ -698,6 +860,113 @@ class RealtimeFlashPolicy:
                 holdout.get("gripper_force_teacher", False)
             ),
         }
+
+    def _flowguard_nearmiss_shadow_probe(
+        self,
+        request: dict,
+        action_latent: np.ndarray,
+        verify_response: dict,
+        horizon: int,
+    ) -> dict:
+        result = classify_flowguard_probe(
+            verify_response,
+            threshold=self.threshold,
+            repair_threshold=self.flowguard_repair_threshold,
+            action_per_frame=self.action_per_frame,
+            horizon=horizon,
+        )
+        result.update(
+            flowguard_shadow_eligible=False,
+            flowguard_shadow_rescue=False,
+            flowguard_shadow_action_only_forwards=0,
+            flowguard_cross_tau_endpoint_rms=verify_response.get(
+                "cross_tau_endpoint_rms"
+            ),
+            flowguard_cross_tau_direction_cosine=verify_response.get(
+                "cross_tau_direction_cosine"
+            ),
+        )
+        if result["flowguard_class"] != "near_miss":
+            return result
+
+        endpoint = verify_response.get("teacher_endpoint_latent_first_probe")
+        if endpoint is None:
+            result.update(
+                flowguard_class="ambiguous",
+                flowguard_reason="missing_first_probe_endpoint",
+            )
+            return result
+        try:
+            candidate, candidate_stats = flowguard_near_miss_repair(
+                action_latent,
+                endpoint,
+                first_fail_index=result["flowguard_first_fail_index"],
+                conditioned_frame_count=int(
+                    verify_response.get("conditioned_frame_count", 0)
+                ),
+                threshold=self.threshold,
+                residual=result["flowguard_first_fail_distance"],
+                action_per_frame=self.action_per_frame,
+                margin=self.flowguard_repair_margin,
+                max_strength=self.repair_strength,
+                max_step_rms=self.repair_max_step_rms,
+                tail_weight=self.flowguard_repair_tail_weight,
+                continuous_channels=verify_response.get(
+                    "continuous_channels", range(14)
+                ),
+            )
+        except (TypeError, ValueError):
+            result.update(
+                flowguard_class="ambiguous",
+                flowguard_reason="invalid_candidate",
+            )
+            return result
+
+        holdout_noise = self.shadow_rng.standard_normal(action_latent.shape).astype(
+            np.float32
+        )
+
+        def verify(chunk: np.ndarray) -> tuple[dict, int]:
+            holdout_request = dict(request)
+            holdout_request.update(
+                verify_action=True,
+                flow_repair=False,
+                action_latent=chunk,
+                verify_noise=holdout_noise,
+                threshold=self.threshold,
+                tau_timesteps=self.tau_timesteps,
+                frame_st_id=self.frame_st_id,
+                gripper_consensus=self.gripper_consensus,
+            )
+            if self.last_gripper is not None:
+                previous_phase = self.last_gripper >= self.gripper_threshold
+                holdout_request["previous_gripper"] = np.where(
+                    previous_phase, 1.0, -1.0
+                ).astype(np.float32)
+            response = self._call(self.teacher, holdout_request)
+            return response, self._accepted_prefix(chunk, response, horizon)
+
+        original_holdout, original_prefix = verify(action_latent)
+        repaired_holdout, repaired_prefix = verify(candidate)
+        rescued = bool(
+            repaired_prefix >= min(self.action_per_frame, horizon)
+            and repaired_prefix > original_prefix
+        )
+        result.update(
+            flowguard_shadow_eligible=True,
+            flowguard_shadow_rescue=rescued,
+            flowguard_original_holdout_prefix=int(original_prefix),
+            flowguard_repaired_holdout_prefix=int(repaired_prefix),
+            flowguard_original_holdout_prefix_by_tau=original_holdout.get(
+                "prefix_by_tau"
+            ),
+            flowguard_repaired_holdout_prefix_by_tau=repaired_holdout.get(
+                "prefix_by_tau"
+            ),
+            flowguard_shadow_action_only_forwards=2 * len(self.tau_timesteps),
+            **candidate_stats,
+        )
+        return result
 
     def _independent_repair_verify(
         self,
@@ -1136,6 +1405,12 @@ class RealtimeFlashPolicy:
                 request, action_latent, verify_response, horizon
             )
 
+        flowguard_shadow = None
+        if self.flowguard_nearmiss_shadow:
+            flowguard_shadow = self._flowguard_nearmiss_shadow_probe(
+                request, action_latent, verify_response, horizon
+            )
+
         self.round_id += 1
         if accepted_prefix == 0:
             reason = self.force_full_reason or "zero_prefix"
@@ -1171,7 +1446,9 @@ class RealtimeFlashPolicy:
                 repair_action_only_forwards=(
                     repair_construction_forwards + repair_holdout_forwards
                 ),
+                flowguard_shadow_enabled=self.flowguard_nearmiss_shadow,
                 **(repair_shadow or {}),
+                **(flowguard_shadow or {}),
                 **verify_telemetry,
                 elapsed_sec=time.perf_counter() - start,
             )
@@ -1260,6 +1537,8 @@ class RealtimeFlashPolicy:
             repair_action_only_forwards=(
                 repair_construction_forwards + repair_holdout_forwards
             ),
+            flowguard_shadow_enabled=self.flowguard_nearmiss_shadow,
+            **(flowguard_shadow or {}),
             **verify_telemetry,
             elapsed_sec=time.perf_counter() - start,
         )

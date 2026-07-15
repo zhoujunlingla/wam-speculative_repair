@@ -11,7 +11,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from evaluation.robotwin.realtime_flash_policy import (
     RealtimeFlashPolicy,
     bounded_endpoint_repair,
+    classify_flowguard_probe,
     first_gripper_switch,
+    flowguard_near_miss_repair,
     gripper_phase_snap_repair,
     infer_with_replan,
     longest_safe_prefix,
@@ -163,6 +165,107 @@ def test_bounded_endpoint_repair_changes_only_continuous_prefix():
     assert np.allclose(candidate[:, :14, 0], 0.1)
     assert np.array_equal(candidate[:, :14, 1], draft[:, :14, 1])
     assert np.array_equal(candidate[:, 14:], draft[:, 14:])
+
+
+def test_flowguard_near_miss_repair_changes_only_first_fail_window():
+    draft = np.zeros((1, 30, 2, 16, 1), dtype=np.float32)
+    endpoint = np.ones_like(draft)
+
+    candidate, stats = flowguard_near_miss_repair(
+        draft,
+        endpoint,
+        first_fail_index=5,
+        conditioned_frame_count=0,
+        threshold=0.15,
+        residual=0.16,
+        max_strength=0.5,
+        max_step_rms=0.15,
+    )
+
+    assert np.all(candidate[:, :14, 0, :5] == 0)
+    assert np.all(candidate[:, :14, 0, 5:16] > 0)
+    assert np.all(candidate[:, :14, 1] == 0)
+    assert np.all(candidate[:, 14:] == 0)
+    assert candidate[0, 0, 0, 5, 0] > candidate[0, 0, 0, 15, 0]
+    assert np.isclose(stats["flowguard_dynamic_strength"], 0.09375)
+    assert stats["flowguard_window_start"] == 5
+    assert stats["flowguard_window_end"] == 16
+
+
+def test_flowguard_probe_classifies_near_miss_and_clear_fail():
+    response = {
+        "distances": np.full((2, 2, 16), 0.16, dtype=np.float32),
+        "accepted_prefix_before_gripper": 0,
+        "conditioned_frame_count": 0,
+    }
+    near = classify_flowguard_probe(
+        response,
+        threshold=0.15,
+        repair_threshold=0.18,
+        action_per_frame=16,
+        horizon=32,
+    )
+    clear = classify_flowguard_probe(
+        response,
+        threshold=0.15,
+        repair_threshold=0.155,
+        action_per_frame=16,
+        horizon=32,
+    )
+
+    assert near["flowguard_class"] == "near_miss"
+    assert near["flowguard_first_fail_index"] == 0
+    assert clear["flowguard_class"] == "clear_fail"
+
+
+def test_flowguard_first_probe_pass_does_not_use_k2_prefix():
+    response = {
+        "distances": np.array(
+            [
+                [[[0.01] * 16, [0.20] * 16]],
+                [[[0.20] * 16, [0.20] * 16]],
+            ],
+            dtype=np.float32,
+        ).reshape(2, 2, 16),
+        "conditioned_frame_count": 0,
+        "accepted_prefix_before_gripper": 0,
+        "accepted_prefix": 0,
+        "gripper_phase_agreement_by_tau": [1.0, 1.0],
+        "gripper_switch_indices_by_tau": [None, None],
+    }
+
+    result = classify_flowguard_probe(
+        response,
+        threshold=0.15,
+        repair_threshold=0.18,
+        action_per_frame=16,
+        horizon=32,
+    )
+
+    assert result["flowguard_class"] == "pass"
+    assert result["flowguard_first_probe_prefix"] == 16
+    assert result["flowguard_k1_false_accept"] is True
+
+
+def test_flowguard_first_probe_phase_risk_is_ambiguous():
+    response = {
+        "distances": np.full((2, 2, 16), 0.01, dtype=np.float32),
+        "conditioned_frame_count": 0,
+        "accepted_prefix": 32,
+        "gripper_phase_agreement_by_tau": [0.75, 1.0],
+        "gripper_switch_indices_by_tau": [None, None],
+    }
+
+    result = classify_flowguard_probe(
+        response,
+        threshold=0.15,
+        repair_threshold=0.18,
+        action_per_frame=16,
+        horizon=32,
+    )
+
+    assert result["flowguard_class"] == "ambiguous"
+    assert result["flowguard_reason"] == "phase_risk"
 
 
 def test_gripper_phase_snap_changes_only_small_majority_disagreement():
@@ -940,6 +1043,70 @@ def test_zero_prefix_shadow_repair_uses_holdout_and_still_replans(tmp_path):
     assert record["repair_shadow_eligible"] is True
     assert record["repair_shadow_holdout_prefix"] == 16
     assert record["repair_shadow_correction_max_rms"] <= 0.15
+    assert policy.pending_cache_source is None
+
+
+def test_flowguard_shadow_pairs_original_and_repaired_on_probe_b(tmp_path):
+    events = []
+    draft = _FakeModel("draft", events)
+    endpoint = np.zeros((1, 30, 2, 16, 1), dtype=np.float32)
+    endpoint[:, :14] = 0.2
+    primary = {
+        "accepted_prefix": 0,
+        "accepted_prefix_before_gripper": 0,
+        "conditioned_frame_count": 0,
+        "distances": np.full((2, 2, 16), 0.16, dtype=np.float32),
+        "teacher_endpoint_latent_first_probe": endpoint,
+        "continuous_channels": list(range(14)),
+        "gripper_force_teacher": False,
+        "gripper_consensus_failure_index": None,
+        "draft_gripper_switch_index": None,
+        "cross_tau_endpoint_rms": 0.01,
+        "cross_tau_direction_cosine": 0.99,
+    }
+    teacher = _FakeModel(
+        "teacher",
+        events,
+        verify_results=(
+            primary,
+            {"accepted_prefix": 0, "prefix_by_tau": [0, 0]},
+            {"accepted_prefix": 16, "prefix_by_tau": [16, 16]},
+        ),
+    )
+    log_path = tmp_path / "metrics.jsonl"
+    policy = RealtimeFlashPolicy(
+        draft,
+        teacher,
+        pf_interval=20,
+        flowguard_nearmiss_shadow=True,
+        rng=np.random.default_rng(7),
+        shadow_rng=np.random.default_rng(9),
+        log_path=log_path,
+    )
+    policy.infer({"reset": True, "prompt": "test task"})
+    initial = policy.infer(_action_request())
+    policy.infer(_cache_request("anchor", initial["action"]))
+
+    response = policy.infer(_action_request())
+
+    verifies = [call for call in teacher.calls if call["kind"] == "verify"]
+    record = json.loads(log_path.read_text().splitlines()[-1])
+    assert response["replan"] is True
+    assert len(verifies) == 3
+    assert np.array_equal(
+        verifies[1]["request"]["verify_noise"],
+        verifies[2]["request"]["verify_noise"],
+    )
+    assert not np.array_equal(
+        verifies[0]["request"]["verify_noise"],
+        verifies[1]["request"]["verify_noise"],
+    )
+    assert record["flowguard_class"] == "near_miss"
+    assert record["flowguard_shadow_eligible"] is True
+    assert record["flowguard_shadow_rescue"] is True
+    assert record["flowguard_original_holdout_prefix"] == 0
+    assert record["flowguard_repaired_holdout_prefix"] == 16
+    assert record["flowguard_shadow_action_only_forwards"] == 4
     assert policy.pending_cache_source is None
 
 

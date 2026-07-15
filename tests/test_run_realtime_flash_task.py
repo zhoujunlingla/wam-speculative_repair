@@ -97,3 +97,30 @@ def test_source_summary_rejects_misaligned_episode_outcomes(tmp_path):
     assert repair["episode_outcome_count"] == 1
     assert repair["episode_alignment_valid"] is False
     assert repair["episodes_executed"] == 0
+
+
+def test_source_summary_counts_flowguard_shadow_counterfactuals(tmp_path):
+    path = tmp_path / "metrics.jsonl"
+    path.write_text(
+        '{"source":"replan","flowguard_shadow_enabled":true,'
+        '"flowguard_class":"near_miss","flowguard_shadow_eligible":true,'
+        '"flowguard_shadow_rescue":true,"flowguard_original_holdout_prefix":0,'
+        '"flowguard_repaired_holdout_prefix":16,'
+        '"flowguard_shadow_action_only_forwards":4}\n'
+        '{"source":"draft_flash","flowguard_shadow_enabled":true,'
+        '"flowguard_class":"pass","flowguard_k1_continuous_would_accept":true,'
+        '"flowguard_k1_false_accept":true}\n'
+    )
+
+    flowguard = source_summary(path)["flowguard_shadow"]
+
+    assert flowguard["classes"] == {"near_miss": 1, "pass": 1}
+    assert flowguard["eligible"] == 1
+    assert flowguard["rescued"] == 1
+    assert flowguard["rescue_rate"] == 1.0
+    assert flowguard["prefix_improved"] == 1
+    assert flowguard["prefix_worsened"] == 0
+    assert flowguard["action_only_forwards"] == 4
+    assert flowguard["projected_full_teacher_rollouts_avoided"] == 1
+    assert flowguard["k1_continuous_would_accept"] == 1
+    assert flowguard["k1_false_accept"] == 1

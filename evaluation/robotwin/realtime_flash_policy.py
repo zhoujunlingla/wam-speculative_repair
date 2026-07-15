@@ -3,12 +3,43 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import time
 from collections import deque
 from pathlib import Path
 from typing import Iterable, Optional
 
 import numpy as np
+
+
+def _stable_digest(value) -> str:
+    digest = hashlib.sha256()
+
+    def update(item) -> None:
+        if isinstance(item, dict):
+            digest.update(b"{")
+            for key in sorted(item):
+                update(str(key))
+                update(item[key])
+            digest.update(b"}")
+        elif isinstance(item, (list, tuple, deque)):
+            digest.update(b"[")
+            for child in item:
+                update(child)
+            digest.update(b"]")
+        elif isinstance(item, np.ndarray):
+            array = np.ascontiguousarray(item)
+            digest.update(str(array.dtype).encode())
+            digest.update(str(array.shape).encode())
+            digest.update(array.tobytes())
+        elif isinstance(item, np.generic):
+            update(item.item())
+        else:
+            digest.update(repr(item).encode())
+            digest.update(b";")
+
+    update(value)
+    return digest.hexdigest()
 
 
 def quantize_prefix(prefix_len: int, action_per_frame: int, horizon: int) -> int:
@@ -159,6 +190,9 @@ class RealtimeFlashPolicy:
         delayed_error_consecutive: int = 2,
         delayed_error_teacher_rounds: int = 2,
         video_motion_gate_threshold: float = 0.0,
+        adaptive_k_shadow: bool = False,
+        adaptive_k_distance_threshold: float = 0.05,
+        equivalence_audit: bool = False,
         gripper_full_window: int = 1,
         gripper_consensus: bool = False,
         rng: Optional[np.random.Generator] = None,
@@ -186,6 +220,11 @@ class RealtimeFlashPolicy:
             raise ValueError("delayed-error recovery values must be positive")
         if not np.isfinite(video_motion_gate_threshold) or video_motion_gate_threshold < 0:
             raise ValueError("video_motion_gate_threshold must be non-negative")
+        if (
+            not np.isfinite(adaptive_k_distance_threshold)
+            or adaptive_k_distance_threshold < 0
+        ):
+            raise ValueError("adaptive K distance threshold must be non-negative")
         if gripper_full_window < 1:
             raise ValueError("gripper_full_window must be positive")
         tau_timesteps = tuple(float(timestep) for timestep in tau_timesteps)
@@ -212,6 +251,11 @@ class RealtimeFlashPolicy:
         self.delayed_error_consecutive = int(delayed_error_consecutive)
         self.delayed_error_teacher_rounds = int(delayed_error_teacher_rounds)
         self.video_motion_gate_threshold = float(video_motion_gate_threshold)
+        self.adaptive_k_shadow = bool(adaptive_k_shadow)
+        self.adaptive_k_distance_threshold = float(
+            adaptive_k_distance_threshold
+        )
+        self.equivalence_audit = bool(equivalence_audit)
         self.gripper_full_window = int(gripper_full_window)
         self.gripper_consensus = bool(gripper_consensus)
         self.rng = rng or np.random.default_rng()
@@ -240,6 +284,8 @@ class RealtimeFlashPolicy:
         self.delayed_error_teacher_rounds_left = 0
         self.gripper_full_rounds_left = 0
         self._draft_primed = False
+        self._draft_cache_hash = _stable_digest("empty-draft-cache")
+        self._teacher_cache_hash = _stable_digest("empty-teacher-cache")
 
     def _call(self, model, request: dict) -> dict:
         response = model.infer(request)
@@ -252,8 +298,34 @@ class RealtimeFlashPolicy:
             return
         record.setdefault("round_id", self.round_id)
         record.setdefault("frame_st_id", self.frame_st_id)
+        if self.equivalence_audit:
+            record.setdefault("cache_hash", self._cache_fingerprint())
         with self.log_path.open("a", encoding="utf-8") as stream:
             stream.write(json.dumps(record, ensure_ascii=True) + "\n")
+
+    @staticmethod
+    def _advance_cache_hash(current: str, request: dict) -> str:
+        return _stable_digest((current, request))
+
+    def _cache_fingerprint(self) -> str:
+        pending = [_stable_digest(request)
+                   for request in self.pending_teacher_cache_updates]
+        return _stable_digest({
+            "draft": self._draft_cache_hash,
+            "teacher": self._teacher_cache_hash,
+            "draft_state": (
+                self.draft.cache_fingerprint()
+                if hasattr(self.draft, "cache_fingerprint") else None
+            ),
+            "teacher_state": (
+                self.teacher.cache_fingerprint()
+                if hasattr(self.teacher, "cache_fingerprint") else None
+            ),
+            "pending": pending,
+            "frame_st_id": self.frame_st_id,
+            "teacher_anchor_frame_st_id": self.teacher_anchor_frame_st_id,
+            "pending_cache_source": self.pending_cache_source,
+        })
 
     @staticmethod
     def _cache_frame_count(request: dict) -> int:
@@ -308,6 +380,9 @@ class RealtimeFlashPolicy:
         while self.pending_teacher_cache_updates:
             request = self.pending_teacher_cache_updates[0]
             self._call(self.teacher, request)
+            self._teacher_cache_hash = self._advance_cache_hash(
+                self._teacher_cache_hash, request
+            )
             self.pending_teacher_cache_updates.popleft()
             replayed += 1
         return replayed
@@ -315,9 +390,28 @@ class RealtimeFlashPolicy:
     def _reset(self, request: dict) -> dict:
         start = time.perf_counter()
         self._reset_state()
+        paired_rng_seed = request.get("paired_rng_seed")
+        if paired_rng_seed is not None:
+            seed = int(paired_rng_seed)
+            if seed < 0:
+                raise ValueError("paired_rng_seed must be non-negative")
+            self.rng = np.random.default_rng(np.random.SeedSequence([seed, 0]))
         self._call(self.draft, request)
         response = self._call(self.teacher, request)
-        self._log(source="reset", elapsed_sec=time.perf_counter() - start)
+        self._draft_cache_hash = self._advance_cache_hash(
+            self._draft_cache_hash, request
+        )
+        self._teacher_cache_hash = self._advance_cache_hash(
+            self._teacher_cache_hash, request
+        )
+        self._log(
+            source="reset",
+            episode_index=request.get("episode_index"),
+            scene_seed=request.get("scene_seed"),
+            paired_rng_seed=paired_rng_seed,
+            prompt=request.get("prompt"),
+            elapsed_sec=time.perf_counter() - start,
+        )
         return response
 
     def _update_cache(self, request: dict) -> dict:
@@ -330,8 +424,14 @@ class RealtimeFlashPolicy:
         draft_request = dict(request)
         draft_request["compare_video_prediction"] = source == "flash"
         draft_response = self._call(self.draft, draft_request)
+        self._draft_cache_hash = self._advance_cache_hash(
+            self._draft_cache_hash, draft_request
+        )
         if source == "full":
             self._call(self.teacher, dict(request))
+            self._teacher_cache_hash = self._advance_cache_hash(
+                self._teacher_cache_hash, request
+            )
         else:
             self.pending_teacher_cache_updates.append(dict(request))
 
@@ -385,6 +485,9 @@ class RealtimeFlashPolicy:
             prime_request = dict(request)
             prime_request["prime_only"] = True
             self._call(self.draft, prime_request)
+            self._draft_cache_hash = self._advance_cache_hash(
+                self._draft_cache_hash, prime_request
+            )
             self._draft_primed = True
 
         teacher_response = self._call(self.teacher, dict(request))
@@ -415,7 +518,11 @@ class RealtimeFlashPolicy:
         self._log(
             source=self.last_source,
             full_reason=reason,
+            fallback_reason=reason,
             accepted_prefix=horizon,
+            executed_action_hash=(
+                _stable_digest(action) if self.equivalence_audit else None
+            ),
             replayed_teacher_cache_updates=replayed,
             flow_error_budget_before_reset=flow_error_budget,
             elapsed_sec=time.perf_counter() - start,
@@ -504,6 +611,7 @@ class RealtimeFlashPolicy:
                     fallback_reason=self.force_full_reason,
                     accepted_prefix=0,
                     verified_prefix=None,
+                    executed_action_hash=None,
                     video_motion_stats=video_motion_stats,
                     video_motion_gate_threshold=self.video_motion_gate_threshold,
                     elapsed_sec=time.perf_counter() - start,
@@ -519,6 +627,8 @@ class RealtimeFlashPolicy:
             tau_timesteps=self.tau_timesteps,
             frame_st_id=self.frame_st_id,
             gripper_consensus=self.gripper_consensus,
+            adaptive_k_shadow=self.adaptive_k_shadow,
+            adaptive_k_distance_threshold=self.adaptive_k_distance_threshold,
         )
         if self.last_gripper is not None:
             previous_phase = self.last_gripper >= self.gripper_threshold
@@ -549,6 +659,45 @@ class RealtimeFlashPolicy:
             ),
             "gripper_consensus_failure_index": verify_response.get(
                 "gripper_consensus_failure_index"
+            ),
+            "requested_verify_k": verify_response.get("requested_verify_k"),
+            "effective_verify_k": verify_response.get("effective_verify_k"),
+            "primary_verify_forwards": verify_response.get(
+                "primary_verify_forwards"
+            ),
+            "adaptive_k_shadow": verify_response.get("adaptive_k_shadow"),
+            "adaptive_k_certificate_kind": verify_response.get(
+                "adaptive_k_certificate_kind"
+            ),
+            "adaptive_k_fail_reason": verify_response.get(
+                "adaptive_k_fail_reason"
+            ),
+            "adaptive_k_certificate_matches_full": verify_response.get(
+                "adaptive_k_certificate_matches_full"
+            ),
+            "adaptive_k_sentinel_distance_max": verify_response.get(
+                "adaptive_k_sentinel_distance_max"
+            ),
+            "adaptive_k_sentinel_full_prefix": verify_response.get(
+                "adaptive_k_sentinel_full_prefix"
+            ),
+            "adaptive_k_sentinel_continuous_prefix": verify_response.get(
+                "adaptive_k_sentinel_continuous_prefix"
+            ),
+            "adaptive_k_sentinel_gripper_prefix": verify_response.get(
+                "adaptive_k_sentinel_gripper_prefix"
+            ),
+            "adaptive_k_sentinel_accepted_prefix": verify_response.get(
+                "adaptive_k_sentinel_accepted_prefix"
+            ),
+            "adaptive_k_sentinel_gripper_failure_index": verify_response.get(
+                "adaptive_k_sentinel_gripper_failure_index"
+            ),
+            "adaptive_k_sentinel_phase_agreement": verify_response.get(
+                "adaptive_k_sentinel_phase_agreement"
+            ),
+            "adaptive_k_sentinel_gripper_switch": verify_response.get(
+                "adaptive_k_sentinel_gripper_switch"
             ),
         }
 
@@ -606,6 +755,7 @@ class RealtimeFlashPolicy:
                 fallback_reason=reason,
                 accepted_prefix=0,
                 verified_prefix=verified_prefix,
+                executed_action_hash=None,
                 teacher_gripper_switch=teacher_gripper_switch,
                 **verify_telemetry,
                 elapsed_sec=time.perf_counter() - start,
@@ -667,6 +817,10 @@ class RealtimeFlashPolicy:
             fallback_reason=response.get("fallback_reason"),
             accepted_prefix=accepted_prefix,
             verified_prefix=verified_prefix,
+            executed_action_hash=(
+                _stable_digest(executed_action)
+                if self.equivalence_audit else None
+            ),
             teacher_gripper_switch=teacher_gripper_switch,
             decoded_gripper_switch_step=switch_step,
             flow_budget_charge=flow_budget_charge,

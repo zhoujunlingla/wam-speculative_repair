@@ -129,6 +129,60 @@ def _anchored_policy(*, pf_interval=2, draft_action=None, verify_results=()):
     return policy, draft, teacher, events
 
 
+def _first_verify_noise(policy, draft, teacher, seed):
+    policy.infer({
+        "reset": True,
+        "prompt": "test task",
+        "paired_rng_seed": seed,
+    })
+    first = policy.infer(_action_request())
+    policy.infer(_cache_request("anchor", first["action"]))
+    policy.infer(_action_request())
+    return next(
+        call["request"]["verify_noise"].copy()
+        for call in reversed(teacher.calls)
+        if call["kind"] == "verify"
+    )
+
+
+def test_paired_rng_reset_replays_verifier_noise_per_episode():
+    events = []
+    draft = _FakeModel("draft", events)
+    teacher = _FakeModel("teacher", events)
+    policy = RealtimeFlashPolicy(draft, teacher, pf_interval=20)
+
+    first = _first_verify_noise(policy, draft, teacher, 10003)
+    policy.rng.standard_normal((9, 9))
+    repeated = _first_verify_noise(policy, draft, teacher, 10003)
+    different = _first_verify_noise(policy, draft, teacher, 10004)
+
+    assert np.array_equal(first, repeated)
+    assert not np.array_equal(first, different)
+
+
+def test_adaptive_k_shadow_is_forwarded_without_changing_policy_decision():
+    telemetry = {
+        "accepted_prefix": 32,
+        "adaptive_k_shadow": True,
+        "adaptive_k_certificate_kind": "pass",
+        "adaptive_k_certificate_matches_full": True,
+        "requested_verify_k": 2,
+        "effective_verify_k": 2,
+    }
+    policy, _, teacher, _ = _anchored_policy(
+        pf_interval=20, verify_results=(telemetry,)
+    )
+    policy.adaptive_k_shadow = True
+    policy.adaptive_k_distance_threshold = 0.05
+
+    response = policy.infer(_action_request())
+    verify_call = next(call for call in teacher.calls if call["kind"] == "verify")
+
+    assert response["accepted_prefix"] == 32
+    assert verify_call["request"]["adaptive_k_shadow"] is True
+    assert verify_call["request"]["adaptive_k_distance_threshold"] == 0.05
+
+
 def test_normalized_l2_excludes_grippers_and_prefix_uses_every_k():
     draft = np.zeros((1, 30, 1, 32, 1), dtype=np.float32)
     teachers = np.zeros((2, 30, 1, 32, 1), dtype=np.float32)

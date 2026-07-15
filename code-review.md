@@ -432,3 +432,56 @@ Verification: remote focused suite `37 passed`; local `py_compile` and
 Decision: allowed to run four-task TN=3 with immediate motion threshold 1.2,
 flow threshold 0.4, low-motion ceiling 0.5, no delayed recovery/burst, PF20,
 K=2 endpoint verification, and gripper consensus.
+# Adaptive-K Paired Shadow Review (2026-07-16)
+
+## Decision
+
+Allowed to proceed to manifest and TN=1 off/shadow smoke only. Live adaptive-K
+is not implemented and is not approved by this review.
+
+## Findings
+
+- **P1 fixed:** RoboTwin override keys were initially lost when the client
+  reloaded `demo_clean.yml`. `scene_manifest_in/out`, `manifest_only`, and
+  `paired_rng` are now explicitly copied into the task args.
+- **P1 fixed:** the paired comparator initially accepted empty/unhashed traces.
+  It now rejects empty traces, missing cache hashes, missing executed-action
+  hashes, and traces without action decisions.
+- **P1 fixed:** the first cache audit hashed only mutation requests. Audit mode
+  now also reads active draft and teacher KV cache tensors and hashes per-layer
+  size, ID, prediction mask, sum, squared sum, and absolute sum. The request
+  chain remains as an independent logical-cache check.
+- **P1 fixed:** fail-certificate comparison initially ignored second-probe
+  gripper routing. A fail match now also requires identical reconstructed
+  switch presence and gripper-consensus failure index.
+- **P2 fixed:** ordinary runs would have acquired a fixed verifier seed. The
+  runner now passes `--seed` only when explicitly requested; paired episode
+  streams are controlled by the manifest seed on reset.
+- **P2 fixed:** existing nonempty policy traces are rejected instead of
+  appended, preventing contaminated paired results.
+
+## Residual Risk
+
+- The K1 pass condition is an empirical candidate certificate, not a theorem:
+  tau-50 below 0.05 does not mathematically bound tau-100 below 0.15. Zero
+  conflict on the frozen manifest is required by the requested gate, but a
+  later live implementation must retain deterministic full-K audits and must
+  not claim distributional equivalence outside the audited scenes.
+- The KV checksum is a compact numerical fingerprint rather than a bytewise
+  copy of every cache tensor. It reads actual cache state and is suitable for
+  detecting this verifier-mutation regression without transferring the full
+  multi-layer cache to CPU.
+- Manifest replay intentionally restores the recorded prompt instead of
+  rerunning expert planning. Scene actor/articulation state, RoboTwin commit,
+  tracked diff, episode metadata digest, and manifest file digest are all
+  validated fail closed.
+
+## Checks
+
+- `python3 -m py_compile` passed for all changed runtime, script, and test files.
+- `git diff --check` passed.
+- Focused policy tests for episode RNG replay and shadow forwarding passed via
+  direct Python invocation.
+- Synthetic paired trace and adaptive summary checks passed.
+- Local `pytest` is unavailable; the full focused pytest suite must pass in the
+  A800 runtime before any RoboTwin smoke.

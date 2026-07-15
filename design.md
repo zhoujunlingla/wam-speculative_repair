@@ -402,3 +402,37 @@ first or second tau is responsible for each rejected prefix.
 - Run a long-episode smoke with server and renderer memory recorded; no
   per-probe temporary KV cache may remain allocated.
 - Run direct draft and teacher smokes before speculative evaluation.
+
+## Adaptive-K Paired Validation
+
+This branch is cut directly from the frozen Motion-on commit `46f0c38`. Its
+only policy experiment is an adaptive-K certificate around the existing
+`tau={50,100}` verifier. It does not carry repair, alter the acceptance
+threshold, change gripper routing, change motion routing, or address false
+accepts.
+
+The experiment has three gated phases:
+
+1. Build and freeze a manifest containing 20 valid `hanging_mug` scenes and
+   20 valid `open_microwave` scenes. Each row records the accepted RoboTwin
+   seed, episode metadata digest, and selected instruction. Replay must fail
+   closed if any recorded scene or instruction cannot be reproduced.
+2. Run adaptive-K `off` and `shadow` from the same commit and manifest with
+   the same client, verifier, NumPy, and Torch random streams. Shadow always
+   executes the original two probes. Every policy round records the executed
+   action hash, accepted prefix, fallback reason, and cache-state fingerprint.
+   The pair may proceed only when all four fields match for every round and
+   `certificate_conflict == 0`.
+3. Enable `live` only after phase 2 passes. Live may skip the second teacher
+   probe only when the first-probe certificate proves that the unchanged K=2
+   result is already decided. If end-to-end model latency improves by less
+   than 5%, adaptive-K is deleted rather than maintained.
+
+The manifest is the source of episode identity. A failed setup, changed
+instruction, or digest mismatch is an experiment error; the client must not
+silently increment the seed. Audit fingerprints are debug instrumentation and
+are excluded from live latency measurement.
+
+Success-rate recovery is explicitly out of scope. Adaptive-K reduces verifier
+compute but cannot make a false-accepted draft correct. Any later work on
+success belongs to a separate false-accept verifier branch.

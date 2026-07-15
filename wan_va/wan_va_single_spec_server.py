@@ -5,12 +5,15 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
+import json
 import logging
 import os
 import sys
 from pathlib import Path
 
 import numpy as np
+import torch
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -38,13 +41,54 @@ class LocalModelAdapter:
             raise RuntimeError("teacher verification mutated frame_st_id")
         return response
 
+    def cache_fingerprint(self) -> str:
+        """Hash checksums of the model's active KV tensors for audit runs."""
 
-def _model_config(name: str, save_root: Path, local_rank: int):
+        rows = []
+        for index, block in enumerate(self.model.transformer.blocks):
+            caches = block.attn1.attn_caches
+            cache = None if caches is None else caches.get(self.model.cache_name)
+            if cache is None:
+                rows.append((index, None))
+                continue
+            valid = cache["mask"].nonzero(as_tuple=False).flatten()
+            tensors = []
+            for key in ("k", "v"):
+                values = cache[key][:, valid].float()
+                tensors.append((
+                    key,
+                    int(values.numel()),
+                    float(values.sum(dtype=torch.float64).item()),
+                    float((values * values).sum(dtype=torch.float64).item()),
+                    float(values.abs().sum(dtype=torch.float64).item()),
+                ))
+            rows.append((
+                index,
+                int(valid.numel()),
+                cache["id"][valid].detach().cpu().tolist(),
+                cache["is_pred"][valid].detach().cpu().tolist(),
+                tensors,
+            ))
+        payload = {
+            "frame_st_id": self.model.frame_st_id,
+            "pending_video_prediction_frame_st_id": getattr(
+                self.model, "pending_video_prediction_frame_st_id", None
+            ),
+            "blocks": rows,
+        }
+        return hashlib.sha256(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+
+
+def _model_config(name: str, save_root: Path, local_rank: int,
+                  rng_stream_id: int):
     config = copy.deepcopy(VA_CONFIGS[name])
     config.save_root = str(save_root)
     config.rank = 0
     config.local_rank = local_rank
     config.world_size = 1
+    config.rng_stream_id = int(rng_stream_id)
     return config
 
 
@@ -54,20 +98,23 @@ def build_policy(args: argparse.Namespace):
     if args.mode == "draft_only":
         logging.info("loading local draft model: %s", args.draft_config_name)
         return LocalModelAdapter(VA_Server(
-            _model_config(args.draft_config_name, save_root / "draft", args.local_rank)
+            _model_config(args.draft_config_name, save_root / "draft",
+                          args.local_rank, 0)
         ))
     if args.mode == "teacher_only":
         logging.info("loading local teacher model: %s", args.teacher_config_name)
         return LocalModelAdapter(VA_Server(
-            _model_config(args.teacher_config_name, save_root / "teacher", args.local_rank)
+            _model_config(args.teacher_config_name, save_root / "teacher",
+                          args.local_rank, 1)
         ))
     logging.info("loading local draft model: %s", args.draft_config_name)
     draft = VA_Server(_model_config(
-        args.draft_config_name, save_root / "draft", args.local_rank
+        args.draft_config_name, save_root / "draft", args.local_rank, 0
     ))
     logging.info("loading local teacher model: %s", args.teacher_config_name)
     teacher = VA_Server(
-        _model_config(args.teacher_config_name, save_root / "teacher", args.local_rank)
+        _model_config(args.teacher_config_name, save_root / "teacher",
+                      args.local_rank, 1)
     )
     return RealtimeFlashPolicy(
         LocalModelAdapter(draft),
@@ -85,6 +132,9 @@ def build_policy(args: argparse.Namespace):
         delayed_error_consecutive=args.delayed_error_consecutive,
         delayed_error_teacher_rounds=args.delayed_error_teacher_rounds,
         video_motion_gate_threshold=args.video_motion_gate_threshold,
+        adaptive_k_shadow=args.adaptive_k_shadow,
+        adaptive_k_distance_threshold=args.adaptive_k_distance_threshold,
+        equivalence_audit=args.equivalence_audit,
         gripper_full_window=args.gripper_full_window,
         gripper_consensus=args.gripper_consensus,
         rng=None if args.seed is None else np.random.default_rng(args.seed),
@@ -123,6 +173,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--delayed-error-consecutive", type=int, default=2)
     parser.add_argument("--delayed-error-teacher-rounds", type=int, default=2)
     parser.add_argument("--video-motion-gate-threshold", type=float, default=0.0)
+    parser.add_argument("--adaptive-k-shadow", action="store_true")
+    parser.add_argument("--adaptive-k-distance-threshold", type=float, default=0.05)
+    parser.add_argument("--equivalence-audit", action="store_true")
     parser.add_argument("--gripper-full-window", type=int, default=1)
     parser.add_argument("--gripper-consensus", action="store_true")
     parser.add_argument(

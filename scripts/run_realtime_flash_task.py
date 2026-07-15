@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shutil
@@ -97,6 +98,14 @@ def read_metric(run_root: Path, task: str) -> dict:
 def source_summary(path: Path) -> dict:
     counts: dict[str, int] = {}
     latencies: dict[str, list[float]] = {}
+    adaptive = {
+        "calls": 0,
+        "certificates": 0,
+        "matches": 0,
+        "conflicts": 0,
+        "potential_saved_forwards": 0,
+        "by_kind": {},
+    }
     if path.exists():
         for line in path.read_text(errors="replace").splitlines():
             try:
@@ -107,6 +116,25 @@ def source_summary(path: Path) -> dict:
             counts[source] = counts.get(source, 0) + 1
             if row.get("elapsed_sec") is not None:
                 latencies.setdefault(source, []).append(float(row["elapsed_sec"]))
+            if row.get("requested_verify_k") is not None:
+                adaptive["calls"] += 1
+                kind = row.get("adaptive_k_certificate_kind")
+                if kind:
+                    kind = str(kind)
+                    adaptive["certificates"] += 1
+                    adaptive["potential_saved_forwards"] += max(
+                        0, int(row["requested_verify_k"]) - 1
+                    )
+                    bucket = adaptive["by_kind"].setdefault(
+                        kind, {"certificates": 0, "matches": 0, "conflicts": 0}
+                    )
+                    bucket["certificates"] += 1
+                    match = row.get("adaptive_k_certificate_matches_full")
+                    if match is not None:
+                        adaptive["matches"] += int(bool(match))
+                        adaptive["conflicts"] += int(not bool(match))
+                        bucket["matches"] += int(bool(match))
+                        bucket["conflicts"] += int(not bool(match))
     stats = {}
     for source, values in latencies.items():
         values.sort()
@@ -120,7 +148,18 @@ def source_summary(path: Path) -> dict:
         "counts": counts,
         "latency": stats,
         "teacher_action_rate": counts.get("teacher_full", 0) / action_total if action_total else None,
+        "adaptive_k": adaptive,
     }
+
+
+def file_sha256(path: Path | None) -> str | None:
+    if path is None or not path.exists():
+        return None
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def main() -> None:
@@ -153,6 +192,14 @@ def main() -> None:
         default=True,
     )
     parser.add_argument("--server-timeout", type=int, default=600)
+    parser.add_argument("--adaptive-k-shadow", action="store_true")
+    parser.add_argument("--adaptive-k-distance-threshold", type=float, default=0.05)
+    parser.add_argument("--equivalence-audit", action="store_true")
+    parser.add_argument("--paired-rng", action="store_true")
+    parser.add_argument("--policy-seed", type=int)
+    parser.add_argument("--scene-manifest-in", type=Path)
+    parser.add_argument("--scene-manifest-out", type=Path)
+    parser.add_argument("--manifest-only", action="store_true")
     args = parser.parse_args()
     client_gpu = args.gpu if args.client_gpu is None else args.client_gpu
 
@@ -160,6 +207,10 @@ def main() -> None:
         (root / "logs").mkdir(parents=True, exist_ok=True)
     started = datetime.now().isoformat(timespec="seconds")
     metrics_log = args.run_root / "logs" / f"specverify_{args.task}.jsonl"
+    if metrics_log.exists() and metrics_log.stat().st_size:
+        raise FileExistsError(
+            f"refusing to append to existing policy trace: {metrics_log}"
+        )
     server_log_path = args.run_root / "logs" / f"server_{args.task}_g{args.gpu}.log"
     client_log_path = args.run_root / "logs" / f"client_{args.task}_g{client_gpu}.log"
     server_cmd = [
@@ -181,12 +232,20 @@ def main() -> None:
         "--delayed-error-teacher-rounds", str(args.delayed_error_teacher_rounds),
         "--video-motion-gate-threshold", str(args.video_motion_gate_threshold),
         "--gripper-full-window", str(args.gripper_full_window),
+        "--adaptive-k-distance-threshold", str(
+            args.adaptive_k_distance_threshold),
         "--log-path", str(metrics_log),
     ]
+    if args.policy_seed is not None:
+        server_cmd.extend(["--seed", str(args.policy_seed)])
     if args.gripper_consensus:
         server_cmd.append("--gripper-consensus")
     if not args.teacher_gripper_fallback:
         server_cmd.append("--no-teacher-gripper-fallback")
+    if args.adaptive_k_shadow:
+        server_cmd.append("--adaptive-k-shadow")
+    if args.equivalence_audit:
+        server_cmd.append("--equivalence-audit")
     client_cmd = [
         sys.executable,
         "-m", "evaluation.robotwin.eval_polict_client_openpi",
@@ -205,6 +264,14 @@ def main() -> None:
         "--test_num", str(args.test_num),
         "--port", str(args.port),
     ]
+    if args.scene_manifest_in:
+        client_cmd.extend(["--scene_manifest_in", str(args.scene_manifest_in)])
+    if args.scene_manifest_out:
+        client_cmd.extend(["--scene_manifest_out", str(args.scene_manifest_out)])
+    if args.manifest_only:
+        client_cmd.extend(["--manifest_only", "True"])
+    if args.paired_rng:
+        client_cmd.extend(["--paired_rng", "True"])
     command = {
         "server": server_cmd,
         "client": client_cmd,
@@ -214,17 +281,21 @@ def main() -> None:
     }
     (args.result_root / f"command_{args.task}.json").write_text(json.dumps(command, indent=2))
 
-    server_log = server_log_path.open("a", buffering=1)
-    server = subprocess.Popen(
-        server_cmd,
-        cwd=CODE,
-        env=runtime_env(args.gpu, server=True),
-        stdout=server_log,
-        stderr=subprocess.STDOUT,
-    )
+    server_log = None
+    server = None
+    if not args.manifest_only:
+        server_log = server_log_path.open("a", buffering=1)
+        server = subprocess.Popen(
+            server_cmd,
+            cwd=CODE,
+            env=runtime_env(args.gpu, server=True),
+            stdout=server_log,
+            stderr=subprocess.STDOUT,
+        )
     client_rc = None
     try:
-        wait_for_server(server, args.port, args.server_timeout)
+        if server is not None:
+            wait_for_server(server, args.port, args.server_timeout)
         with client_log_path.open("a", buffering=1) as client_log:
             client = subprocess.run(
                 client_cmd,
@@ -235,14 +306,15 @@ def main() -> None:
             )
         client_rc = client.returncode
     finally:
-        if server.poll() is None:
+        if server is not None and server.poll() is None:
             server.terminate()
             try:
                 server.wait(timeout=30)
             except subprocess.TimeoutExpired:
                 server.kill()
                 server.wait(timeout=10)
-        server_log.close()
+        if server_log is not None:
+            server_log.close()
 
     metric = read_metric(args.run_root, args.task)
     summary = {
@@ -265,6 +337,21 @@ def main() -> None:
         "gripper_full_window": args.gripper_full_window,
         "gripper_consensus": args.gripper_consensus,
         "teacher_gripper_fallback": args.teacher_gripper_fallback,
+        "adaptive_k_shadow": args.adaptive_k_shadow,
+        "adaptive_k_distance_threshold": args.adaptive_k_distance_threshold,
+        "equivalence_audit": args.equivalence_audit,
+        "paired_rng": args.paired_rng,
+        "policy_seed": args.policy_seed,
+        "scene_manifest_in": (
+            str(args.scene_manifest_in) if args.scene_manifest_in else None
+        ),
+        "scene_manifest_out": (
+            str(args.scene_manifest_out) if args.scene_manifest_out else None
+        ),
+        "scene_manifest_sha256": file_sha256(
+            args.scene_manifest_in or args.scene_manifest_out
+        ),
+        "manifest_only": args.manifest_only,
         "started_at": started,
         "ended_at": datetime.now().isoformat(timespec="seconds"),
         "client_rc": client_rc,
@@ -277,7 +364,9 @@ def main() -> None:
         if path.exists():
             shutil.copy2(path, args.result_root / "logs" / path.name)
     print(json.dumps(summary, indent=2), flush=True)
-    if client_rc != 0 or metric["total_num"] < args.test_num:
+    if client_rc != 0 or (
+        not args.manifest_only and metric["total_num"] < args.test_num
+    ):
         raise SystemExit(client_rc or 2)
 
 

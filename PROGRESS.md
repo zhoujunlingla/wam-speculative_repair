@@ -170,3 +170,18 @@ teacher quality with materially lower teacher use.
 - The feature remains default-off for future analysis, but it is not promoted.
   Four-task TN=10 now evaluates the motion-only policy before any further
   routing or adaptive-K change.
+# 2026-07-16: Adaptive-K paired validation branch
+
+- Created `experiment/adaptive-k-paired-20260715` directly from frozen
+  Motion-on commit `46f0c38`.
+- Migrated shadow-only K1 pass/fail candidate certificates. Shadow still runs
+  the unchanged K=2 verifier and cannot alter routing or actions.
+- Added fail-closed RoboTwin scene manifests, episode-local verifier/video/
+  action RNG streams, executed-action hashes, actual KV cache checksums, and a
+  paired trace comparator.
+- Fixed review findings where client override keys were dropped, empty traces
+  passed equivalence, cache hashes did not inspect KV tensors, fail
+  certificates ignored gripper routing, and reruns appended stale traces.
+- Live adaptive-K remains intentionally absent. Next gate is remote pytest,
+  manifest TN=1 smoke, then 20-scene off/shadow paired evaluation for
+  `hanging_mug` and `open_microwave`.

@@ -278,6 +278,9 @@ class RealtimeFlashPolicy:
         delayed_error_consecutive: int = 2,
         delayed_error_teacher_rounds: int = 2,
         video_motion_gate_threshold: float = 0.0,
+        adaptive_k_mode: str = "off",
+        adaptive_k_distance_threshold: float = 0.05,
+        adaptive_k_audit_interval: int = 10,
         gripper_full_window: int = 1,
         gripper_consensus: bool = False,
         gripper_repair: bool = False,
@@ -318,6 +321,15 @@ class RealtimeFlashPolicy:
             raise ValueError("delayed-error recovery values must be positive")
         if not np.isfinite(video_motion_gate_threshold) or video_motion_gate_threshold < 0:
             raise ValueError("video_motion_gate_threshold must be non-negative")
+        if adaptive_k_mode not in ("off", "shadow", "live"):
+            raise ValueError("adaptive_k_mode must be off, shadow, or live")
+        if (
+            not np.isfinite(adaptive_k_distance_threshold)
+            or adaptive_k_distance_threshold < 0
+        ):
+            raise ValueError("adaptive K distance threshold must be non-negative")
+        if adaptive_k_audit_interval < 0:
+            raise ValueError("adaptive K audit interval must be non-negative")
         if gripper_full_window < 1:
             raise ValueError("gripper_full_window must be positive")
         if gripper_repair and not gripper_consensus:
@@ -364,6 +376,15 @@ class RealtimeFlashPolicy:
             raise ValueError("gripper repair tau must differ from primary probes")
         if gripper_consensus and len(tau_timesteps) < 2:
             raise ValueError("gripper consensus requires at least two tau probes")
+        if adaptive_k_mode != "off" and len(tau_timesteps) < 2:
+            raise ValueError("adaptive K requires at least two tau probes")
+        if adaptive_k_mode == "live" and (
+            gripper_repair
+            or zero_prefix_repair
+            or flow_consistent_repair
+            or repair_shadow
+        ):
+            raise ValueError("live adaptive K is incompatible with action repair")
 
         self.draft = draft
         self.teacher = teacher
@@ -383,6 +404,11 @@ class RealtimeFlashPolicy:
         self.delayed_error_consecutive = int(delayed_error_consecutive)
         self.delayed_error_teacher_rounds = int(delayed_error_teacher_rounds)
         self.video_motion_gate_threshold = float(video_motion_gate_threshold)
+        self.adaptive_k_mode = adaptive_k_mode
+        self.adaptive_k_distance_threshold = float(
+            adaptive_k_distance_threshold
+        )
+        self.adaptive_k_audit_interval = int(adaptive_k_audit_interval)
         self.gripper_full_window = int(gripper_full_window)
         self.gripper_consensus = bool(gripper_consensus)
         self.gripper_repair = bool(gripper_repair)
@@ -424,6 +450,7 @@ class RealtimeFlashPolicy:
         self.delayed_error_teacher_rounds_left = 0
         self.gripper_full_rounds_left = 0
         self.repair_count = 0
+        self.adaptive_k_verify_rounds = 0
         self._draft_primed = False
 
     def _call(self, model, request: dict) -> dict:
@@ -530,7 +557,11 @@ class RealtimeFlashPolicy:
         delayed_error_triggered = False
         if source == "full":
             self.delayed_error_streak = 0
-        elif self.delayed_error_threshold > 0 and delayed_video_error is not None:
+        elif (
+            self.delayed_error_threshold > 0
+            and delayed_video_error is not None
+            and delayed_video_error.get("valid", True)
+        ):
             latent_nrmse = float(delayed_video_error["latent_nrmse"])
             if not np.isfinite(latent_nrmse):
                 raise ValueError("delayed video latent_nrmse must be finite")
@@ -901,6 +932,12 @@ class RealtimeFlashPolicy:
                 )
                 return response
 
+        adaptive_k_force_full = bool(
+            self.adaptive_k_mode == "live"
+            and self.adaptive_k_audit_interval > 0
+            and (self.adaptive_k_verify_rounds + 1)
+            % self.adaptive_k_audit_interval == 0
+        )
         verify_request = dict(request)
         verify_request.update(
             verify_action=True,
@@ -911,6 +948,9 @@ class RealtimeFlashPolicy:
             frame_st_id=self.frame_st_id,
             gripper_consensus=self.gripper_consensus,
             return_gripper_phase=self.gripper_repair,
+            adaptive_k_mode=self.adaptive_k_mode,
+            adaptive_k_distance_threshold=self.adaptive_k_distance_threshold,
+            adaptive_k_force_full=adaptive_k_force_full,
             flow_repair=(
                 self.flow_consistent_repair
                 and self.repair_count < self.repair_max_per_episode
@@ -927,6 +967,7 @@ class RealtimeFlashPolicy:
                 previous_phase, 1.0, -1.0
             ).astype(np.float32)
         verify_response = self._call(self.teacher, verify_request)
+        self.adaptive_k_verify_rounds += 1
         verified_prefix = self._accepted_prefix(action_latent, verify_response, horizon)
         verify_distances = verify_response.get("distances")
         if verify_distances is not None:
@@ -951,6 +992,27 @@ class RealtimeFlashPolicy:
             "gripper_consensus_failure_index": verify_response.get(
                 "gripper_consensus_failure_index"
             ),
+            "requested_verify_k": verify_response.get("requested_verify_k"),
+            "effective_verify_k": verify_response.get("effective_verify_k"),
+            "adaptive_k_mode": verify_response.get("adaptive_k_mode"),
+            "adaptive_k_would_skip": verify_response.get(
+                "adaptive_k_would_skip"
+            ),
+            "adaptive_k_skipped": verify_response.get("adaptive_k_skipped"),
+            "adaptive_k_audited": verify_response.get("adaptive_k_audited"),
+            "adaptive_k_sentinel_distance_max": verify_response.get(
+                "adaptive_k_sentinel_distance_max"
+            ),
+            "adaptive_k_sentinel_full_prefix": verify_response.get(
+                "adaptive_k_sentinel_full_prefix"
+            ),
+            "adaptive_k_sentinel_phase_agreement": verify_response.get(
+                "adaptive_k_sentinel_phase_agreement"
+            ),
+            "adaptive_k_sentinel_gripper_switch": verify_response.get(
+                "adaptive_k_sentinel_gripper_switch"
+            ),
+            "cross_tau_endpoint": verify_response.get("cross_tau_endpoint"),
         }
 
         teacher_gripper_switch = bool(
@@ -1164,7 +1226,9 @@ class RealtimeFlashPolicy:
                 repair_flow_stats=repair_flow_stats,
                 repair_eligible=repair_eligible,
                 repair_attempted=repair_attempted,
-                primary_verify_forwards=len(self.tau_timesteps),
+                primary_verify_forwards=int(verify_response.get(
+                    "primary_verify_forwards", len(self.tau_timesteps)
+                )),
                 repair_construction_forwards=repair_construction_forwards,
                 repair_holdout_forwards=repair_holdout_forwards,
                 repair_holdout_evaluated=repair_holdout_forwards > 0,
@@ -1253,7 +1317,9 @@ class RealtimeFlashPolicy:
             repair_flow_stats=repair_flow_stats,
             repair_eligible=repair_eligible,
             repair_attempted=repair_attempted,
-            primary_verify_forwards=len(self.tau_timesteps),
+            primary_verify_forwards=int(verify_response.get(
+                "primary_verify_forwards", len(self.tau_timesteps)
+            )),
             repair_construction_forwards=repair_construction_forwards,
             repair_holdout_forwards=repair_holdout_forwards,
             repair_holdout_evaluated=repair_holdout_forwards > 0,

@@ -1,6 +1,7 @@
 from pathlib import Path
 import sys
 
+import pytest
 import torch
 
 
@@ -8,6 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "wan_va"))
 
 from specverify import (  # noqa: E402
     bounded_continuous_prefix_repair,
+    cross_tau_endpoint_distances,
     flow_euler_step,
     gripper_consensus_prefix,
     gripper_switch_info,
@@ -100,14 +102,27 @@ def test_latent_prediction_error_aligns_available_frames():
     predicted = torch.zeros(1, 4, 2, 2, 2)
     observed = torch.ones(1, 4, 1, 2, 2)
 
-    stats = latent_prediction_error_stats(predicted, observed, top_fraction=0.25)
+    stats = latent_prediction_error_stats(
+        predicted, observed, expected_frames=1, top_fraction=0.25
+    )
 
+    assert stats["valid"] is True
     assert stats["compared_latent_frames"] == 1
     assert stats["latent_rmse"] == 1.0
     assert stats["latent_nrmse"] == 1.0
     assert stats["cosine_distance"] == 1.0
     assert stats["per_frame_rmse"] == [1.0]
     assert stats["top_patch_rmse"] == 1.0
+
+
+def test_latent_prediction_error_rejects_silent_frame_truncation():
+    predicted = torch.zeros(1, 4, 1, 2, 2)
+    observed = torch.zeros(1, 4, 2, 2, 2)
+
+    with pytest.raises(ValueError, match="does not cover"):
+        latent_prediction_error_stats(
+            predicted, observed, expected_frames=2
+        )
 
 
 def test_normalized_l2_uses_only_continuous_channels():
@@ -121,6 +136,23 @@ def test_normalized_l2_uses_only_continuous_channels():
     assert distances.shape == (2, 2, 16)
     assert distances[0].max().item() == 0
     assert torch.isclose(distances[1, 1, 4], torch.tensor(1.0))
+
+
+def test_cross_tau_endpoint_distances_compare_probe_pairs():
+    reconstructed = torch.zeros(3, 30, 1, 2, 1)
+    reconstructed[1, 0] = 14**0.5
+    reconstructed[2, 0] = 2 * 14**0.5
+
+    distances = cross_tau_endpoint_distances(reconstructed)
+
+    assert distances.shape == (3, 1, 2)
+    assert torch.allclose(
+        distances[:, 0, 0], torch.tensor([1.0, 2.0, 1.0])
+    )
+    reconstructed[:, 28:30] = 100
+    assert torch.equal(
+        cross_tau_endpoint_distances(reconstructed), distances
+    )
 
 
 def test_prefix_is_minimum_over_all_tau_rows():

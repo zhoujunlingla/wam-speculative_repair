@@ -85,6 +85,9 @@ def build_policy(args: argparse.Namespace):
         delayed_error_consecutive=args.delayed_error_consecutive,
         delayed_error_teacher_rounds=args.delayed_error_teacher_rounds,
         video_motion_gate_threshold=args.video_motion_gate_threshold,
+        adaptive_k_mode=args.adaptive_k_mode,
+        adaptive_k_distance_threshold=args.adaptive_k_distance_threshold,
+        adaptive_k_audit_interval=args.adaptive_k_audit_interval,
         gripper_full_window=args.gripper_full_window,
         gripper_consensus=args.gripper_consensus,
         gripper_repair=args.gripper_repair,
@@ -137,6 +140,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--delayed-error-consecutive", type=int, default=2)
     parser.add_argument("--delayed-error-teacher-rounds", type=int, default=2)
     parser.add_argument("--video-motion-gate-threshold", type=float, default=0.0)
+    parser.add_argument(
+        "--adaptive-k-mode", choices=("off", "shadow", "live"), default="off"
+    )
+    parser.add_argument("--adaptive-k-distance-threshold", type=float, default=0.05)
+    parser.add_argument("--adaptive-k-audit-interval", type=int, default=10)
     parser.add_argument("--gripper-full-window", type=int, default=1)
     parser.add_argument("--gripper-consensus", action="store_true")
     parser.add_argument("--gripper-repair", action="store_true")

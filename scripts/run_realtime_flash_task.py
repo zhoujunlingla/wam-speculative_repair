@@ -133,6 +133,15 @@ def source_summary(
         "episode_outcome_count": 0,
         "episode_alignment_valid": episode_outcomes is None,
     }
+    adaptive_k = {
+        "calls": 0,
+        "would_skip": 0,
+        "skipped": 0,
+        "audited": 0,
+        "requested_forwards": 0,
+        "effective_forwards": 0,
+        "saved_forwards": 0,
+    }
     episodes = []
     current_episode = None
     action_model_elapsed_sec = 0.0
@@ -168,6 +177,22 @@ def source_summary(
             repair["action_only_forwards"] += int(
                 row.get("repair_action_only_forwards", 0) or 0
             )
+            if row.get("requested_verify_k") is not None:
+                requested_k = int(row["requested_verify_k"])
+                effective_k = int(row.get("effective_verify_k", requested_k))
+                adaptive_k["calls"] += 1
+                adaptive_k["would_skip"] += int(
+                    bool(row.get("adaptive_k_would_skip", False))
+                )
+                adaptive_k["skipped"] += int(
+                    bool(row.get("adaptive_k_skipped", False))
+                )
+                adaptive_k["audited"] += int(
+                    bool(row.get("adaptive_k_audited", False))
+                )
+                adaptive_k["requested_forwards"] += requested_k
+                adaptive_k["effective_forwards"] += effective_k
+                adaptive_k["saved_forwards"] += requested_k - effective_k
             if row.get("repair_kind"):
                 kind = str(row["repair_kind"])
                 repair["kinds"][kind] = repair["kinds"].get(kind, 0) + 1
@@ -236,6 +261,7 @@ def source_summary(
                 if total_model_elapsed_sec else None
             ),
         },
+        "adaptive_k": adaptive_k,
         "repair": repair,
     }
 
@@ -262,6 +288,11 @@ def main() -> None:
     parser.add_argument("--delayed-error-consecutive", type=int, default=2)
     parser.add_argument("--delayed-error-teacher-rounds", type=int, default=2)
     parser.add_argument("--video-motion-gate-threshold", type=float, default=0.0)
+    parser.add_argument(
+        "--adaptive-k-mode", choices=("off", "shadow", "live"), default="off"
+    )
+    parser.add_argument("--adaptive-k-distance-threshold", type=float, default=0.05)
+    parser.add_argument("--adaptive-k-audit-interval", type=int, default=10)
     parser.add_argument("--gripper-full-window", type=int, default=1)
     parser.add_argument("--gripper-consensus", action="store_true")
     parser.add_argument("--gripper-repair", action="store_true")
@@ -308,6 +339,10 @@ def main() -> None:
         "--delayed-error-consecutive", str(args.delayed_error_consecutive),
         "--delayed-error-teacher-rounds", str(args.delayed_error_teacher_rounds),
         "--video-motion-gate-threshold", str(args.video_motion_gate_threshold),
+        "--adaptive-k-mode", args.adaptive_k_mode,
+        "--adaptive-k-distance-threshold", str(
+            args.adaptive_k_distance_threshold),
+        "--adaptive-k-audit-interval", str(args.adaptive_k_audit_interval),
         "--gripper-full-window", str(args.gripper_full_window),
         "--log-path", str(metrics_log),
     ]
@@ -420,6 +455,9 @@ def main() -> None:
         "delayed_error_consecutive": args.delayed_error_consecutive,
         "delayed_error_teacher_rounds": args.delayed_error_teacher_rounds,
         "video_motion_gate_threshold": args.video_motion_gate_threshold,
+        "adaptive_k_mode": args.adaptive_k_mode,
+        "adaptive_k_distance_threshold": args.adaptive_k_distance_threshold,
+        "adaptive_k_audit_interval": args.adaptive_k_audit_interval,
         "gripper_full_window": args.gripper_full_window,
         "gripper_consensus": args.gripper_consensus,
         "gripper_repair": args.gripper_repair,

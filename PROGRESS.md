@@ -202,3 +202,33 @@ teacher quality with materially lower teacher use.
   `git diff --check` passed. A real-model smoke is pending a usable A800 slot;
   the remaining free-looking cards are currently occupied by the older
   endpoint-repair queue or unrelated jobs.
+## 2026-07-15 WCAS V0 implementation
+
+- Started from clean commit `e0cca59` on branch
+  `feature/wcas-shadow-20260715`; the source worktree was not modified.
+- Audited the frozen Motion-on teacher attribution: 200 initial anchors, 109
+  motion gates, 304 gripper-consensus fallbacks, 90 zero-prefix fallbacks, and
+  only 25 periodic refreshes. Adaptive refresh alone therefore cannot reach a
+  15% teacher action-source rate under the current metric.
+- Reused the existing delayed-video residual and rejected flow-budget paths
+  instead of adding another controller. Delayed-video comparison now requires
+  action-aligned frame counts and reports invalid telemetry on mismatch.
+- Added WCAS adaptive-K `off|shadow|live` modes. The first verifier probe may
+  skip later probes only for a full continuous prefix, max residual <= 0.05,
+  exact draft/reconstruction gripper agreement, and no gripper transition.
+  Live mode supports deterministic full-K audits and is blocked when action
+  repair is enabled.
+- Added cross-tau reconstructed-endpoint disagreement and requested/effective
+  verifier-forward telemetry. No repair, world-latent recovery, or new refresh
+  policy was added.
+- Verification:
+  - local `python3 -m py_compile`: passed for changed code and tests;
+  - `git diff --check`: passed;
+  - A800 targeted tests with the established LingBot `PYTHONPATH`:
+    `65 passed in 9.05s`;
+  - full `tests/` collection remains blocked by the pre-existing environment
+    error `ModuleNotFoundError: No module named 'triton.ops'` through
+    `bitsandbytes` while importing `tests/test_readonly_cache.py`.
+- No model smoke or RoboTwin evaluation has been launched. First runtime gate
+  is adaptive-K shadow on the frozen Motion-on controls; live routing is not
+  allowed until shadow audit confirms zero decision disagreements.

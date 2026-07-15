@@ -631,6 +631,45 @@ An alignment mismatch returns invalid telemetry rather than a plausible score.
   decision.
 - Existing policy, verifier, launcher, and summary tests remain green.
 
+### WCAS V1: dual K1 certificates
+
+The first matched shadow run showed that V0 is safe but modest: with 559
+available verifier calls, the `0.05` pass certificate covered 270 calls
+(`48.30%`), equivalent to at most `24.15%` verifier-forward savings. An
+offline threshold sweep found no K1/K2 decision conflicts through `0.06`
+(319/559 certificates, `28.53%` potential forward savings), while the first
+conflicts appeared at sentinel distances `0.065864`--`0.069759`. V1 therefore
+evaluates `0.06` in shadow, but does not promote it to a live default until a
+fresh matched run confirms the result. Motion-conditioned relaxation is out of
+scope because observed false certificates also occurred at low video motion.
+
+V1 adds an exact fail certificate alongside the existing pass certificate.
+The K-probe verifier combines continuous and gripper decisions by intersection:
+adding another probe can only shorten the accepted prefix. Consequently, if
+the first probe alone already quantizes either the continuous prefix or the
+draft/teacher gripper-consensus prefix to zero, the final K=2 prefix must also
+be zero. The second probe may be skipped without changing the teacher fallback.
+
+The verifier records:
+
+- certificate kind (`pass`, `fail`, or none);
+- K1 continuous, gripper-consensus, and final quantized prefixes;
+- the first K1 gripper disagreement index;
+- whether the shadow certificate agrees with the full K=2 decision; and
+- per-kind certificate and conflict counts in the run summary.
+
+V1 remains shadow-only for evaluation. It does not add a 16-step positive
+certificate: accepting a shorter prefix changes replanning/cache frequency and
+is not equivalent to the full K=2 policy. It also does not change motion
+routing, teacher fallback, `delta`, tau values, periodic refresh, or repair.
+Live adaptive K is rejected when cumulative flow-budget routing is enabled,
+because a skipped K2 probe would otherwise change the budget telemetry and may
+alter later routing decisions.
+
+V1 may enter live mode only if both certificate kinds have zero decision
+conflicts on the matched task manifest and the measured verifier savings are
+material after including server latency.
+
 ## Verification Plan
 
 - Unit-test shared-noise K verification and min-over-K prefix acceptance.

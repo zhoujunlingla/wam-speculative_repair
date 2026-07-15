@@ -330,6 +330,10 @@ class RealtimeFlashPolicy:
             raise ValueError("adaptive K distance threshold must be non-negative")
         if adaptive_k_audit_interval < 0:
             raise ValueError("adaptive K audit interval must be non-negative")
+        if adaptive_k_mode == "live" and flow_budget_threshold > 0:
+            raise ValueError(
+                "live adaptive K is incompatible with flow-budget routing"
+            )
         if gripper_full_window < 1:
             raise ValueError("gripper_full_window must be positive")
         if gripper_repair and not gripper_consensus:
@@ -1000,11 +1004,32 @@ class RealtimeFlashPolicy:
             ),
             "adaptive_k_skipped": verify_response.get("adaptive_k_skipped"),
             "adaptive_k_audited": verify_response.get("adaptive_k_audited"),
+            "adaptive_k_certificate_kind": verify_response.get(
+                "adaptive_k_certificate_kind"
+            ),
+            "adaptive_k_fail_reason": verify_response.get(
+                "adaptive_k_fail_reason"
+            ),
+            "adaptive_k_certificate_matches_full": verify_response.get(
+                "adaptive_k_certificate_matches_full"
+            ),
             "adaptive_k_sentinel_distance_max": verify_response.get(
                 "adaptive_k_sentinel_distance_max"
             ),
             "adaptive_k_sentinel_full_prefix": verify_response.get(
                 "adaptive_k_sentinel_full_prefix"
+            ),
+            "adaptive_k_sentinel_continuous_prefix": verify_response.get(
+                "adaptive_k_sentinel_continuous_prefix"
+            ),
+            "adaptive_k_sentinel_gripper_prefix": verify_response.get(
+                "adaptive_k_sentinel_gripper_prefix"
+            ),
+            "adaptive_k_sentinel_accepted_prefix": verify_response.get(
+                "adaptive_k_sentinel_accepted_prefix"
+            ),
+            "adaptive_k_sentinel_gripper_failure_index": verify_response.get(
+                "adaptive_k_sentinel_gripper_failure_index"
             ),
             "adaptive_k_sentinel_phase_agreement": verify_response.get(
                 "adaptive_k_sentinel_phase_agreement"

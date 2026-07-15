@@ -721,3 +721,52 @@ Live adaptive K is not approved until shadow logs show that every
 `adaptive_k_would_skip` call has the same K=2 prefix and gripper decision, and
 the server smoke confirms one saved teacher action-only forward without cache
 mutation. Repair and adaptive refresh remain excluded.
+
+## WCAS V1 Dual-Certificate Review (2026-07-15)
+
+### Scope
+
+This review covers the shadow-only K1 fail certificate, the proposed `0.06`
+pass threshold, certificate telemetry/summary accounting, and composition
+guards. It does not approve live fail certificates, task-conditioned
+thresholds, motion-conditioned thresholds, repair, or action changes.
+
+### Findings
+
+No blocking finding remains for shadow evaluation.
+
+- **Resolved high risk:** a skipped live K1 call originally reported itself as
+  matching full K even though K2 had not run. `certificate_matches_full` is now
+  nullable and is populated only when `effective_verify_k ==
+  requested_verify_k`.
+- **Resolved high risk:** the first draft accidentally exposed the new fail
+  certificate through the existing live mode. Fail certificates are now
+  shadow-only; existing live pass behavior is unchanged.
+- **Resolved medium risk:** a reconstructed gripper switch is not a universal
+  policy-level failure when gripper consensus/fallback is disabled. The exact
+  fail certificate is now limited to a zero continuous prefix or an enabled
+  gripper-consensus prefix of zero.
+- **Resolved medium risk:** live adaptive K now rejects cumulative flow-budget
+  routing, because skipping K2 would change the budget telemetry and could
+  alter subsequent routing.
+- **Residual medium research risk:** `0.06` was selected from a post-hoc sweep.
+  It remains an explicit shadow setting, not the default. The fresh matched
+  run must report zero conflicts separately for pass and fail certificates.
+- **Residual medium runtime risk:** helper/policy tests do not replace a
+  real-model live smoke. No live mode is approved by this review.
+
+### Verification
+
+- `python3 -m py_compile` on changed Python files and tests: passed.
+- `git diff --check`: passed.
+- A800 focused suite with repository `PYTHONPATH`: `67 passed in 1.50s`.
+- Tests cover K1 gripper failures at indices 0 and 15 remaining zero after a
+  second agreeing probe, per-kind summary accounting, nullable unobserved
+  full-K matches, and the flow-budget composition guard.
+
+### Decision
+
+Allowed to commit and run a fresh **shadow-only** matched evaluation with
+`adaptive_k_distance_threshold=0.06`. Live fail certificates and the `0.06`
+live threshold are not approved. Promotion requires zero per-kind conflicts
+and material measured latency savings after a reviewed real-model live smoke.

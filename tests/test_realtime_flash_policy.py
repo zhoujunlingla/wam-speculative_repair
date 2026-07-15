@@ -1536,3 +1536,13 @@ def test_live_adaptive_k_rejects_repair_composition():
             adaptive_k_mode="live",
             zero_prefix_repair=True,
         )
+
+
+def test_live_adaptive_k_rejects_flow_budget_composition():
+    with pytest.raises(ValueError, match="incompatible with flow-budget routing"):
+        RealtimeFlashPolicy(
+            _FakeModel("draft", []),
+            _FakeModel("teacher", []),
+            adaptive_k_mode="live",
+            flow_budget_threshold=0.2,
+        )

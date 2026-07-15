@@ -76,14 +76,26 @@ def test_gripper_consensus_accepts_shared_transition_and_bounds_disagreement():
     assert (prefix, failure) == (23, 23)
 
 
-def test_gripper_consensus_requires_cross_tau_probes():
-    draft = torch.zeros(1, 30, 2, 16, 1)
-    try:
-        gripper_consensus_prefix(draft, draft, max_prefix=32)
-    except ValueError as error:
-        assert "at least two" in str(error)
-    else:
-        raise AssertionError("K=1 must not be treated as cross-tau consensus")
+@pytest.mark.parametrize("failure_index", [0, 15])
+def test_k1_gripper_failure_is_monotone_when_another_probe_is_added(
+    failure_index,
+):
+    draft = torch.full((1, 30, 2, 16, 1), -1.0)
+    first_probe = draft.clone()
+    first_probe[:, 28, 0, failure_index, 0] = 1.0
+
+    k1_prefix, k1_failure = gripper_consensus_prefix(
+        first_probe, draft, max_prefix=32
+    )
+    k2_prefix, k2_failure = gripper_consensus_prefix(
+        torch.cat([first_probe, draft], dim=0), draft, max_prefix=32
+    )
+
+    assert (k1_prefix, k1_failure) == (failure_index, failure_index)
+    assert (k2_prefix, k2_failure) == (failure_index, failure_index)
+    assert quantize_prefix_to_frame_boundary(
+        k1_prefix, action_per_frame=16, frame_chunk_size=1
+    ) == 0
 
 
 def test_latent_frame_motion_stats_detects_concentrated_change():

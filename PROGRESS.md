@@ -242,3 +242,28 @@ teacher quality with materially lower teacher use.
   the working system Torch 2.3 client (`kinematics_fused_cu` and `geom_cu`).
 - The launcher now preserves an explicitly selected extension cache. Default
   behavior is unchanged.
+
+## 2026-07-15 WCAS shadow diagnosis and V1 adjustment
+
+- WCAS V0 shadow does not change actions and therefore cannot improve success
+  or reduce actual runtime; it measures potential K2 savings. Treating partial
+  task success as an adaptive-K quality result is invalid.
+- On 559 available verifier rows, the `0.05` pass certificate covered 270
+  calls (`48.30%`, at most `24.15%` of K=2 forwards). A `0.06` replay covered
+  319 (`57.07%`, `28.53%` potential savings) with zero observed conflicts.
+  The first conflicts began at `0.065864`, so `0.065` is rejected as an
+  overfit boundary. Low-motion conflicts also exist; motion must not be used to
+  relax this threshold.
+- Added a shadow-only exact fail certificate. Because K probes are intersected,
+  a K1 continuous or gripper-consensus prefix already quantized to zero cannot
+  become executable after K2. This targets hard rounds where pass coverage is
+  low without changing teacher fallback.
+- A skipped K1 call must never be counted as a measured full-K match. Only
+  shadow or forced-audit calls that actually run K2 contribute to certificate
+  precision. Summaries now separate pass/fail conflicts and actual/potential
+  saved forwards.
+- Live adaptive K is blocked with flow-budget routing: K1-only distances would
+  change later budget decisions. V1 remains shadow-only pending a fresh matched
+  run and a real-model live smoke.
+- A800 focused verification passed `67/67`; no new evaluation has been launched
+  from V1 yet.

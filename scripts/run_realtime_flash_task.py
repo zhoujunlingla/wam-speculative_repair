@@ -138,9 +138,14 @@ def source_summary(
         "would_skip": 0,
         "skipped": 0,
         "audited": 0,
+        "certificate_kinds": {},
+        "certificates_evaluated": 0,
+        "certificate_matches": 0,
+        "certificate_conflicts": 0,
         "requested_forwards": 0,
         "effective_forwards": 0,
         "saved_forwards": 0,
+        "potential_saved_forwards": 0,
     }
     episodes = []
     current_episode = None
@@ -190,9 +195,53 @@ def source_summary(
                 adaptive_k["audited"] += int(
                     bool(row.get("adaptive_k_audited", False))
                 )
+                certificate_kind = row.get("adaptive_k_certificate_kind")
+                if certificate_kind:
+                    certificate_kind = str(certificate_kind)
+                    kind_stats = adaptive_k["certificate_kinds"].setdefault(
+                        certificate_kind,
+                        {
+                            "certificates": 0,
+                            "evaluated": 0,
+                            "matches": 0,
+                            "conflicts": 0,
+                            "skipped": 0,
+                            "saved_forwards": 0,
+                            "potential_saved_forwards": 0,
+                        },
+                    )
+                    kind_stats["certificates"] += 1
+                    kind_stats["skipped"] += int(
+                        bool(row.get("adaptive_k_skipped", False))
+                    )
+                    kind_stats["saved_forwards"] += requested_k - effective_k
+                    kind_stats["potential_saved_forwards"] += max(
+                        0, requested_k - 1
+                    )
+                certificate_match = row.get(
+                    "adaptive_k_certificate_matches_full"
+                )
+                if certificate_match is not None:
+                    adaptive_k["certificates_evaluated"] += 1
+                    adaptive_k["certificate_matches"] += int(
+                        bool(certificate_match)
+                    )
+                    adaptive_k["certificate_conflicts"] += int(
+                        not bool(certificate_match)
+                    )
+                    if certificate_kind:
+                        kind_stats["evaluated"] += 1
+                        kind_stats["matches"] += int(bool(certificate_match))
+                        kind_stats["conflicts"] += int(
+                            not bool(certificate_match)
+                        )
                 adaptive_k["requested_forwards"] += requested_k
                 adaptive_k["effective_forwards"] += effective_k
                 adaptive_k["saved_forwards"] += requested_k - effective_k
+                if row.get("adaptive_k_would_skip", False):
+                    adaptive_k["potential_saved_forwards"] += max(
+                        0, requested_k - 1
+                    )
             if row.get("repair_kind"):
                 kind = str(row["repair_kind"])
                 repair["kinds"][kind] = repair["kinds"].get(kind, 0) + 1

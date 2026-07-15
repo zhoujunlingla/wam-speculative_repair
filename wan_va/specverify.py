@@ -527,8 +527,8 @@ def gripper_consensus_prefix(
         raise ValueError("actions must have shape [K, C, F, N, 1]")
     if draft.shape[0] != 1 or reconstructed.shape[1:] != draft.shape[1:]:
         raise ValueError("draft must contain one chunk matching every reconstruction")
-    if reconstructed.shape[0] < 2:
-        raise ValueError("cross-tau gripper consensus requires at least two probes")
+    if reconstructed.shape[0] < 1:
+        raise ValueError("gripper consensus requires at least one probe")
     channels = tuple(int(channel) for channel in gripper_channels)
     if not channels or min(channels) < 0 or max(channels) >= draft.shape[1]:
         raise ValueError("gripper channel index is outside the action tensor")

@@ -520,6 +520,15 @@ class VA_Server:
         sentinel_raw_prefix, _, _ = longest_prefix_min_over_k(
             sentinel_valid_distances, threshold
         )
+        sentinel_continuous_raw_prefix = (
+            conditioned_frame_count * self.action_per_frame
+            + sentinel_raw_prefix
+        )
+        sentinel_continuous_prefix = quantize_prefix_to_frame_boundary(
+            sentinel_continuous_raw_prefix,
+            action_per_frame=self.action_per_frame,
+            frame_chunk_size=self.job_config.frame_chunk_size,
+        )
         gripper_channels = (28, 29)
         sentinel_phase_agreement = bool(torch.all(
             (reconstructed_first[
@@ -545,7 +554,29 @@ class VA_Server:
         sentinel_full_prefix = (
             sentinel_raw_prefix == sentinel_valid_distances.numel()
         )
-        adaptive_k_would_skip = bool(
+        sentinel_gripper_raw_prefix = None
+        sentinel_gripper_failure_index = None
+        if gripper_consensus:
+            sentinel_gripper_raw_prefix, sentinel_gripper_failure_index = \
+                gripper_consensus_prefix(
+                    reconstructed_first,
+                    draft,
+                    max_prefix=sentinel_continuous_prefix,
+                    threshold=gripper_threshold,
+                )
+        sentinel_gripper_prefix = None
+        sentinel_accepted_prefix = sentinel_continuous_prefix
+        if sentinel_gripper_raw_prefix is not None:
+            sentinel_gripper_prefix = quantize_prefix_to_frame_boundary(
+                sentinel_gripper_raw_prefix,
+                action_per_frame=self.action_per_frame,
+                frame_chunk_size=self.job_config.frame_chunk_size,
+            )
+            sentinel_accepted_prefix = min(
+                sentinel_continuous_prefix, sentinel_gripper_prefix
+            )
+
+        adaptive_k_pass_certificate = bool(
             adaptive_k_mode != 'off'
             and sentinel_distance_max <= adaptive_k_distance_threshold
             and sentinel_full_prefix
@@ -553,6 +584,25 @@ class VA_Server:
             and not sentinel_reconstructed_switch['has_switch']
             and not sentinel_draft_switch['has_switch']
         )
+        # Adding probes intersects per-probe decisions, so a K1 zero prefix is
+        # an exact fail certificate: K2 cannot restore an executable prefix.
+        adaptive_k_fail_reason = None
+        if sentinel_continuous_prefix == 0:
+            adaptive_k_fail_reason = 'continuous'
+        elif gripper_consensus and sentinel_gripper_prefix == 0:
+            adaptive_k_fail_reason = 'gripper_consensus'
+        # V1 fail certificates stay shadow-only until matched K2 telemetry
+        # confirms zero conflicts. Existing live pass behavior is unchanged.
+        adaptive_k_fail_certificate = bool(
+            adaptive_k_mode == 'shadow'
+            and adaptive_k_fail_reason is not None
+        )
+        adaptive_k_certificate_kind = (
+            'pass' if adaptive_k_pass_certificate
+            else 'fail' if adaptive_k_fail_certificate
+            else None
+        )
+        adaptive_k_would_skip = adaptive_k_certificate_kind is not None
         adaptive_k_skipped = bool(
             adaptive_k_mode == 'live'
             and adaptive_k_would_skip
@@ -666,7 +716,8 @@ class VA_Server:
         consensus_failure_index = None
         if gripper_consensus:
             if adaptive_k_skipped:
-                consensus_raw_prefix = accepted_before_gripper
+                consensus_raw_prefix = sentinel_gripper_raw_prefix
+                consensus_failure_index = sentinel_gripper_failure_index
             else:
                 consensus_raw_prefix, consensus_failure_index = \
                     gripper_consensus_prefix(
@@ -686,6 +737,17 @@ class VA_Server:
         elif any_reconstructed_switch:
             accepted_prefix = 0
             stitched_action_latent = teacher_endpoint
+
+        adaptive_k_certificate_matches_full = None
+        if batch_size == requested_batch_size:
+            if adaptive_k_certificate_kind == 'pass':
+                adaptive_k_certificate_matches_full = bool(
+                    accepted_prefix == draft.shape[2] * draft.shape[3]
+                )
+            elif adaptive_k_certificate_kind == 'fail':
+                adaptive_k_certificate_matches_full = bool(
+                    accepted_prefix == 0
+                )
 
         flow_repair_candidate = None
         flow_repair_stats = None
@@ -851,8 +913,18 @@ class VA_Server:
             'adaptive_k_would_skip': adaptive_k_would_skip,
             'adaptive_k_skipped': adaptive_k_skipped,
             'adaptive_k_audited': adaptive_k_audited,
+            'adaptive_k_certificate_kind': adaptive_k_certificate_kind,
+            'adaptive_k_fail_reason': adaptive_k_fail_reason,
+            'adaptive_k_certificate_matches_full':
+                adaptive_k_certificate_matches_full,
             'adaptive_k_sentinel_distance_max': sentinel_distance_max,
             'adaptive_k_sentinel_full_prefix': sentinel_full_prefix,
+            'adaptive_k_sentinel_continuous_prefix':
+                sentinel_continuous_prefix,
+            'adaptive_k_sentinel_gripper_prefix': sentinel_gripper_prefix,
+            'adaptive_k_sentinel_accepted_prefix': sentinel_accepted_prefix,
+            'adaptive_k_sentinel_gripper_failure_index':
+                sentinel_gripper_failure_index,
             'adaptive_k_sentinel_phase_agreement': sentinel_phase_agreement,
             'adaptive_k_sentinel_gripper_switch': bool(
                 sentinel_reconstructed_switch['has_switch']

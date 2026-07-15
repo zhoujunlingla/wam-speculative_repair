@@ -456,3 +456,23 @@ boundary. The corrected shadow has these constraints:
 The failed TN=1 artifacts remain preserved as negative evidence. The same
 manifest and GPU are reused after the corrective commit; the 20-scene run is
 still blocked until the repeated TN=1 trace is exactly equivalent.
+
+### Cross-process determinism prerequisite
+
+The host-only rerun still diverged at cache trace 29 / action decision 17.
+Crucially, a second adaptive-off replica on the same commit, GPU, and manifest
+diverged at the same point. The paired gate is therefore measuring baseline
+CUDA/simulator reproducibility rather than a shadow side effect.
+
+Before repeating off/shadow, audit runs use a deterministic server profile:
+
+- `CUBLAS_WORKSPACE_CONFIG=:4096:8` is set before the server process imports
+  torch;
+- deterministic algorithms and deterministic cuDNN are enabled;
+- TF32 is disabled;
+- CUDA SDPA is restricted to the math backend.
+
+This profile is scoped to `--equivalence-audit`. It is not live behavior and
+must not be used for the final latency measurement. The next gate is off/off on
+the same TN=1 manifest; off/shadow remains blocked until off/off itself is
+bitwise equivalent.

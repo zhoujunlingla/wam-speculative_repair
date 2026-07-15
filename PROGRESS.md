@@ -207,3 +207,20 @@ teacher quality with materially lower teacher use.
   zero conflicts and exact action/cache traces.
 - Formal TN=20 and live adaptive-K remain blocked. The next action is remote
   tests followed by a repeat of the same TN=1 manifest on the same GPU.
+
+## 2026-07-16: Baseline reproducibility failure
+
+- The corrected host-only shadow produced one pass candidate, one exact match,
+  and zero certificate conflicts, but the separate off/shadow executions still
+  diverged at cache trace 29 and action decision 17.
+- A third run using adaptive-off, the same commit, GPU2, manifest, and seeds
+  also diverged from the first off run at exactly cache trace 29 / decision 17.
+  This falsifies the hypothesis that shadow instrumentation caused the split.
+- `attn_mode=torch` currently leaves CUDA SDPA backend selection unconstrained.
+  Cross-process bitwise comparison is invalid until the baseline itself is
+  deterministic.
+- An audit-only deterministic profile now fixes cuBLAS workspace behavior,
+  deterministic algorithms/cuDNN, disables TF32, and forces math SDPA. It is
+  excluded from live behavior and latency measurement.
+- The next gate is TN=1 off/off under that profile. No off/shadow TN=20 or live
+  run is allowed until off/off action and cache traces are exactly equal.

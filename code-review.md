@@ -540,3 +540,35 @@ is not implemented and is not approved by this review.
 - Local pytest is unavailable and must be run in the A800 environment.
 - Decision: code may be pushed for remote tests and the same-manifest TN=1
   rerun only. Formal TN=20 and live mode are not yet approved.
+
+## Deterministic Audit Profile Review (2026-07-16)
+
+### Evidence and Scope
+
+The same current commit, GPU2, manifest, and seeds produced an off/off split at
+the identical cache/action indices as off/shadow. The deterministic profile is
+therefore an experiment-validity repair, not an adaptive-K behavior change.
+
+### Review
+
+- The profile is activated only when the existing `--equivalence-audit` flag is
+  set. Ordinary training, evaluation, future live routing, and latency runs do
+  not receive `CUBLAS_WORKSPACE_CONFIG` or math-SDPA forcing.
+- The cuBLAS environment is set by the parent runner before the server process
+  imports torch. Torch deterministic algorithms, cuDNN determinism, TF32
+  disablement, and SDPA backend selection are then applied before model load.
+- Parent-shell cuBLAS settings are removed from every child environment; only
+  the audited server receives the fixed value. Direct audit-server launches
+  without that value fail closed before model construction.
+- The client process is unchanged, so the profile cannot alter RoboTwin physics
+  or rendering. Off/off must still pass; otherwise exact cross-process closed-
+  loop validation is not feasible and request replay is required.
+
+### Risks and Gate
+
+- Math SDPA is slower and may use more memory. These numbers are invalid for
+  the requested live 5% speed gate.
+- A deterministic-algorithm error is fail-closed and blocks the experiment; no
+  fallback to a nondeterministic backend is allowed.
+- Decision: allow remote focused tests and TN=1 off/off only. Off/shadow, TN=20,
+  live implementation, and latency claims remain blocked.

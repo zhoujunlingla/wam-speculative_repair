@@ -21,8 +21,11 @@ CODE = Path(__file__).resolve().parents[1]
 ROBOTWIN = ROOT / "Wam_Speed_up" / "RoboTwin"
 
 
-def runtime_env(gpu: int, *, server: bool) -> dict[str, str]:
+def runtime_env(
+    gpu: int, *, server: bool, deterministic_audit: bool = False
+) -> dict[str, str]:
     env = os.environ.copy()
+    env.pop("CUBLAS_WORKSPACE_CONFIG", None)
     env["CUDA_VISIBLE_DEVICES"] = str(gpu)
     env["ROBOTWIN_ROOT"] = str(ROBOTWIN)
     paths = []
@@ -64,6 +67,8 @@ def runtime_env(gpu: int, *, server: bool) -> dict[str, str]:
     env["TOKENIZERS_PARALLELISM"] = "false"
     env["PYTHONWARNINGS"] = "ignore::UserWarning"
     env["PYTHONUNBUFFERED"] = "1"
+    if server and deterministic_audit:
+        env["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
     return env
 
 
@@ -288,7 +293,11 @@ def main() -> None:
         server = subprocess.Popen(
             server_cmd,
             cwd=CODE,
-            env=runtime_env(args.gpu, server=True),
+            env=runtime_env(
+                args.gpu,
+                server=True,
+                deterministic_audit=args.equivalence_audit,
+            ),
             stdout=server_log,
             stderr=subprocess.STDOUT,
         )

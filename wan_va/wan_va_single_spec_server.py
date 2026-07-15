@@ -27,6 +27,26 @@ from wan_va.utils.Simple_Remote_Infer.deploy.websocket_policy_server import (
 from wan_va.wan_va_server import VA_Server
 
 
+def configure_deterministic_audit() -> None:
+    """Force reproducible CUDA kernels for cross-process audit runs only."""
+
+    if os.environ.get("CUBLAS_WORKSPACE_CONFIG") != ":4096:8":
+        raise RuntimeError(
+            "equivalence audit must be launched with "
+            "CUBLAS_WORKSPACE_CONFIG=:4096:8"
+        )
+    torch.use_deterministic_algorithms(True)
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.backends.cudnn.allow_tf32 = False
+    torch.backends.cuda.enable_flash_sdp(False)
+    torch.backends.cuda.enable_mem_efficient_sdp(False)
+    if hasattr(torch.backends.cuda, "enable_cudnn_sdp"):
+        torch.backends.cuda.enable_cudnn_sdp(False)
+    torch.backends.cuda.enable_math_sdp(True)
+
+
 class LocalModelAdapter:
     """Expose a local ``VA_Server`` through the policy's small infer contract."""
 
@@ -189,6 +209,9 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="[%(asctime)s] %(levelname)s %(message)s")
     args = parse_args()
+    if args.equivalence_audit:
+        configure_deterministic_audit()
+        logging.info("equivalence audit uses deterministic math-SDPA profile")
     policy = build_policy(args)
     server = WebsocketPolicyServer(
         policy,

@@ -633,15 +633,16 @@ An alignment mismatch returns invalid telemetry rather than a plausible score.
 
 ### WCAS V1: dual K1 certificates
 
-The first matched shadow run showed that V0 is safe but modest: with 559
-available verifier calls, the `0.05` pass certificate covered 270 calls
-(`48.30%`), equivalent to at most `24.15%` verifier-forward savings. An
-offline threshold sweep found no K1/K2 decision conflicts through `0.06`
-(319/559 certificates, `28.53%` potential forward savings), while the first
-conflicts appeared at sentinel distances `0.065864`--`0.069759`. V1 therefore
-evaluates `0.06` in shadow, but does not promote it to a live default until a
-fresh matched run confirms the result. Motion-conditioned relaxation is out of
-scope because observed false certificates also occurred at low video motion.
+The first matched shadow run showed that V0 is safe but modest. As the run
+grew to 678 verifier calls, the `0.05` pass certificate covered 334 calls
+(`49.05%`), equivalent to at most `24.52%` verifier-forward savings, with no
+observed K1/K2 decision conflict. A post-hoc `0.06` sweep covered 395 calls but
+produced an `open_microwave` false certificate: K1 accepted 32 actions while
+K2 accepted only 3 raw actions and the final quantized prefix was zero
+(`sentinel_distance=0.059837`). V1 therefore keeps `0.05`; the extra saving
+must come from the exact fail certificate rather than a relaxed empirical
+boundary. Motion-conditioned relaxation is also out of scope because observed
+false certificates occur at low video motion.
 
 V1 adds an exact fail certificate alongside the existing pass certificate.
 The K-probe verifier combines continuous and gripper decisions by intersection:

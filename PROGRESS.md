@@ -248,12 +248,12 @@ teacher quality with materially lower teacher use.
 - WCAS V0 shadow does not change actions and therefore cannot improve success
   or reduce actual runtime; it measures potential K2 savings. Treating partial
   task success as an adaptive-K quality result is invalid.
-- On 559 available verifier rows, the `0.05` pass certificate covered 270
-  calls (`48.30%`, at most `24.15%` of K=2 forwards). A `0.06` replay covered
-  319 (`57.07%`, `28.53%` potential savings) with zero observed conflicts.
-  The first conflicts began at `0.065864`, so `0.065` is rejected as an
-  overfit boundary. Low-motion conflicts also exist; motion must not be used to
-  relax this threshold.
+- On 678 available verifier rows, the `0.05` pass certificate covered 334
+  calls (`49.05%`, at most `24.52%` of K=2 forwards) with zero observed
+  conflicts. A post-hoc `0.06` replay produced an `open_microwave` false pass
+  at distance `0.059837`: K1 accepted 32 actions, K2 accepted only 3 raw
+  actions, and the final prefix was zero. Relaxing the pass threshold is
+  rejected; low-motion conflicts also prohibit motion-conditioned relaxation.
 - Added a shadow-only exact fail certificate. Because K probes are intersected,
   a K1 continuous or gripper-consensus prefix already quantized to zero cannot
   become executable after K2. This targets hard rounds where pass coverage is

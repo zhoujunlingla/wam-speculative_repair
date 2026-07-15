@@ -726,8 +726,8 @@ mutation. Repair and adaptive refresh remain excluded.
 
 ### Scope
 
-This review covers the shadow-only K1 fail certificate, the proposed `0.06`
-pass threshold, certificate telemetry/summary accounting, and composition
+This review covers the shadow-only K1 fail certificate, pass-threshold audit,
+certificate telemetry/summary accounting, and composition
 guards. It does not approve live fail certificates, task-conditioned
 thresholds, motion-conditioned thresholds, repair, or action changes.
 
@@ -749,9 +749,10 @@ No blocking finding remains for shadow evaluation.
 - **Resolved medium risk:** live adaptive K now rejects cumulative flow-budget
   routing, because skipping K2 would change the budget telemetry and could
   alter subsequent routing.
-- **Residual medium research risk:** `0.06` was selected from a post-hoc sweep.
-  It remains an explicit shadow setting, not the default. The fresh matched
-  run must report zero conflicts separately for pass and fail certificates.
+- **Resolved calibration risk:** the growing V0 log produced a false pass at
+  `0.06` (`open_microwave`, sentinel `0.059837`, K1 prefix 32 versus K2 raw
+  prefix 3/final zero). V1 retains `0.05`; the fresh matched run must report
+  zero conflicts separately for pass and fail certificates.
 - **Residual medium runtime risk:** helper/policy tests do not replace a
   real-model live smoke. No live mode is approved by this review.
 
@@ -766,7 +767,7 @@ No blocking finding remains for shadow evaluation.
 
 ### Decision
 
-Allowed to commit and run a fresh **shadow-only** matched evaluation with
-`adaptive_k_distance_threshold=0.06`. Live fail certificates and the `0.06`
-live threshold are not approved. Promotion requires zero per-kind conflicts
+Allowed to run a fresh **shadow-only** matched evaluation with the frozen
+`adaptive_k_distance_threshold=0.05`. Live fail certificates and relaxed pass
+thresholds are not approved. Promotion requires zero per-kind conflicts
 and material measured latency savings after a reviewed real-model live smoke.

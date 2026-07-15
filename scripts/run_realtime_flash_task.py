@@ -46,7 +46,7 @@ def runtime_env(gpu: int, *, server: bool) -> dict[str, str]:
         f"{env.get('LD_LIBRARY_PATH', '')}"
     )
     env["LIBRARY_PATH"] = f"{cuda_lib}:{env.get('LIBRARY_PATH', '')}"
-    env["TORCH_EXTENSIONS_DIR"] = str(ROOT / "env" / "torch_extensions")
+    env.setdefault("TORCH_EXTENSIONS_DIR", str(ROOT / "env" / "torch_extensions"))
     env["VK_ICD_FILENAMES"] = str(
         ROOT / "experiments" / "Wam_Speed_up" / "20260709_acp_eval_entrypoints" / "nvidia_icd_abs_egl.json"
     )

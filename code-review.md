@@ -1,5 +1,17 @@
 # Code Review: Realtime-VLA-FLASH Migration
 
+## 2026-07-15 Runtime Cache Override Review
+
+No blocking finding. `runtime_env` now uses `setdefault` for
+`TORCH_EXTENSIONS_DIR`, so existing launches retain the same default while a
+run can select a cuRobo cache compiled for the client Torch ABI. Server/client
+Torch isolation, CUDA visibility, model configs, verifier parameters, and
+policy decisions are untouched.
+
+Verification: shell command syntax passed; system Torch 2.3 imported both
+`kinematics_fused_cu` and `geom_cu` from the selected cache. Proceed to one
+real shadow smoke before any matched evaluation.
+
 ## Scope
 
 Clean LingBot-VA commit `7c6ffa9` plus a new one-server speculative policy,

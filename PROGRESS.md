@@ -232,3 +232,13 @@ teacher quality with materially lower teacher use.
 - No model smoke or RoboTwin evaluation has been launched. First runtime gate
   is adaptive-K shadow on the frozen Motion-on controls; live routing is not
   allowed until shadow audit confirms zero decision disagreements.
+# 2026-07-15 WCAS shadow runtime smoke
+
+- R2 failed before any episode with
+  `geom_cu.so: undefined symbol: _ZN3c1015SmallVectorBaseIjE8grow_podEPvmm`.
+- Root cause: the outer command leaked server-only `torch29_clean_pkgs` into
+  the RoboTwin client and contaminated the shared cuRobo extension cache.
+- The older `env/codex_runs/torch_extensions` cache imports successfully with
+  the working system Torch 2.3 client (`kinematics_fused_cu` and `geom_cu`).
+- The launcher now preserves an explicitly selected extension cache. Default
+  behavior is unchanged.

@@ -237,6 +237,15 @@ Threshold and periodic-refresh tuning may begin only after the implementation
 passes unit tests and a real episode smoke. Repair remains locked until this
 gate passes.
 
+## Runtime Cache Isolation
+
+The model server and RoboTwin client intentionally use different Torch
+runtimes. The launcher may provide a default cuRobo extension cache, but an
+explicit `TORCH_EXTENSIONS_DIR` must be preserved so a run can select a cache
+compiled for the client's Torch ABI. The server does not import cuRobo. This
+override changes only extension loading and must not change model or policy
+configuration.
+
 Launcher readiness is determined by a successful localhost TCP connection and
 a live server process. Log text is diagnostic only; model/server logging may be
 buffered or configured differently and cannot be the synchronization primitive.

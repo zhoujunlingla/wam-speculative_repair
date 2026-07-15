@@ -196,6 +196,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--adaptive-k-shadow", action="store_true")
     parser.add_argument("--adaptive-k-distance-threshold", type=float, default=0.05)
     parser.add_argument("--equivalence-audit", action="store_true")
+    parser.add_argument("--deterministic-audit", action="store_true")
     parser.add_argument("--gripper-full-window", type=int, default=1)
     parser.add_argument("--gripper-consensus", action="store_true")
     parser.add_argument(
@@ -209,7 +210,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="[%(asctime)s] %(levelname)s %(message)s")
     args = parse_args()
-    if args.equivalence_audit:
+    if args.deterministic_audit:
         configure_deterministic_audit()
         logging.info("equivalence audit uses deterministic math-SDPA profile")
     policy = build_policy(args)

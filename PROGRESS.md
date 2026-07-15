@@ -219,8 +219,10 @@ teacher quality with materially lower teacher use.
 - `attn_mode=torch` currently leaves CUDA SDPA backend selection unconstrained.
   Cross-process bitwise comparison is invalid until the baseline itself is
   deterministic.
-- An audit-only deterministic profile now fixes cuBLAS workspace behavior,
-  deterministic algorithms/cuDNN, disables TF32, and forces math SDPA. It is
-  excluded from live behavior and latency measurement.
-- The next gate is TN=1 off/off under that profile. No off/shadow TN=20 or live
-  run is allowed until off/off action and cache traces are exactly equal.
+- An audit-only deterministic profile fixed cuBLAS workspace behavior,
+  deterministic algorithms/cuDNN, disabled TF32, and forced math SDPA. Even
+  then, off/off diverged by cache trace 27 / action decision 15.
+- Cross-process closed-loop bitwise comparison is rejected. Formal validation
+  now uses the same-run counterfactual certificate against the canonical K=2
+  decision, with nonzero coverage and zero conflicts. Live remains blocked
+  until both frozen TN=20 manifests pass that gate.

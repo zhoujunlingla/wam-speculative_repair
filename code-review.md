@@ -551,9 +551,10 @@ therefore an experiment-validity repair, not an adaptive-K behavior change.
 
 ### Review
 
-- The profile is activated only when the existing `--equivalence-audit` flag is
-  set. Ordinary training, evaluation, future live routing, and latency runs do
-  not receive `CUBLAS_WORKSPACE_CONFIG` or math-SDPA forcing.
+- The profile is activated only by the separate `--deterministic-audit` flag.
+  `--equivalence-audit` records action/cache hashes without changing kernels.
+  Ordinary training, evaluation, future live routing, and latency runs do not
+  receive `CUBLAS_WORKSPACE_CONFIG` or math-SDPA forcing.
 - The cuBLAS environment is set by the parent runner before the server process
   imports torch. Torch deterministic algorithms, cuDNN determinism, TF32
   disablement, and SDPA backend selection are then applied before model load.
@@ -570,5 +571,8 @@ therefore an experiment-validity repair, not an adaptive-K behavior change.
   the requested live 5% speed gate.
 - A deterministic-algorithm error is fail-closed and blocks the experiment; no
   fallback to a nondeterministic backend is allowed.
-- Decision: allow remote focused tests and TN=1 off/off only. Off/shadow, TN=20,
-  live implementation, and latency claims remain blocked.
+- Math SDPA still failed off/off reproducibility, so independent closed-loop
+  comparison is not a valid shadow gate. Allow formal same-run counterfactual
+  TN=20: every candidate must exactly match the canonical K=2 decision, coverage
+  must be nonzero, and conflicts must be zero. Live and latency claims remain
+  blocked.

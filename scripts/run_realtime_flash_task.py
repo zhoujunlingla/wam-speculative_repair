@@ -200,6 +200,7 @@ def main() -> None:
     parser.add_argument("--adaptive-k-shadow", action="store_true")
     parser.add_argument("--adaptive-k-distance-threshold", type=float, default=0.05)
     parser.add_argument("--equivalence-audit", action="store_true")
+    parser.add_argument("--deterministic-audit", action="store_true")
     parser.add_argument("--paired-rng", action="store_true")
     parser.add_argument("--policy-seed", type=int)
     parser.add_argument("--scene-manifest-in", type=Path)
@@ -251,6 +252,8 @@ def main() -> None:
         server_cmd.append("--adaptive-k-shadow")
     if args.equivalence_audit:
         server_cmd.append("--equivalence-audit")
+    if args.deterministic_audit:
+        server_cmd.append("--deterministic-audit")
     client_cmd = [
         sys.executable,
         "-m", "evaluation.robotwin.eval_polict_client_openpi",
@@ -296,7 +299,7 @@ def main() -> None:
             env=runtime_env(
                 args.gpu,
                 server=True,
-                deterministic_audit=args.equivalence_audit,
+                deterministic_audit=args.deterministic_audit,
             ),
             stdout=server_log,
             stderr=subprocess.STDOUT,
@@ -349,6 +352,7 @@ def main() -> None:
         "adaptive_k_shadow": args.adaptive_k_shadow,
         "adaptive_k_distance_threshold": args.adaptive_k_distance_threshold,
         "equivalence_audit": args.equivalence_audit,
+        "deterministic_audit": args.deterministic_audit,
         "paired_rng": args.paired_rng,
         "policy_seed": args.policy_seed,
         "scene_manifest_in": (

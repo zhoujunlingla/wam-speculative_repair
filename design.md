@@ -472,7 +472,14 @@ Before repeating off/shadow, audit runs use a deterministic server profile:
 - TF32 is disabled;
 - CUDA SDPA is restricted to the math backend.
 
-This profile is scoped to `--equivalence-audit`. It is not live behavior and
-must not be used for the final latency measurement. The next gate is off/off on
-the same TN=1 manifest; off/shadow remains blocked until off/off itself is
-bitwise equivalent.
+This profile is scoped to the separate `--deterministic-audit` diagnostic flag;
+`--equivalence-audit` only records hashes. It is not live behavior and must not
+be used for the final latency measurement.
+
+Math SDPA did not make two independent off runs bitwise equal: they diverged by
+cache trace 27 / action decision 15. Cross-process closed-loop equivalence is
+therefore rejected as an invalid gate. Formal validation uses one canonical K=2
+execution with an in-process counterfactual candidate: candidate action hash,
+prefix, source, and fallback reason must exactly equal the actual K=2 decision;
+coverage must be nonzero and conflicts zero. There is only one executed action
+and one cache trajectory, so shadow cannot perturb either by construction.

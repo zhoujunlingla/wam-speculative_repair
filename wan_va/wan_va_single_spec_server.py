@@ -98,10 +98,17 @@ def build_policy(args: argparse.Namespace):
         repair_strength=args.repair_strength,
         repair_max_step_rms=args.repair_max_step_rms,
         repair_prefix_len=args.repair_prefix_len,
+        flowguard_nearmiss_shadow=args.flowguard_nearmiss_shadow,
+        flowguard_repair_threshold=args.flowguard_repair_threshold,
+        flowguard_repair_margin=args.flowguard_repair_margin,
+        flowguard_repair_tail_weight=args.flowguard_repair_tail_weight,
         rng=None if args.seed is None else np.random.default_rng(args.seed),
         repair_rng=None
         if args.seed is None
         else np.random.default_rng(args.seed + 1),
+        shadow_rng=None
+        if args.seed is None
+        else np.random.default_rng(args.seed + 2),
         log_path=args.log_path,
     )
 
@@ -150,6 +157,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--repair-strength", type=float, default=0.5)
     parser.add_argument("--repair-max-step-rms", type=float, default=0.15)
     parser.add_argument("--repair-prefix-len", type=int, default=16)
+    parser.add_argument("--flowguard-nearmiss-shadow", action="store_true")
+    parser.add_argument("--flowguard-repair-threshold", type=float, default=0.18)
+    parser.add_argument("--flowguard-repair-margin", type=float, default=0.005)
+    parser.add_argument("--flowguard-repair-tail-weight", type=float, default=0.25)
     parser.add_argument(
         "--tau-timesteps", type=float, nargs="+", default=(50.0, 100.0)
     )

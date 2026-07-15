@@ -517,6 +517,23 @@ class VA_Server:
                                                                        :conditioned_frame_count]
         candidate_stitch = stitch_action_prefix(draft, teacher_endpoint,
                                                 accepted_before_gripper)
+        cross_tau_endpoint_rms = None
+        cross_tau_direction_cosine = None
+        if batch_size >= 2:
+            endpoint_delta = (
+                reconstructed[:, :14, conditioned_frame_count:] -
+                draft_batch[:, :14, conditioned_frame_count:]
+            ).float().flatten(1)
+            cross_tau_endpoint_rms = float(
+                torch.sqrt(torch.mean((endpoint_delta[0] - endpoint_delta[1]) ** 2))
+                .item()
+            )
+            denom = torch.linalg.vector_norm(endpoint_delta[0]) * \
+                torch.linalg.vector_norm(endpoint_delta[1])
+            if float(denom.item()) > 0:
+                cross_tau_direction_cosine = float(
+                    torch.dot(endpoint_delta[0], endpoint_delta[1]).div(denom).item()
+                )
         active_switch = gripper_switch_info(
             candidate_stitch,
             max_prefix=accepted_before_gripper,
@@ -724,7 +741,12 @@ class VA_Server:
             'gripper_channels': [28, 29],
             'shared_noise': True,
             'teacher_endpoint_latent': teacher_endpoint_np,
+            'teacher_endpoint_latent_first_probe': reconstructed[
+                0:1
+            ].detach().float().cpu().numpy(),
             'teacher_endpoint': teacher_endpoint_action,
+            'cross_tau_endpoint_rms': cross_tau_endpoint_rms,
+            'cross_tau_direction_cosine': cross_tau_direction_cosine,
             'stitched_action_latent': stitched_action_latent_np,
             'stitched_action': stitched_action,
             'gripper_switch': bool(active_switch['has_switch']),

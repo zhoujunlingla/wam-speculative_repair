@@ -42,6 +42,52 @@ the candidate remains phase-safe, and accepted shadow candidates correlate
 with episode recovery. The dedicated RNG is required so enabling shadow mode
 does not alter the primary verifier noise stream or baseline actions.
 
+## FlowGuard Near-Miss Shadow Audit
+
+This branch starts from the frozen Motion-on policy and adds no executable
+repair. Its only question is whether a one-probe teacher endpoint residual can
+identify a narrow class of locally repairable drafts before spending a full
+Teacher rollout.
+
+The primary K=2 verifier remains unchanged. Its first probe is classified as:
+
+- `pass`: the quantized prefix is already executable;
+- `near_miss`: the first failing continuous-action distance lies strictly
+  between the existing accept threshold and a configured repair ceiling;
+- `ambiguous`: the residual is below the repair ceiling but is not a safe
+  near-miss because of phase, gripper, prefix, or endpoint-consensus evidence;
+- `clear_fail`: the first failing residual is at or above the repair ceiling.
+
+Only a continuous `near_miss` may construct a shadow candidate. The candidate
+reuses the existing endpoint-repair helper but applies a decaying temporal mask
+beginning at the first failed action and ending no later than the next
+16-action frame boundary. It freezes gripper channels, accepted history, and
+the untouched suffix. The repair strength is the smallest clipped fraction
+predicted to move the primary residual just inside the acceptance margin; it
+remains bounded by the existing per-step RMS trust region.
+
+Probe A constructs the candidate. Probe B uses a dedicated Gaussian RNG and
+verifies both the original and repaired chunks under identical B noise. The
+shadow is counted as a rescue only when the repaired prefix is at least 16 and
+strictly exceeds the original B prefix. Baseline Motion-on behavior is executed
+regardless of the shadow result.
+
+Required telemetry:
+
+- FlowGuard class and first failing action index;
+- first-probe residual, repair ceiling, dynamic strength, and correction norm;
+- original and repaired Probe-B prefixes and per-tau prefixes;
+- cross-tau endpoint consistency and repair direction agreement when present;
+- extra action-only forwards and estimated full-Teacher rollouts that would be
+  avoided.
+
+Promotion is blocked unless the independent Probe-B rescue rate is at least
+20% of eligible near misses, repaired candidates do not worsen the original
+Probe-B prefix, and matched task success is later shown not to regress. This
+shadow audit is compared separately with WCAS V0: WCAS may reduce verifier NFE
+without changing actions, while FlowGuard repair may reduce full-Teacher
+rollouts only if this stronger gate passes.
+
 ## Motion-Baseline Repair Experiment
 
 The frozen quality reference is the completed hard-motion low10 x 20 run:

@@ -133,6 +133,22 @@ def source_summary(
         "episode_outcome_count": 0,
         "episode_alignment_valid": episode_outcomes is None,
     }
+    flowguard = {
+        "enabled_rounds": 0,
+        "classes": {},
+        "eligible": 0,
+        "rescued": 0,
+        "rescue_rate": None,
+        "prefix_improved": 0,
+        "prefix_unchanged": 0,
+        "prefix_worsened": 0,
+        "original_holdout_prefix_sum": 0,
+        "repaired_holdout_prefix_sum": 0,
+        "action_only_forwards": 0,
+        "projected_full_teacher_rollouts_avoided": 0,
+        "k1_continuous_would_accept": 0,
+        "k1_false_accept": 0,
+    }
     episodes = []
     current_episode = None
     action_model_elapsed_sec = 0.0
@@ -167,6 +183,40 @@ def source_summary(
             )
             repair["action_only_forwards"] += int(
                 row.get("repair_action_only_forwards", 0) or 0
+            )
+            if row.get("flowguard_shadow_enabled", False):
+                flowguard["enabled_rounds"] += 1
+                flowguard_class = str(row.get("flowguard_class", "missing"))
+                flowguard["classes"][flowguard_class] = (
+                    flowguard["classes"].get(flowguard_class, 0) + 1
+                )
+                flowguard["k1_continuous_would_accept"] += int(
+                    bool(row.get("flowguard_k1_continuous_would_accept", False))
+                )
+                flowguard["k1_false_accept"] += int(
+                    bool(row.get("flowguard_k1_false_accept", False))
+                )
+            if row.get("flowguard_shadow_eligible", False):
+                flowguard["eligible"] += 1
+                original_prefix = int(
+                    row.get("flowguard_original_holdout_prefix", 0) or 0
+                )
+                repaired_prefix = int(
+                    row.get("flowguard_repaired_holdout_prefix", 0) or 0
+                )
+                flowguard["original_holdout_prefix_sum"] += original_prefix
+                flowguard["repaired_holdout_prefix_sum"] += repaired_prefix
+                if repaired_prefix > original_prefix:
+                    flowguard["prefix_improved"] += 1
+                elif repaired_prefix < original_prefix:
+                    flowguard["prefix_worsened"] += 1
+                else:
+                    flowguard["prefix_unchanged"] += 1
+            flowguard["rescued"] += int(
+                bool(row.get("flowguard_shadow_rescue", False))
+            )
+            flowguard["action_only_forwards"] += int(
+                row.get("flowguard_shadow_action_only_forwards", 0) or 0
             )
             if row.get("repair_kind"):
                 kind = str(row["repair_kind"])
@@ -208,6 +258,10 @@ def source_summary(
             repair["episode_success_rate"] = (
                 repair["episodes_success"] / repair["episodes_executed"]
             )
+    if flowguard["eligible"]:
+        flowguard["rescue_rate"] = flowguard["rescued"] / flowguard["eligible"]
+    # ponytail: this is a shadow counterfactual upper bound, not a measured save.
+    flowguard["projected_full_teacher_rollouts_avoided"] = flowguard["rescued"]
     stats = {}
     for source, values in latencies.items():
         values.sort()
@@ -237,6 +291,7 @@ def source_summary(
             ),
         },
         "repair": repair,
+        "flowguard_shadow": flowguard,
     }
 
 
@@ -275,6 +330,10 @@ def main() -> None:
     parser.add_argument("--repair-strength", type=float, default=0.5)
     parser.add_argument("--repair-max-step-rms", type=float, default=0.15)
     parser.add_argument("--repair-prefix-len", type=int, default=16)
+    parser.add_argument("--flowguard-nearmiss-shadow", action="store_true")
+    parser.add_argument("--flowguard-repair-threshold", type=float, default=0.18)
+    parser.add_argument("--flowguard-repair-margin", type=float, default=0.005)
+    parser.add_argument("--flowguard-repair-tail-weight", type=float, default=0.25)
     parser.add_argument(
         "--teacher-gripper-fallback",
         action=argparse.BooleanOptionalAction,
@@ -325,12 +384,17 @@ def main() -> None:
     ])
     if args.repair_shadow:
         server_cmd.append("--repair-shadow")
+    if args.flowguard_nearmiss_shadow:
+        server_cmd.append("--flowguard-nearmiss-shadow")
     server_cmd.extend([
         "--repair-strength", str(args.repair_strength),
         "--repair-max-step-rms", str(args.repair_max_step_rms),
         "--repair-prefix-len", str(args.repair_prefix_len),
         "--flow-repair-max-axis-delta", str(args.flow_repair_max_axis_delta),
         "--flow-repair-tau", str(args.flow_repair_tau),
+        "--flowguard-repair-threshold", str(args.flowguard_repair_threshold),
+        "--flowguard-repair-margin", str(args.flowguard_repair_margin),
+        "--flowguard-repair-tail-weight", str(args.flowguard_repair_tail_weight),
     ])
     if not args.teacher_gripper_fallback:
         server_cmd.append("--no-teacher-gripper-fallback")
@@ -433,6 +497,10 @@ def main() -> None:
         "repair_strength": args.repair_strength,
         "repair_max_step_rms": args.repair_max_step_rms,
         "repair_prefix_len": args.repair_prefix_len,
+        "flowguard_nearmiss_shadow": args.flowguard_nearmiss_shadow,
+        "flowguard_repair_threshold": args.flowguard_repair_threshold,
+        "flowguard_repair_margin": args.flowguard_repair_margin,
+        "flowguard_repair_tail_weight": args.flowguard_repair_tail_weight,
         "teacher_gripper_fallback": args.teacher_gripper_fallback,
         "started_at": started,
         "ended_at": datetime.now().isoformat(timespec="seconds"),

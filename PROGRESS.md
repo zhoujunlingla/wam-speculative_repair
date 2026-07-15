@@ -202,3 +202,36 @@ teacher quality with materially lower teacher use.
   `git diff --check` passed. A real-model smoke is pending a usable A800 slot;
   the remaining free-looking cards are currently occupied by the older
   endpoint-repair queue or unrelated jobs.
+
+## 2026-07-15 - FlowGuard Repair Feasibility Gate
+
+- The frozen Motion-on reference remains `146/200 = 73.0%`, with
+  `728/3366 = 21.63%` full-Teacher action rounds.
+- Earlier repair variants are negative evidence, not baselines to promote.
+  Flow/RK2 repair reached `136/200 = 68.0%` at `17.74%` Teacher actions;
+  sync-paired FCR reached `123/200 = 61.5%` at `18.02%`. Lower full-Teacher
+  use did not compensate for 10 and 23 lost successful episodes.
+- The main diagnosed failure was circular verification: construction and
+  acceptance could reuse the same probe, while a Teacher endpoint residual
+  measures local flow agreement rather than contact/task correctness. A later
+  sync-on-repair variant also paid large cache replay cost without rescuing a
+  successful episode.
+- FlowGuard near-miss repair is therefore implemented only as a counterfactual
+  shadow. K1 classifies pass/near-miss/ambiguous/clear-fail using its own
+  continuous and gripper-phase evidence. Only bounded continuous near misses
+  create a decaying-window endpoint candidate.
+- Probe A constructs the candidate. An independent Probe B verifies original
+  and repaired candidates under identical B noise. A rescue requires the
+  repaired prefix to reach at least 16 and strictly exceed the original B
+  prefix. The real Motion-on action and cache path remain unchanged.
+- The audit also records K1 continuous false accepts against full K2 and
+  separates improved/equal/worsened B prefixes. Projected avoided Teacher
+  rollouts are explicitly an upper bound, not measured savings.
+- A800 focused tests passed `65/65`. Executable repair is blocked until
+  paired-B rescue is at least 20%, prefix worsening is zero, and projected
+  model-time savings remain positive after four extra paired-B forwards per
+  eligible near miss.
+- WCAS V0 answers a different question: it can skip K2 after a strong K1
+  certificate and reduce verifier NFE without changing actions. It cannot
+  reduce `R_full` or `R_anyT`. FlowGuard can only reduce `R_full` after its
+  shadow gate and a later matched closed-loop test both pass.

@@ -153,7 +153,9 @@ def build_policy(args: argparse.Namespace):
         delayed_error_teacher_rounds=args.delayed_error_teacher_rounds,
         video_motion_gate_threshold=args.video_motion_gate_threshold,
         adaptive_k_shadow=args.adaptive_k_shadow,
+        adaptive_k_live=args.adaptive_k_live,
         adaptive_k_distance_threshold=args.adaptive_k_distance_threshold,
+        profile_verify_latency=args.profile_verify_latency,
         equivalence_audit=args.equivalence_audit,
         gripper_full_window=args.gripper_full_window,
         gripper_consensus=args.gripper_consensus,
@@ -194,7 +196,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--delayed-error-teacher-rounds", type=int, default=2)
     parser.add_argument("--video-motion-gate-threshold", type=float, default=0.0)
     parser.add_argument("--adaptive-k-shadow", action="store_true")
+    parser.add_argument("--adaptive-k-live", action="store_true")
     parser.add_argument("--adaptive-k-distance-threshold", type=float, default=0.05)
+    parser.add_argument("--profile-verify-latency", action="store_true")
     parser.add_argument("--equivalence-audit", action="store_true")
     parser.add_argument("--deterministic-audit", action="store_true")
     parser.add_argument("--gripper-full-window", type=int, default=1)

@@ -111,6 +111,21 @@ def source_summary(path: Path) -> dict:
         "potential_saved_forwards": 0,
         "by_kind": {},
     }
+    adaptive_live = {
+        "calls": 0,
+        "k1_accepts": 0,
+        "effective_forwards": 0,
+        "requested_forwards": 0,
+        "verify_total_sec": [],
+        "probe_sec": [],
+    }
+    verify_profile = {
+        "calls": 0,
+        "effective_forwards": 0,
+        "requested_forwards": 0,
+        "verify_total_sec": [],
+        "probe_sec": [],
+    }
     if path.exists():
         for line in path.read_text(errors="replace").splitlines():
             try:
@@ -140,6 +155,40 @@ def source_summary(path: Path) -> dict:
                         adaptive["conflicts"] += int(not bool(match))
                         bucket["matches"] += int(bool(match))
                         bucket["conflicts"] += int(not bool(match))
+                if row.get("adaptive_k_live"):
+                    adaptive_live["calls"] += 1
+                    adaptive_live["k1_accepts"] += int(
+                        bool(row.get("adaptive_k_live_accepted"))
+                    )
+                    adaptive_live["effective_forwards"] += int(
+                        row.get("effective_verify_k", 0)
+                    )
+                    adaptive_live["requested_forwards"] += int(
+                        row.get("requested_verify_k", 0)
+                    )
+                    if row.get("verify_total_latency_sec") is not None:
+                        adaptive_live["verify_total_sec"].append(
+                            float(row["verify_total_latency_sec"])
+                        )
+                    adaptive_live["probe_sec"].extend(
+                        float(value)
+                        for value in (row.get("verify_probe_latency_sec") or [])
+                    )
+                if row.get("verify_total_latency_sec") is not None:
+                    verify_profile["calls"] += 1
+                    verify_profile["effective_forwards"] += int(
+                        row.get("effective_verify_k", 0)
+                    )
+                    verify_profile["requested_forwards"] += int(
+                        row.get("requested_verify_k", 0)
+                    )
+                    verify_profile["verify_total_sec"].append(
+                        float(row["verify_total_latency_sec"])
+                    )
+                    verify_profile["probe_sec"].extend(
+                        float(value)
+                        for value in (row.get("verify_probe_latency_sec") or [])
+                    )
     stats = {}
     for source, values in latencies.items():
         values.sort()
@@ -149,11 +198,37 @@ def source_summary(path: Path) -> dict:
             "p90_sec": values[round((len(values) - 1) * 0.9)],
         }
     action_total = counts.get("teacher_full", 0) + counts.get("draft_flash", 0)
+    for key in ("verify_total_sec", "probe_sec"):
+        values = sorted(adaptive_live.pop(key))
+        adaptive_live[f"{key}_p50"] = (
+            values[(len(values) - 1) // 2] if values else None
+        )
+        adaptive_live[f"{key}_p90"] = (
+            values[round((len(values) - 1) * 0.9)] if values else None
+        )
+    adaptive_live["effective_k_mean"] = (
+        adaptive_live["effective_forwards"] / adaptive_live["calls"]
+        if adaptive_live["calls"] else None
+    )
+    for key in ("verify_total_sec", "probe_sec"):
+        values = sorted(verify_profile.pop(key))
+        verify_profile[f"{key}_p50"] = (
+            values[(len(values) - 1) // 2] if values else None
+        )
+        verify_profile[f"{key}_p90"] = (
+            values[round((len(values) - 1) * 0.9)] if values else None
+        )
+    verify_profile["effective_k_mean"] = (
+        verify_profile["effective_forwards"] / verify_profile["calls"]
+        if verify_profile["calls"] else None
+    )
     return {
         "counts": counts,
         "latency": stats,
         "teacher_action_rate": counts.get("teacher_full", 0) / action_total if action_total else None,
         "adaptive_k": adaptive,
+        "adaptive_k_live": adaptive_live,
+        "verify_profile": verify_profile,
     }
 
 
@@ -198,7 +273,9 @@ def main() -> None:
     )
     parser.add_argument("--server-timeout", type=int, default=600)
     parser.add_argument("--adaptive-k-shadow", action="store_true")
+    parser.add_argument("--adaptive-k-live", action="store_true")
     parser.add_argument("--adaptive-k-distance-threshold", type=float, default=0.05)
+    parser.add_argument("--profile-verify-latency", action="store_true")
     parser.add_argument("--equivalence-audit", action="store_true")
     parser.add_argument("--deterministic-audit", action="store_true")
     parser.add_argument("--paired-rng", action="store_true")
@@ -250,6 +327,10 @@ def main() -> None:
         server_cmd.append("--no-teacher-gripper-fallback")
     if args.adaptive_k_shadow:
         server_cmd.append("--adaptive-k-shadow")
+    if args.adaptive_k_live:
+        server_cmd.append("--adaptive-k-live")
+    if args.profile_verify_latency:
+        server_cmd.append("--profile-verify-latency")
     if args.equivalence_audit:
         server_cmd.append("--equivalence-audit")
     if args.deterministic_audit:
@@ -350,7 +431,9 @@ def main() -> None:
         "gripper_consensus": args.gripper_consensus,
         "teacher_gripper_fallback": args.teacher_gripper_fallback,
         "adaptive_k_shadow": args.adaptive_k_shadow,
+        "adaptive_k_live": args.adaptive_k_live,
         "adaptive_k_distance_threshold": args.adaptive_k_distance_threshold,
+        "profile_verify_latency": args.profile_verify_latency,
         "equivalence_audit": args.equivalence_audit,
         "deterministic_audit": args.deterministic_audit,
         "paired_rng": args.paired_rng,

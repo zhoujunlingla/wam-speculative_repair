@@ -5,6 +5,9 @@ import torch
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "wan_va"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from adaptive_verify import k1_full_accept_certificate  # noqa: E402
 
 from specverify import (  # noqa: E402
     gripper_consensus_prefix,
@@ -15,6 +18,31 @@ from specverify import (  # noqa: E402
     normalized_l2_distances,
     quantize_prefix_to_frame_boundary,
 )
+
+
+def test_k1_certificate_requires_full_low_error_phase_stable_chunk():
+    base = dict(
+        distance_max=0.04,
+        continuous_prefix=32,
+        horizon=32,
+        phase_agreement=1.0,
+        reconstructed_switch=False,
+        draft_switch=False,
+        decoded_draft_switch=False,
+        verify_threshold=0.15,
+        certificate_threshold=0.05,
+    )
+    assert k1_full_accept_certificate(**base)
+    for change in (
+        {"distance_max": 0.051},
+        {"continuous_prefix": 16},
+        {"phase_agreement": 0.99},
+        {"reconstructed_switch": True},
+        {"draft_switch": True},
+        {"decoded_draft_switch": True},
+        {"distance_max": float("nan")},
+    ):
+        assert not k1_full_accept_certificate(**{**base, **change})
 
 
 def test_gripper_consensus_accepts_shared_transition_and_bounds_disagreement():

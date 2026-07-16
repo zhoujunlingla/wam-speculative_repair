@@ -226,3 +226,24 @@ teacher quality with materially lower teacher use.
   now uses the same-run counterfactual certificate against the canonical K=2
   decision, with nonzero coverage and zero conflicts. Live remains blocked
   until both frozen TN=20 manifests pass that gate.
+
+## 2026-07-16: Live progressive-K implementation gate
+
+- The two frozen TN=20 shadow manifests produced 554 conservative K1
+  certificates over 1,119 verifier calls (49.5% coverage), all matching the
+  completed K2 policy decision with zero certificate conflicts. The implied
+  verifier-forward reduction is 24.8%.
+- Implemented an opt-in real `K=1 -> gray-zone K=2` path. It stops after tau50
+  only for a full 32-action prefix with maximum normalized distance at most
+  0.05, exact phase agreement, and no latent, draft, or decoded gripper switch.
+  All other calls reuse the same draft/noise/cache and continue to tau100.
+- Live mode is incompatible with the K2 flow-error budget and fails at config
+  validation instead of silently changing its semantics.
+- Review fixed effective-K postprocessing, request injection, and timing bias.
+  Remote tests passed in the same Torch 2.9 path used by the server; the focused
+  server-method test passed both K1 and K2 routes.
+- An earlier test collection failure was caused by using host Torch, which
+  lacks the serving runtime's composable FSDP API. Future server tests must use
+  `env/torch29_clean_pkgs`, matching `runtime_env()`.
+- Next evidence is a GPU6/7 TN=1 paired speed smoke. This is speed telemetry,
+  not a success-rate claim.

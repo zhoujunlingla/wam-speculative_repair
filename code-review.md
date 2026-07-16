@@ -167,6 +167,59 @@ Decision: allowed to proceed to one RoboTwin smoke. Formal evaluation requires
 nonzero budget telemetry, correct reset after a budget-triggered full round,
 and no cache/reset/render error.
 
+## Live Progressive-K Speed Gate Review
+
+### Scope
+
+- Run tau 50 first and stop at K=1 only for a conservative full-chunk
+  certificate.
+- Reuse the same draft, Gaussian probe, frame id, and read-only teacher cache
+  when an uncertified sample escalates to tau 100.
+- Add opt-in CUDA-event profiling and effective-K telemetry. Defaults preserve
+  the frozen Motion-on policy.
+
+### Findings
+
+No blocking code finding remains before a real smoke.
+
+Fixed during review:
+
+1. K=1 early exit originally left two postprocessing loops sized by requested
+   K=2. They now use `effective_k`, preventing empty-row gripper/phase access.
+2. Request dictionaries could carry caller-provided adaptive fields into an
+   off run. The policy now removes all such fields and adds only configured
+   values.
+3. A K=1 distance cannot update the existing K=2 flow-error budget faithfully.
+   Live adaptive K now fails closed when either flow-budget option is enabled.
+4. Per-probe host synchronization biased K=2 timing. Profiling now records CUDA
+   events and performs one synchronization after finalization.
+5. The first unit-test command used the host Torch instead of the serving
+   runtime and failed on `fully_shard`. Re-running with
+   `env/torch29_clean_pkgs`, exactly as the launcher does, passed.
+
+Residual experiment risk is medium. The K=1 certificate is an empirical
+counterfactual validated on frozen traces, not a proof that tau 100 can never
+change the outcome. The live path is therefore allowed only as a speed smoke;
+it is not promoted to a quality benchmark until effective-K, cache safety, and
+latency gates pass.
+
+### Verification
+
+- `git diff --check`: passed.
+- `py_compile` for policy, launcher, both servers, shared certificate helper,
+  and server test: passed.
+- Remote policy/specverify/progressive-server test command: exit code 0 in the
+  serving Torch 2.9 runtime.
+- Focused real server-method test: `2 passed`, covering certified K=1 and
+  decoded-gripper escalation to K=2.
+
+### Decision
+
+Allowed to run a TN=1 paired speed smoke on free GPU6/7. Promotion requires a
+nonzero K=1 hit rate, no cache/reset/runtime error, at least 15% lower verifier
+latency, and at least 5% lower model-path latency. Otherwise live adaptive K is
+rejected without changing the Motion-on baseline.
+
 ## Previous-Gripper State Parity Fix Review
 
 The audit found a blocking migration gap: the reference Realtime-VLA-FLASH

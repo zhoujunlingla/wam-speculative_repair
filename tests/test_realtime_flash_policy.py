@@ -195,6 +195,59 @@ def test_adaptive_k_shadow_is_host_only_and_does_not_change_verify_request():
     assert "adaptive_k_distance_threshold" not in verify_call["request"]
 
 
+def test_adaptive_k_live_requests_progressive_teacher_verification():
+    policy, _, teacher, _ = _anchored_policy(pf_interval=20)
+    policy.adaptive_k_live = True
+    policy.adaptive_k_distance_threshold = 0.05
+    policy.profile_verify_latency = True
+
+    request = _action_request()
+    request.update(
+        adaptive_k_live=False,
+        adaptive_k_distance_threshold=999.0,
+        decoded_draft_gripper_switch=True,
+        profile_verify_latency=False,
+    )
+    response = policy.infer(request)
+    verify_call = next(call for call in teacher.calls if call["kind"] == "verify")
+
+    assert response["accepted_prefix"] == 32
+    assert verify_call["request"]["adaptive_k_live"] is True
+    assert verify_call["request"]["adaptive_k_distance_threshold"] == 0.05
+    assert verify_call["request"]["decoded_draft_gripper_switch"] is False
+    assert verify_call["request"]["profile_verify_latency"] is True
+
+
+def test_adaptive_k_shadow_and_live_are_mutually_exclusive():
+    events = []
+    try:
+        RealtimeFlashPolicy(
+            _FakeModel("draft", events),
+            _FakeModel("teacher", events),
+            adaptive_k_shadow=True,
+            adaptive_k_live=True,
+        )
+    except ValueError as error:
+        assert "mutually exclusive" in str(error)
+    else:
+        raise AssertionError("shadow and live must not run together")
+
+
+def test_adaptive_k_live_rejects_flow_budget_dependency():
+    events = []
+    try:
+        RealtimeFlashPolicy(
+            _FakeModel("draft", events),
+            _FakeModel("teacher", events),
+            adaptive_k_live=True,
+            flow_budget_threshold=0.1,
+        )
+    except ValueError as error:
+        assert "flow budget" in str(error)
+    else:
+        raise AssertionError("K1 distances cannot update a K2 flow budget")
+
+
 def test_adaptive_k_pass_candidate_predicts_full_draft_decision():
     action = _action(value=0.25)
     telemetry, predicted = adaptive_k_pass_candidate(

@@ -483,3 +483,32 @@ execution with an in-process counterfactual candidate: candidate action hash,
 prefix, source, and fallback reason must exactly equal the actual K=2 decision;
 coverage must be nonzero and conflicts zero. There is only one executed action
 and one cache trajectory, so shadow cannot perturb either by construction.
+
+## Live Progressive-K Speed Gate
+
+The counterfactual shadow completed on the fixed `hanging_mug` and
+`open_microwave` TN=20 manifests. The conservative tau-50 certificate covered
+`554/1119` verifier calls and matched the completed K=2 policy decision in all
+554 cases. Live progressive verification may therefore be tested strictly as
+a compute optimization; it does not change the endpoint threshold or repair
+an action.
+
+For each normal Motion-on draft round, sample the same single Gaussian probe
+as before and evaluate tau 50 first. Stop after K=1 only when the first probe
+has a full 32-action continuous prefix, its maximum distance is at most `0.05`,
+its reconstructed gripper phase exactly matches the draft, and neither the
+draft nor reconstruction crosses a gripper phase boundary. Otherwise continue
+the existing serial loop with tau 100 and run the unchanged K=2 prefix and
+gripper-consensus finalization. The second probe reuses the same noise, draft
+latent, frame id, prompt/cache state, and first-probe tensors. Tau 50 is never
+recomputed.
+
+The decision remains inside one teacher request. Verification stays
+`update_cache=0`; no policy/client cache state may change. Telemetry records
+configured K, effective K, probe-one, probe-two, finalization, and total
+verifier latency. Shadow and live modes are mutually exclusive.
+
+The speed-only gate is zero cache/frame mutation, effective K below 2, at least
+15% lower verifier latency, and at least 5% lower total model-path latency. If
+the model-path gain is below 5%, progressive K is rejected before any
+adaptive-delta or repair experiment.

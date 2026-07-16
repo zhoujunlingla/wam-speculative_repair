@@ -1,5 +1,6 @@
 # Copyright 2024-2025 The Robbyant Team Authors. All rights reserved.
 import argparse
+import math
 import os
 import sys
 import time
@@ -16,6 +17,9 @@ from einops import rearrange
 from tqdm import tqdm
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from adaptive_verify import k1_full_accept_certificate
 
 from configs import VA_CONFIGS
 from distributed.fsdp import shard_model
@@ -425,7 +429,11 @@ class VA_Server:
                             verify_seed=None,
                             previous_gripper=None,
                             gripper_threshold=0.0,
-                            gripper_consensus=False):
+                            gripper_consensus=False,
+                            adaptive_k_live=False,
+                            adaptive_k_distance_threshold=0.05,
+                            decoded_draft_gripper_switch=False,
+                            profile_verify_latency=False):
         """Verify one normalized draft and return its teacher-tail stitch."""
 
         if draft_actions.ndim != 5 or draft_actions.shape[0] != 1 or \
@@ -435,6 +443,11 @@ class VA_Server:
         if draft_actions.shape[1] <= 29:
             raise ValueError(
                 'dual-arm verification requires latent gripper channels 28/29')
+        if (
+            draft_actions.shape[2] != self.job_config.frame_chunk_size
+            or draft_actions.shape[3] != self.action_per_frame
+        ):
+            raise ValueError('draft action shape must match the configured horizon')
 
         tau_timesteps = torch.as_tensor(tau_timesteps,
                                         dtype=torch.float32,
@@ -443,6 +456,18 @@ class VA_Server:
             raise ValueError('tau_timesteps must be non-empty')
         if gripper_consensus and tau_timesteps.numel() < 2:
             raise ValueError('gripper consensus requires at least two tau probes')
+        requested_k = int(tau_timesteps.numel())
+        if adaptive_k_live and requested_k != 2:
+            raise ValueError('live adaptive K requires exactly two tau probes')
+        if not math.isfinite(float(adaptive_k_distance_threshold)) or \
+                adaptive_k_distance_threshold < 0:
+            raise ValueError('adaptive K distance threshold must be non-negative')
+        verify_start_event = None
+        verify_end_event = None
+        if profile_verify_latency:
+            verify_start_event = torch.cuda.Event(enable_timing=True)
+            verify_end_event = torch.cuda.Event(enable_timing=True)
+            verify_start_event.record()
         draft = draft_actions.to(device=self.device, dtype=self.dtype).clone()
         draft[:, ~self.action_mask] = 0
         batch_size = tau_timesteps.numel()
@@ -471,25 +496,127 @@ class VA_Server:
         )
         # ponytail: microbatch K probes through the read-only cache path. A
         # parallel temporary KV copy grows with episode length on A800.
-        velocity = torch.cat([
-            self.forward_action_only_verify(
-                z_tau[index:index + 1],
-                tau_timesteps[index:index + 1],
-                frame_st_id=frame_st_id,
-                cache_name=cache_name,
-            ) for index in range(batch_size)
-        ], dim=0)
-        reconstructed = scheduler_step_to_final_batched(
-            scheduler=self.verify_scheduler,
-            model_output=velocity,
-            timesteps=tau_timesteps,
-            sample=z_tau,
-        )
+        probe_latencies = []
+        adaptive_k_live_accepted = False
+        if not adaptive_k_live:
+            velocity_rows = []
+            probe_events = []
+            for index in range(batch_size):
+                if profile_verify_latency:
+                    probe_start = torch.cuda.Event(enable_timing=True)
+                    probe_end = torch.cuda.Event(enable_timing=True)
+                    probe_start.record()
+                velocity_rows.append(self.forward_action_only_verify(
+                    z_tau[index:index + 1],
+                    tau_timesteps[index:index + 1],
+                    frame_st_id=frame_st_id,
+                    cache_name=cache_name,
+                ))
+                if profile_verify_latency:
+                    probe_end.record()
+                    probe_events.append((probe_start, probe_end))
+            reconstructed = scheduler_step_to_final_batched(
+                scheduler=self.verify_scheduler,
+                model_output=torch.cat(velocity_rows, dim=0),
+                timesteps=tau_timesteps,
+                sample=z_tau,
+            )
+            effective_k = requested_k
+        else:
+            reconstructed_rows = []
+            probe_events = []
+            for index in range(batch_size):
+                if profile_verify_latency:
+                    probe_start = torch.cuda.Event(enable_timing=True)
+                    probe_end = torch.cuda.Event(enable_timing=True)
+                    probe_start.record()
+                velocity_row = self.forward_action_only_verify(
+                    z_tau[index:index + 1],
+                    tau_timesteps[index:index + 1],
+                    frame_st_id=frame_st_id,
+                    cache_name=cache_name,
+                )
+                reconstructed_row = scheduler_step_to_final_batched(
+                    scheduler=self.verify_scheduler,
+                    model_output=velocity_row,
+                    timesteps=tau_timesteps[index:index + 1],
+                    sample=z_tau[index:index + 1],
+                )
+                reconstructed_row[:, ~self.action_mask] = 0
+                if conditioned_frame_count:
+                    reconstructed_row[:, :, :conditioned_frame_count] = \
+                        draft_batch[index:index + 1, :, :conditioned_frame_count]
+                if profile_verify_latency:
+                    probe_end.record()
+                    probe_events.append((probe_start, probe_end))
+                reconstructed_rows.append(reconstructed_row)
+                if index != 0:
+                    continue
+
+                first_distances = normalized_l2_distances(
+                    reconstructed_row, draft_batch[:1]
+                )
+                first_valid_distances = first_distances[
+                    :, conditioned_frame_count:, :
+                ]
+                first_raw_valid_prefix, _, _ = longest_prefix_min_over_k(
+                    first_valid_distances, threshold
+                )
+                first_raw_prefix = conditioned_frame_count * \
+                    self.action_per_frame + first_raw_valid_prefix
+                first_prefix = quantize_prefix_to_frame_boundary(
+                    first_raw_prefix,
+                    action_per_frame=self.action_per_frame,
+                    frame_chunk_size=self.job_config.frame_chunk_size,
+                )
+                first_reconstructed_switch = gripper_switch_info(
+                    reconstructed_row,
+                    previous=previous_gripper,
+                    threshold=gripper_threshold,
+                )
+                first_draft_switch = gripper_switch_info(
+                    draft,
+                    previous=previous_gripper,
+                    threshold=gripper_threshold,
+                )
+                gripper_channels = (28, 29)
+                first_phase_agreement = (
+                    reconstructed_row[
+                        :, gripper_channels, conditioned_frame_count:
+                    ] >= gripper_threshold
+                ).eq(
+                    draft_batch[
+                        :1, gripper_channels, conditioned_frame_count:
+                    ] >= gripper_threshold
+                ).float().mean().item()
+                adaptive_k_live_accepted = k1_full_accept_certificate(
+                    distance_max=float(first_distances.max().item()),
+                    continuous_prefix=first_prefix,
+                    horizon=self.action_per_frame * self.job_config.frame_chunk_size,
+                    phase_agreement=first_phase_agreement,
+                    reconstructed_switch=bool(
+                        first_reconstructed_switch['has_switch']
+                    ),
+                    draft_switch=bool(first_draft_switch['has_switch']),
+                    decoded_draft_switch=bool(decoded_draft_gripper_switch),
+                    verify_threshold=threshold,
+                    certificate_threshold=adaptive_k_distance_threshold,
+                )
+                if adaptive_k_live_accepted:
+                    break
+            effective_k = len(reconstructed_rows)
+            reconstructed = torch.cat(reconstructed_rows, dim=0)
+        tau_timesteps = tau_timesteps[:effective_k]
+        draft_batch = draft_batch[:effective_k]
         reconstructed[:, ~self.action_mask] = 0
         if conditioned_frame_count:
             reconstructed[:, :, :conditioned_frame_count] = draft_batch[:, :,
                                                                           :conditioned_frame_count]
 
+        finalize_start_event = None
+        if profile_verify_latency:
+            finalize_start_event = torch.cuda.Event(enable_timing=True)
+            finalize_start_event.record()
         distances = normalized_l2_distances(reconstructed, draft_batch)
         valid_distances = distances[:, conditioned_frame_count:, :]
         raw_valid_prefix, prefix_by_tau, pass_by_step = \
@@ -529,7 +656,7 @@ class VA_Server:
                 previous=previous_gripper,
                 threshold=gripper_threshold,
             )
-            for row in range(batch_size)
+            for row in range(effective_k)
         ]
         any_reconstructed_switch = any(
             switch['has_switch'] for switch in reconstructed_switches)
@@ -547,22 +674,28 @@ class VA_Server:
         ] >= gripper_threshold
         gripper_phase_agreement_by_tau = (
             reconstructed_gripper_phase == draft_gripper_phase
-        ).float().reshape(batch_size, -1).mean(dim=1)
+        ).float().reshape(effective_k, -1).mean(dim=1)
         consensus_prefix = accepted_before_gripper
         consensus_failure_index = None
         if gripper_consensus:
-            consensus_raw_prefix, consensus_failure_index = \
-                gripper_consensus_prefix(
-                    reconstructed,
-                    draft,
-                    max_prefix=accepted_before_gripper,
-                    threshold=gripper_threshold,
+            if effective_k == 1:
+                if not adaptive_k_live_accepted:
+                    raise RuntimeError(
+                        'K=1 gripper consensus requires a live pass certificate'
+                    )
+            else:
+                consensus_raw_prefix, consensus_failure_index = \
+                    gripper_consensus_prefix(
+                        reconstructed,
+                        draft,
+                        max_prefix=accepted_before_gripper,
+                        threshold=gripper_threshold,
+                    )
+                consensus_prefix = quantize_prefix_to_frame_boundary(
+                    consensus_raw_prefix,
+                    action_per_frame=self.action_per_frame,
+                    frame_chunk_size=self.job_config.frame_chunk_size,
                 )
-            consensus_prefix = quantize_prefix_to_frame_boundary(
-                consensus_raw_prefix,
-                action_per_frame=self.action_per_frame,
-                frame_chunk_size=self.job_config.frame_chunk_size,
-            )
             accepted_prefix = min(accepted_before_gripper, consensus_prefix)
             stitched_action_latent = stitch_action_prefix(
                 draft, teacher_endpoint, accepted_prefix)
@@ -570,6 +703,21 @@ class VA_Server:
             accepted_prefix = 0
             stitched_action_latent = teacher_endpoint
 
+        verify_finalize_latency_sec = None
+        verify_total_latency_sec = None
+        if profile_verify_latency:
+            verify_end_event.record()
+            verify_end_event.synchronize()
+            probe_latencies = [
+                start.elapsed_time(end) / 1000.0
+                for start, end in probe_events
+            ]
+            verify_finalize_latency_sec = (
+                finalize_start_event.elapsed_time(verify_end_event) / 1000.0
+            )
+            verify_total_latency_sec = (
+                verify_start_event.elapsed_time(verify_end_event) / 1000.0
+            )
         teacher_endpoint_np = teacher_endpoint.detach().float().cpu().numpy()
         stitched_action_latent_np = stitched_action_latent.detach().float().cpu(
         ).numpy()
@@ -615,9 +763,14 @@ class VA_Server:
             'gripper_consensus_prefix': consensus_prefix,
             'gripper_consensus_failure_index': consensus_failure_index,
             'fallback_required': accepted_prefix == 0,
-            'requested_verify_k': int(batch_size),
-            'effective_verify_k': int(batch_size),
-            'primary_verify_forwards': int(batch_size),
+            'requested_verify_k': requested_k,
+            'effective_verify_k': effective_k,
+            'primary_verify_forwards': effective_k,
+            'adaptive_k_live': bool(adaptive_k_live),
+            'adaptive_k_live_accepted': bool(adaptive_k_live_accepted),
+            'verify_probe_latency_sec': probe_latencies,
+            'verify_finalize_latency_sec': verify_finalize_latency_sec,
+            'verify_total_latency_sec': verify_total_latency_sec,
         }
 
     def _encode_obs(self, obs):
@@ -986,6 +1139,16 @@ class VA_Server:
                 previous_gripper=obs.get('previous_gripper'),
                 gripper_threshold=float(obs.get('gripper_threshold', 0.0)),
                 gripper_consensus=bool(obs.get('gripper_consensus', False)),
+                adaptive_k_live=bool(obs.get('adaptive_k_live', False)),
+                adaptive_k_distance_threshold=float(
+                    obs.get('adaptive_k_distance_threshold', 0.05)
+                ),
+                decoded_draft_gripper_switch=bool(
+                    obs.get('decoded_draft_gripper_switch', False)
+                ),
+                profile_verify_latency=bool(
+                    obs.get('profile_verify_latency', False)
+                ),
             )
             distances = verify_result.pop('distances')
             tau_timesteps = verify_result.pop('tau_timesteps')

@@ -12,6 +12,8 @@ from typing import Iterable, Optional
 
 import numpy as np
 
+from adaptive_verify import k1_full_accept_certificate
+
 
 def _stable_digest(value) -> str:
     digest = hashlib.sha256()
@@ -256,11 +258,16 @@ def adaptive_k_pass_candidate(
         adaptive_k_sentinel_phase_agreement=phase_agreement,
         adaptive_k_sentinel_gripper_switch=has_gripper_switch,
     )
-    if not (
-        full_prefix
-        and distance_max <= min(float(verify_threshold), float(candidate_threshold))
-        and phase_agreement
-        and not has_gripper_switch
+    if not k1_full_accept_certificate(
+        distance_max=distance_max,
+        continuous_prefix=continuous_prefix,
+        horizon=horizon,
+        phase_agreement=float(agreements[0]),
+        reconstructed_switch=switch_indices[0] is not None,
+        draft_switch=verify_response.get("draft_gripper_switch_index") is not None,
+        decoded_draft_switch=decoded_switch is not None,
+        verify_threshold=verify_threshold,
+        certificate_threshold=candidate_threshold,
     ):
         return telemetry, None
 
@@ -328,7 +335,9 @@ class RealtimeFlashPolicy:
         delayed_error_teacher_rounds: int = 2,
         video_motion_gate_threshold: float = 0.0,
         adaptive_k_shadow: bool = False,
+        adaptive_k_live: bool = False,
         adaptive_k_distance_threshold: float = 0.05,
+        profile_verify_latency: bool = False,
         equivalence_audit: bool = False,
         gripper_full_window: int = 1,
         gripper_consensus: bool = False,
@@ -362,6 +371,14 @@ class RealtimeFlashPolicy:
             or adaptive_k_distance_threshold < 0
         ):
             raise ValueError("adaptive K distance threshold must be non-negative")
+        if adaptive_k_shadow and adaptive_k_live:
+            raise ValueError("adaptive K shadow and live modes are mutually exclusive")
+        if adaptive_k_live and (
+            flow_budget_threshold > 0 or flow_budget_motion_ceiling > 0
+        ):
+            raise ValueError(
+                "live adaptive K cannot drive a flow budget without K=2 distances"
+            )
         if gripper_full_window < 1:
             raise ValueError("gripper_full_window must be positive")
         tau_timesteps = tuple(float(timestep) for timestep in tau_timesteps)
@@ -389,9 +406,11 @@ class RealtimeFlashPolicy:
         self.delayed_error_teacher_rounds = int(delayed_error_teacher_rounds)
         self.video_motion_gate_threshold = float(video_motion_gate_threshold)
         self.adaptive_k_shadow = bool(adaptive_k_shadow)
+        self.adaptive_k_live = bool(adaptive_k_live)
         self.adaptive_k_distance_threshold = float(
             adaptive_k_distance_threshold
         )
+        self.profile_verify_latency = bool(profile_verify_latency)
         self.equivalence_audit = bool(equivalence_audit)
         self.gripper_full_window = int(gripper_full_window)
         self.gripper_consensus = bool(gripper_consensus)
@@ -755,9 +774,21 @@ class RealtimeFlashPolicy:
                 )
                 return response
 
+        switch_step = first_gripper_switch(
+            action,
+            self.gripper_channels,
+            self.gripper_threshold,
+            previous=self.last_gripper,
+        )
         verify_request = dict(request)
-        verify_request.pop("adaptive_k_shadow", None)
-        verify_request.pop("adaptive_k_distance_threshold", None)
+        for key in (
+            "adaptive_k_shadow",
+            "adaptive_k_live",
+            "adaptive_k_distance_threshold",
+            "decoded_draft_gripper_switch",
+            "profile_verify_latency",
+        ):
+            verify_request.pop(key, None)
         verify_request.update(
             verify_action=True,
             action_latent=action_latent,
@@ -767,6 +798,14 @@ class RealtimeFlashPolicy:
             frame_st_id=self.frame_st_id,
             gripper_consensus=self.gripper_consensus,
         )
+        if self.adaptive_k_live:
+            verify_request.update(
+                adaptive_k_live=True,
+                adaptive_k_distance_threshold=self.adaptive_k_distance_threshold,
+                decoded_draft_gripper_switch=switch_step is not None,
+            )
+        if self.profile_verify_latency:
+            verify_request["profile_verify_latency"] = True
         if self.last_gripper is not None:
             previous_phase = self.last_gripper >= self.gripper_threshold
             verify_request["previous_gripper"] = np.where(
@@ -774,12 +813,6 @@ class RealtimeFlashPolicy:
             ).astype(np.float32)
         verify_response = self._call(self.teacher, verify_request)
         verified_prefix = self._accepted_prefix(action_latent, verify_response, horizon)
-        switch_step = first_gripper_switch(
-            action,
-            self.gripper_channels,
-            self.gripper_threshold,
-            previous=self.last_gripper,
-        )
         adaptive_telemetry, adaptive_prediction = adaptive_k_pass_candidate(
             verify_response,
             action,
@@ -819,6 +852,19 @@ class RealtimeFlashPolicy:
             "effective_verify_k": verify_response.get("effective_verify_k"),
             "primary_verify_forwards": verify_response.get(
                 "primary_verify_forwards"
+            ),
+            "adaptive_k_live": verify_response.get("adaptive_k_live", False),
+            "adaptive_k_live_accepted": verify_response.get(
+                "adaptive_k_live_accepted", False
+            ),
+            "verify_probe_latency_sec": verify_response.get(
+                "verify_probe_latency_sec"
+            ),
+            "verify_finalize_latency_sec": verify_response.get(
+                "verify_finalize_latency_sec"
+            ),
+            "verify_total_latency_sec": verify_response.get(
+                "verify_total_latency_sec"
             ),
             **adaptive_telemetry,
         }

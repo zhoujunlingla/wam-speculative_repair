@@ -247,3 +247,19 @@ teacher quality with materially lower teacher use.
   `env/torch29_clean_pkgs`, matching `runtime_env()`.
 - Next evidence is a GPU6/7 TN=1 paired speed smoke. This is speed telemetry,
   not a success-rate claim.
+
+### Active GPU6/7 speed smoke
+
+- Commit: `8e7b7fb`.
+- Task/manifest: `open_microwave`, first scene from the frozen TN=20 manifest.
+- GPU6 fixed-K2 screen: `progk_k2_g6`; run/result label
+  `20260716_progressivek_speed_smoke_k2_open_tn1_g6`.
+- GPU7 live progressive-K screen: `progk_live_g7`; run/result label
+  `20260716_progressivek_speed_smoke_live_open_tn1_g7`.
+- Both runs use Motion-on controls (`PF=20`, motion threshold 1.2, gripper
+  consensus, delta 0.15, tau 50/100), paired RNG, and verifier CUDA-event
+  profiling. The only policy difference is `--adaptive-k-live` on GPU7.
+- Early runtime evidence after three verifier calls: fixed K is `[2,2,2]`;
+  live effective K is `[1,2,1]`. The first warmup-contaminated sample is not a
+  speed claim; the first later K1 sample was about 46 ms versus a nearby K2
+  sample around 77 ms. Final p50 waits for episode completion.

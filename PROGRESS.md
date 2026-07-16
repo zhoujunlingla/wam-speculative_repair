@@ -330,3 +330,9 @@ teacher quality with materially lower teacher use.
   model checkpoints, and policy seed. The only behavior difference is live
   K1 early exit. Adaptive threshold changes remain locked until this quality
   comparison completes.
+- GPU2 became free before GPU7 finished the Hanging control. The Open K2
+  control was therefore started immediately on GPU2 in screen
+  `progk_q_k2_o_g2`, result label
+  `20260716_progk_quality_k2_open_tn20_g2`. A nonempty cancellation sentinel
+  was placed in the previously queued GPU7 Open run root so the chained command
+  exits instead of duplicating the same 20 episodes after Hanging completes.

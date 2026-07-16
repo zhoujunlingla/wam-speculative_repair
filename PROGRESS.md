@@ -296,3 +296,21 @@ teacher quality with materially lower teacher use.
 - All four runs use the same first three scenes from the frozen
   `open_microwave` manifest and the same Motion-on controls. This AB/BA order
   is intended to separate adaptive-K savings from GPU and warm-cache order.
+
+### Completed same-GPU crossover result
+
+- All four TN=3 runs completed without runtime/cache/render errors. On GPU6,
+  fixed K2 and live progressive K both scored 3/3. On GPU7, both scored 2/3.
+  Thus each same-GPU comparison preserved the observed task outcome.
+- GPU6: verifier p50 80.6 -> 42.7 ms (-47.0%); draft-round p50
+  429.6 -> 393.7 ms (-8.3%), mean 440.8 -> 400.4 ms (-9.2%).
+- GPU7: verifier p50 81.0 -> 43.0 ms (-47.0%); draft-round p50
+  428.8 -> 397.7 ms (-7.3%), mean 440.8 -> 411.1 ms (-6.8%).
+- Across live runs, 136/184 verifier calls exited after K1 (73.9%). Effective
+  teacher verifier forwards were 232 instead of 368, a 37.0% reduction.
+- Teacher action-source remained approximately unchanged: 9.47% live versus
+  9.28% K2 on GPU6, and exactly 9.18% for both on GPU7. Progressive K reduces
+  verification compute; it does not claim to reduce full-teacher routing.
+- The speed gate passes on both GPUs: model-path p50 improves by more than the
+  predeclared 5%, not merely verifier micro-latency. Live progressive K may
+  proceed to a larger frozen-manifest quality check before becoming default.

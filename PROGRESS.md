@@ -280,3 +280,19 @@ teacher quality with materially lower teacher use.
   are insufficient for a final speed claim. The next test should cross fixed
   K/live assignments on the same GPU or run sequentially on one exclusive GPU.
 - The completed result was sent to the configured Feishu group.
+
+### Active same-GPU crossover
+
+- The first screen wrapper exited before creating any run because its shared
+  shell variable was not exported into the nested `bash -lc`. It consumed no
+  GPU work and produced no trial. The relaunch expands every argument inside
+  each screen command; do not reuse parent-shell variables in nested screens.
+- GPU6 screen `progk_cross_g6` runs fixed K2 then live progressive K. Result
+  labels are `20260716_progk_cross_g6_k2_open_tn3` and
+  `20260716_progk_cross_g6_live_open_tn3`.
+- GPU7 screen `progk_cross_g7` runs live progressive K then fixed K2. Result
+  labels are `20260716_progk_cross_g7_live_open_tn3` and
+  `20260716_progk_cross_g7_k2_open_tn3`.
+- All four runs use the same first three scenes from the frozen
+  `open_microwave` manifest and the same Motion-on controls. This AB/BA order
+  is intended to separate adaptive-K savings from GPU and warm-cache order.

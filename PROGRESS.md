@@ -336,3 +336,26 @@ teacher quality with materially lower teacher use.
   `20260716_progk_quality_k2_open_tn20_g2`. A nonempty cancellation sentinel
   was placed in the previously queued GPU7 Open run root so the chained command
   exits instead of duplicating the same 20 episodes after Hanging completes.
+
+### Completed frozen-manifest quality result
+
+- Live progressive K scored `hanging_mug 4/20` and `open_microwave 11/20`,
+  totaling 15/40. Fixed K2 scored 5/20 and 11/20, totaling 16/40. The aggregate
+  delta is -1/40 and within the predeclared two-success tolerance.
+- Paired outcomes were highly stochastic rather than a one-way live
+  regression: live-only successes = 8, K2-only successes = 9 across the 40
+  fixed scenes (exact sign/McNemar evidence is null; two-sided p=1.0). Open had
+  five live-only and five K2-only successes despite equal totals.
+- Live K1 coverage was 567/1,116 = 50.8%. Effective verifier forwards were
+  1,665 instead of 2,232, a 25.4% reduction. Hanging coverage was only 10.8%,
+  while Open coverage was 78.4%, confirming that contact-heavy phases fail
+  closed to K2.
+- Pooled verifier p50 fell 81.3 -> 50.0 ms (-38.5%). Draft-round p50 fell
+  436.6 -> 421.0 ms (-3.6%), and mean fell 443.2 -> 421.0 ms (-5.0%).
+- Teacher action-source was 17.39% live versus 16.63% K2; this small increase
+  follows divergent closed-loop trajectories because progressive K does not
+  alter the full-teacher routing rule.
+- The larger quality gate passes for continuing research: no significant
+  quality regression, no runtime/cache error, and material verifier/NFE
+  savings. Progressive K is a compute optimization, not evidence of lower
+  full-teacher use. Adaptive-threshold work may now begin as a separate change.

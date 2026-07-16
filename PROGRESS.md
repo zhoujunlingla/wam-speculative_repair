@@ -314,3 +314,19 @@ teacher quality with materially lower teacher use.
 - The speed gate passes on both GPUs: model-path p50 improves by more than the
   predeclared 5%, not merely verifier micro-latency. Live progressive K may
   proceed to a larger frozen-manifest quality check before becoming default.
+
+### Active frozen-manifest quality gate
+
+- GPU5 screen `progk_q_live_h_g5`: live progressive K on `hanging_mug TN=20`,
+  result label `20260716_progk_quality_live_hanging_tn20_g5`.
+- GPU6 screen `progk_q_live_o_g6`: live progressive K on
+  `open_microwave TN=20`, result label
+  `20260716_progk_quality_live_open_tn20_g6`.
+- GPU7 screen `progk_q_k2_g7`: fixed K2 on `hanging_mug TN=20`, then fixed K2
+  on `open_microwave TN=20`; result labels
+  `20260716_progk_quality_k2_hanging_tn20_g7` and
+  `20260716_progk_quality_k2_open_tn20_g7`.
+- Each live/control pair uses the same frozen manifest, Motion-on controls,
+  model checkpoints, and policy seed. The only behavior difference is live
+  K1 early exit. Adaptive threshold changes remain locked until this quality
+  comparison completes.

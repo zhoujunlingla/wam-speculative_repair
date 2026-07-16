@@ -263,3 +263,20 @@ teacher quality with materially lower teacher use.
   live effective K is `[1,2,1]`. The first warmup-contaminated sample is not a
   speed claim; the first later K1 sample was about 46 ms versus a nearby K2
   sample around 77 ms. Final p50 waits for episode completion.
+
+### Completed smoke result
+
+- Both runs completed `open_microwave 1/1` with `client_rc=0`; source,
+  accepted-prefix, verified-prefix, fallback-reason, frame-id, and full-reason
+  sequences matched for all 17 action rounds.
+- Live progressive K certified 14 of 16 verifier calls at K1 (87.5%). Teacher
+  verifier forwards fell from 32 to 18, a 43.75% reduction, with mean effective
+  K 1.125.
+- Verifier p50 fell from 78.3 ms to 46.7 ms (40.4%). Draft-round p50 fell from
+  396.4 ms to 382.9 ms (3.4%), while its mean fell from 400.5 ms to 377.2 ms
+  (5.8%). Teacher action-source remained identical at 1/17 = 5.88%.
+- This passes the functional and verifier-speed checks, but the model-path p50
+  does not yet meet the predeclared 5% promotion gate. TN=1 and different GPUs
+  are insufficient for a final speed claim. The next test should cross fixed
+  K/live assignments on the same GPU or run sequentially on one exclusive GPU.
+- The completed result was sent to the configured Feishu group.

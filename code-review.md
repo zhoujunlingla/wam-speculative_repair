@@ -629,3 +629,78 @@ therefore an experiment-validity repair, not an adaptive-K behavior change.
   TN=20: every candidate must exactly match the canonical K=2 decision, coverage
   must be nonzero, and conflicts must be zero. Live and latency claims remain
   blocked.
+
+## World-Flow Progressive-K Evidence Review (2026-07-17)
+
+### Scope
+
+- Preserve the live Motion-on and Progressive-K decision path.
+- Add no-extra-forward continuous-action and cross-tau world-flow telemetry.
+- Add a four-GPU low10x20 ACP runner with strict artifact completeness gates.
+- Use the surviving official FlashWAM step2000 v1/a2 draft and LingBot v2/a4
+  teacher. The historical step3000 transformer was removed by the explicit
+  checkpoint cleanup, so this run is not a same-checkpoint comparison with the
+  historical Motion-on 146/200 result.
+
+### Findings Fixed
+
+1. K2 telemetry reductions and host copies originally sat inside the CUDA
+   verifier timer. They now run after the timer completes.
+2. Action/world telemetry could originally raise and terminate routing. Both
+   paths now fail open for policy behavior while the formal artifact gate fails
+   closed on missing or non-finite evidence.
+3. Conditioned first-frame actions originally polluted world-flow statistics.
+   The server now compares consistently masked tensors and excludes conditioned
+   frames from every reported midpoint, gap, and correction-direction value.
+4. CLI defaults were briefly changed to step2000. Historical step3000 defaults
+   are restored; the formal runner selects the step2000 config explicitly.
+5. The first model preflight accepted only a single safetensors file. It now
+   parses sharded index JSON and verifies every referenced nonempty shard, while
+   also accepting the draft's valid single-file transformer.
+6. The first merge gate could claim completion after a shard failure or empty
+   telemetry. Completion now requires all ten tasks at 20 valid trials, zero
+   shard failures, exact frozen policy parameters, nonzero verifier and
+   Progressive-K calls, closed K1/K2 evidence accounting, numeric K2 evidence,
+   and finite action/video telemetry for every draft or replan row.
+7. A malformed K1 row could claim available K2 evidence. Classification now
+   requires requested K=2 and effective K=2; only the explicit effective-K1
+   abstention is accepted as normal missing cross-tau evidence.
+8. The original action-dynamics test used constant gripper values and did not
+   prove exclusion. It now uses adversarial conditioned-frame and gripper
+   trajectories and checks the exact continuous-only velocity, acceleration,
+   and jerk values.
+9. Each task now has a six-hour fail-closed timeout, and the result records the
+   reviewed commit, exact model configs/paths, resolved transformer paths, and
+   the checkpoint comparability limitation.
+
+### Residual Risk
+
+- Cross-tau endpoint gap is an empirical solver-disagreement proxy, not a
+  calibrated uncertainty estimate. It remains telemetry-only in this run.
+- The step2000 draft establishes a new reference; success-rate deltas cannot be
+  attributed to Progressive-K by comparing against the deleted step3000 run.
+- Future MC-FCR thresholding or repair requires calibration from this evidence
+  and a separate reviewed live-policy change.
+
+### Verification
+
+- Local `git diff --check`: passed.
+- Local `bash -n scripts/acp_worldflow_progressive_low10.sh`: passed.
+- Local `py_compile` for all changed Python runtime and test files: passed.
+- Local synthetic source-summary, non-finite telemetry, and exact
+  continuous-action isolation checks: passed.
+- Independent code and ACP reviews found the issues listed above; all blocking
+  findings were addressed.
+- A800 serving environment, with the same Torch package path and
+  `DIFFUSERS_DISABLE_BITSANDBYTES=1` as the launcher: `62 passed` in 34.92s.
+  An earlier collection attempt without that launcher variable failed in the
+  environment's system bitsandbytes/triton import and is not counted as a code
+  test.
+
+### Decision
+
+Allowed to commit and deploy a clean checkout. The formal four-GPU low10x20 run
+may start only when `CODE_COMMIT` exactly matches that clean checkout and model
+preflight passes. It is considered successfully started only after all four
+shards load both models, pass SAPIEN rendering, enter real RoboTwin trials, and
+write nonempty verifier traces; ACP `RUNNING` alone is insufficient evidence.

@@ -270,6 +270,48 @@ def normalized_l2_distances(
     return torch.linalg.vector_norm(diff, ord=2, dim=1) / math.sqrt(len(channels))
 
 
+def cross_tau_flow_evidence(
+    reconstructed: torch.Tensor,
+    draft: torch.Tensor,
+    *,
+    continuous_channels=CONTINUOUS_CHANNELS,
+) -> dict[str, torch.Tensor]:
+    """Summarize two reconstructed endpoints without changing verification."""
+
+    if reconstructed.shape[0] != 2:
+        raise ValueError("cross-tau flow evidence requires exactly two endpoints")
+    if draft.shape[0] != 1 or draft.shape[1:] != reconstructed.shape[1:]:
+        raise ValueError("draft must contain one action chunk matching the endpoints")
+    channels = tuple(int(channel) for channel in continuous_channels)
+    if not channels or min(channels) < 0 or max(channels) >= reconstructed.shape[1]:
+        raise ValueError("continuous_channels are invalid for the action tensor")
+
+    endpoints = reconstructed[:, channels, :, :, 0].float()
+    draft_continuous = draft[:, channels, :, :, 0].float()
+    midpoint = endpoints.mean(dim=0, keepdim=True)
+    scale = math.sqrt(len(channels))
+    midpoint_distance = torch.linalg.vector_norm(
+        midpoint - draft_continuous, ord=2, dim=1
+    )[0] / scale
+    half_gap = 0.5 * torch.linalg.vector_norm(
+        endpoints[0] - endpoints[1], ord=2, dim=0
+    ) / scale
+
+    corrections = endpoints - draft_continuous
+    correction_norms = torch.linalg.vector_norm(corrections, ord=2, dim=1)
+    valid = (correction_norms[0] > 1e-8) & (correction_norms[1] > 1e-8)
+    cosine = torch.nn.functional.cosine_similarity(
+        corrections[0], corrections[1], dim=0, eps=1e-8
+    )
+    cosine = torch.where(valid, cosine, torch.zeros_like(cosine))
+    return {
+        "endpoint_midpoint_distance": midpoint_distance,
+        "cross_tau_half_gap": half_gap,
+        "correction_cosine": cosine,
+        "correction_cosine_valid": valid,
+    }
+
+
 def longest_prefix_min_over_k(
     distances: torch.Tensor,
     threshold: float,

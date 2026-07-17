@@ -7,7 +7,9 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+import evaluation.robotwin.realtime_flash_policy as policy_module
 from evaluation.robotwin.realtime_flash_policy import (
+    continuous_action_dynamics_stats,
     RealtimeFlashPolicy,
     adaptive_k_pass_candidate,
     first_gripper_switch,
@@ -15,6 +17,23 @@ from evaluation.robotwin.realtime_flash_policy import (
     longest_safe_prefix,
     normalized_l2_step_distances,
 )
+
+
+def test_continuous_action_dynamics_stats_excludes_gripper_and_conditioned_steps():
+    action = np.zeros((1, 30, 2, 4, 1), dtype=np.float32)
+    action[0, 0, 0, :, 0] = np.array([100.0, -100.0, 100.0, -100.0])
+    action[0, 0, 1, :, 0] = np.array([0.0, 1.0, 4.0, 10.0])
+    action[0, 28:30, :, :, 0] = np.array(
+        [-1000.0, 1000.0, -1000.0, 1000.0] * 2
+    ).reshape(2, 4)
+
+    stats = continuous_action_dynamics_stats(action, skip_steps=4)
+
+    assert stats["action_steps"] == 4
+    assert stats["skipped_conditioned_steps"] == 4
+    assert np.isclose(stats["velocity_rms"], np.sqrt(46.0 / 42.0))
+    assert np.isclose(stats["acceleration_rms"], np.sqrt(13.0 / 28.0))
+    assert np.isclose(stats["jerk_rms"], np.sqrt(1.0 / 14.0))
 
 
 def _action(switch_step=None, value=0.0):
@@ -144,6 +163,21 @@ def _first_verify_noise(policy, draft, teacher, seed):
         for call in reversed(teacher.calls)
         if call["kind"] == "verify"
     )
+
+
+def test_action_dynamics_telemetry_failure_does_not_change_policy(monkeypatch):
+    policy, _, teacher, _ = _anchored_policy(pf_interval=20)
+
+    def fail_telemetry(*args, **kwargs):
+        raise RuntimeError("diagnostic failure")
+
+    monkeypatch.setattr(
+        policy_module, "continuous_action_dynamics_stats", fail_telemetry
+    )
+    response = policy.infer(_action_request())
+
+    assert response["action_source"] == "draft_flash"
+    assert any(call["kind"] == "verify" for call in teacher.calls)
 
 
 def test_paired_rng_reset_replays_verifier_noise_per_episode():

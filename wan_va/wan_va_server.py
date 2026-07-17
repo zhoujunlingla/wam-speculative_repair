@@ -43,6 +43,7 @@ from utils import (
 from specverify import (
     action_verify_frame_start,
     build_verify_action_input,
+    cross_tau_flow_evidence,
     gripper_consensus_prefix,
     gripper_switch_info,
     latent_prediction_error_stats,
@@ -718,6 +719,61 @@ class VA_Server:
             verify_total_latency_sec = (
                 verify_start_event.elapsed_time(verify_end_event) / 1000.0
             )
+        world_flow_evidence = {
+            'available': False,
+            'reason': 'requires_completed_k2',
+            'effective_verify_k': effective_k,
+        }
+        if effective_k == 2:
+            try:
+                flow_evidence = cross_tau_flow_evidence(
+                    reconstructed, draft_batch[:1]
+                )
+                midpoint_distance = flow_evidence[
+                    'endpoint_midpoint_distance']
+                half_gap = flow_evidence['cross_tau_half_gap']
+                cosine = flow_evidence['correction_cosine']
+                cosine_valid = flow_evidence['correction_cosine_valid']
+                if conditioned_frame_count:
+                    midpoint_distance = midpoint_distance[
+                        conditioned_frame_count:]
+                    half_gap = half_gap[conditioned_frame_count:]
+                    cosine = cosine[conditioned_frame_count:]
+                    cosine_valid = cosine_valid[conditioned_frame_count:]
+                if midpoint_distance.numel() == 0:
+                    raise ValueError('world-flow evidence has no future action')
+                valid_cosine = cosine[cosine_valid]
+                world_flow_evidence = {
+                    'available': True,
+                    'reason': None,
+                    'effective_verify_k': effective_k,
+                    'conditioned_frame_count': conditioned_frame_count,
+                    'evidence_frame_count': int(midpoint_distance.shape[0]),
+                    'evidence_action_steps': int(midpoint_distance.numel()),
+                    'endpoint_midpoint_distance':
+                        midpoint_distance.cpu().tolist(),
+                    'endpoint_midpoint_distance_mean': float(
+                        midpoint_distance.mean().item()),
+                    'endpoint_midpoint_distance_max': float(
+                        midpoint_distance.max().item()),
+                    'cross_tau_half_gap': half_gap.cpu().tolist(),
+                    'cross_tau_half_gap_mean': float(half_gap.mean().item()),
+                    'cross_tau_half_gap_max': float(half_gap.max().item()),
+                    'correction_cosine': cosine.cpu().tolist(),
+                    'correction_cosine_valid': cosine_valid.cpu().tolist(),
+                    'correction_cosine_valid_fraction': float(
+                        cosine_valid.float().mean().item()),
+                    'correction_cosine_mean_valid': (
+                        float(valid_cosine.mean().item())
+                        if valid_cosine.numel() else None
+                    ),
+                }
+            except Exception as error:  # telemetry must not alter routing
+                world_flow_evidence = {
+                    'available': False,
+                    'reason': f'telemetry_error:{type(error).__name__}',
+                    'effective_verify_k': effective_k,
+                }
         teacher_endpoint_np = teacher_endpoint.detach().float().cpu().numpy()
         stitched_action_latent_np = stitched_action_latent.detach().float().cpu(
         ).numpy()
@@ -766,6 +822,7 @@ class VA_Server:
             'requested_verify_k': requested_k,
             'effective_verify_k': effective_k,
             'primary_verify_forwards': effective_k,
+            'world_flow_evidence': world_flow_evidence,
             'adaptive_k_live': bool(adaptive_k_live),
             'adaptive_k_live_accepted': bool(adaptive_k_live_accepted),
             'verify_probe_latency_sec': probe_latencies,

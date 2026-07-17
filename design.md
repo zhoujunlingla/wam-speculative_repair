@@ -512,3 +512,55 @@ The speed-only gate is zero cache/frame mutation, effective K below 2, at least
 15% lower verifier latency, and at least 5% lower total model-path latency. If
 the model-path gain is below 5%, progressive K is rejected before any
 adaptive-delta or repair experiment.
+
+## World-Aware Progressive Verification Evidence Run
+
+This formal low10x20 run freezes the validated Motion-on policy and live
+Progressive-K decision path. It does **not** change the verifier threshold,
+accepted prefix, gripper fallback, periodic refresh, cache updates, or repair
+behavior. The purpose is to validate Progressive-K at low10 scale while
+collecting causal evidence for a later world-aware threshold or repair policy.
+
+The live policy remains:
+
+```text
+draft = FlashWAM official step2000 v1/a2
+teacher = LingBot posttrain v2/a4
+base verifier = tau {50,100}, delta 0.15, shared Gaussian noise
+motion gate = future-video latent global_mean >= 1.2 -> replan
+K1 certificate = tau50 full-prefix, max distance <= 0.05,
+                 exact gripper phase, no draft/reconstruction phase switch
+otherwise = append tau100 and run the unchanged K2 finalizer
+PF = 20, gripper consensus and teacher gripper fallback enabled
+```
+
+No-extra-forward telemetry is emitted from tensors already computed by this
+path:
+
+- future-video latent motion statistics from the draft rollout;
+- continuous-action velocity, acceleration, and jerk statistics from the
+  normalized draft action latent (gripper channels excluded);
+- for completed K2 calls, the draft-to-endpoint-midpoint distance, half of the
+  tau50/tau100 endpoint gap, and cosine agreement between the two endpoint
+  correction directions;
+- delayed predicted-versus-observed video latent error remains logged on the
+  following cache acknowledgement, preserving causal frame alignment.
+
+For K2, the endpoint midpoint is exactly the mean of the two reconstructed
+endpoints. The cross-tau gap is described only as a solver-disagreement proxy,
+not calibrated uncertainty. K1 early exits explicitly record that cross-tau
+evidence is unavailable; no missing second probe is synthesized.
+
+The formal artifact must contain the reviewed commit, exact command, model
+configs, ten task summaries with 20 valid trials each, source rates, verifier
+NFE/latency, and telemetry coverage. Promotion of a world-aware live policy is
+out of scope. This run is valid only if server/client startup reaches real
+RoboTwin trials on all four shards and the telemetry path leaves existing
+Progressive-K tests and policy decisions unchanged.
+
+The historical Motion-on 146/200 result used an official step3000 checkpoint.
+That transformer was removed by the explicit checkpoint cleanup that retained
+only step2000. This run therefore uses the surviving official step2000
+checkpoint and must not be presented as a same-checkpoint causal comparison
+against 146/200. Its purpose is to establish a new, reproducible step2000
+reference and collect the evidence needed to calibrate the next live policy.

@@ -119,6 +119,53 @@ def normalized_l2_step_distances(
     )
 
 
+def continuous_action_dynamics_stats(
+    action_latent: np.ndarray,
+    continuous_channels: Iterable[int] = range(14),
+    *,
+    skip_steps: int = 0,
+) -> dict[str, float | int | None]:
+    """Describe normalized continuous-action dynamics without routing on them."""
+
+    action = np.asarray(action_latent, dtype=np.float32)
+    if action.ndim != 5 or action.shape[0] != 1 or action.shape[-1] != 1:
+        raise ValueError("action_latent must have shape [1, C, F, N, 1]")
+    channels = tuple(int(channel) for channel in continuous_channels)
+    if not channels or min(channels) < 0 or max(channels) >= action.shape[1]:
+        raise ValueError("continuous_channels are invalid for the action latent")
+    trace = action[0, channels, :, :, 0].reshape(len(channels), -1)
+    skip_steps = int(skip_steps)
+    if skip_steps < 0 or skip_steps >= trace.shape[1]:
+        raise ValueError("skip_steps must leave at least one action step")
+    trace = trace[:, skip_steps:]
+    if not np.all(np.isfinite(trace)):
+        raise ValueError("action_latent must be finite")
+
+    def finite_difference_stats(order: int) -> tuple[float | None, float | None]:
+        values = np.diff(trace, n=order, axis=1)
+        if values.shape[1] == 0:
+            return None, None
+        per_step = np.sqrt(np.mean(np.square(values, dtype=np.float32), axis=0))
+        return float(np.sqrt(np.mean(np.square(values, dtype=np.float32)))), float(
+            np.max(per_step)
+        )
+
+    velocity_rms, velocity_max = finite_difference_stats(1)
+    acceleration_rms, acceleration_max = finite_difference_stats(2)
+    jerk_rms, jerk_max = finite_difference_stats(3)
+    return {
+        "continuous_channels": len(channels),
+        "action_steps": int(trace.shape[1]),
+        "skipped_conditioned_steps": skip_steps,
+        "velocity_rms": velocity_rms,
+        "velocity_max_step_rms": velocity_max,
+        "acceleration_rms": acceleration_rms,
+        "acceleration_max_step_rms": acceleration_max,
+        "jerk_rms": jerk_rms,
+        "jerk_max_step_rms": jerk_max,
+    }
+
+
 def longest_safe_prefix(
     distances: np.ndarray,
     threshold: float,
@@ -740,6 +787,16 @@ class RealtimeFlashPolicy:
         if action_latent is None:
             raise RuntimeError("draft inference did not return action_latent")
         action_latent = np.asarray(action_latent)
+        try:
+            action_dynamics_stats = continuous_action_dynamics_stats(
+                action_latent,
+                skip_steps=self.action_per_frame if self.frame_st_id == 0 else 0,
+            )
+        except Exception as error:  # telemetry must not alter routing
+            action_dynamics_stats = {
+                "available": False,
+                "reason": f"telemetry_error:{type(error).__name__}",
+            }
         video_motion_stats = draft_response.get("video_motion_stats")
         horizon = action.shape[1] * action.shape[2]
 
@@ -769,6 +826,7 @@ class RealtimeFlashPolicy:
                     verified_prefix=None,
                     executed_action_hash=None,
                     video_motion_stats=video_motion_stats,
+                    action_dynamics_stats=action_dynamics_stats,
                     video_motion_gate_threshold=self.video_motion_gate_threshold,
                     elapsed_sec=time.perf_counter() - start,
                 )
@@ -842,6 +900,10 @@ class RealtimeFlashPolicy:
                 "draft_gripper_switch_index"
             ),
             "video_motion_stats": video_motion_stats,
+            "action_dynamics_stats": action_dynamics_stats,
+            "world_flow_evidence": verify_response.get(
+                "world_flow_evidence"
+            ),
             "gripper_consensus_prefix": verify_response.get(
                 "gripper_consensus_prefix"
             ),

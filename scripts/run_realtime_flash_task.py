@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import shutil
 import socket
@@ -126,6 +127,23 @@ def source_summary(path: Path) -> dict:
         "verify_total_sec": [],
         "probe_sec": [],
     }
+    world_flow = {
+        "verify_calls": 0,
+        "available_k2": 0,
+        "unavailable_k1": 0,
+        "missing": 0,
+        "endpoint_midpoint_distance_mean": [],
+        "cross_tau_half_gap_mean": [],
+        "correction_cosine_mean_valid": [],
+    }
+    draft_evidence = {
+        "action_dynamics_calls": 0,
+        "video_motion_calls": 0,
+        "delayed_video_error_calls": 0,
+        "jerk_rms": [],
+        "video_global_mean": [],
+        "delayed_video_nrmse": [],
+    }
     if path.exists():
         for line in path.read_text(errors="replace").splitlines():
             try:
@@ -136,7 +154,58 @@ def source_summary(path: Path) -> dict:
             counts[source] = counts.get(source, 0) + 1
             if row.get("elapsed_sec") is not None:
                 latencies.setdefault(source, []).append(float(row["elapsed_sec"]))
+            action_dynamics = row.get("action_dynamics_stats")
+            if isinstance(action_dynamics, dict):
+                draft_evidence["action_dynamics_calls"] += 1
+                if action_dynamics.get("jerk_rms") is not None:
+                    value = float(action_dynamics["jerk_rms"])
+                    if math.isfinite(value):
+                        draft_evidence["jerk_rms"].append(value)
+            video_motion = row.get("video_motion_stats")
+            if isinstance(video_motion, dict):
+                draft_evidence["video_motion_calls"] += 1
+                if video_motion.get("global_mean") is not None:
+                    value = float(video_motion["global_mean"])
+                    if math.isfinite(value):
+                        draft_evidence["video_global_mean"].append(value)
+            delayed_video = row.get("delayed_video_error")
+            if isinstance(delayed_video, dict):
+                draft_evidence["delayed_video_error_calls"] += 1
+                if delayed_video.get("latent_nrmse") is not None:
+                    value = float(delayed_video["latent_nrmse"])
+                    if math.isfinite(value):
+                        draft_evidence["delayed_video_nrmse"].append(value)
             if row.get("requested_verify_k") is not None:
+                world_flow["verify_calls"] += 1
+                requested_k = int(row.get("requested_verify_k", 0))
+                effective_k = int(row.get("effective_verify_k", 0))
+                flow_evidence = row.get("world_flow_evidence")
+                if not isinstance(flow_evidence, dict):
+                    world_flow["missing"] += 1
+                elif (
+                    requested_k == 2
+                    and effective_k == 2
+                    and flow_evidence.get("available")
+                ):
+                    world_flow["available_k2"] += 1
+                    for key in (
+                        "endpoint_midpoint_distance_mean",
+                        "cross_tau_half_gap_mean",
+                        "correction_cosine_mean_valid",
+                    ):
+                        if flow_evidence.get(key) is not None:
+                            value = float(flow_evidence[key])
+                            if math.isfinite(value):
+                                world_flow[key].append(value)
+                elif (
+                    requested_k == 2
+                    and effective_k == 1
+                    and not flow_evidence.get("available")
+                    and flow_evidence.get("reason") == "requires_completed_k2"
+                ):
+                    world_flow["unavailable_k1"] += 1
+                else:
+                    world_flow["missing"] += 1
                 adaptive["calls"] += 1
                 kind = row.get("adaptive_k_certificate_kind")
                 if kind:
@@ -222,6 +291,16 @@ def source_summary(path: Path) -> dict:
         verify_profile["effective_forwards"] / verify_profile["calls"]
         if verify_profile["calls"] else None
     )
+    for values in (world_flow, draft_evidence):
+        for key in tuple(values):
+            if not isinstance(values[key], list):
+                continue
+            samples = values[key]
+            values[key] = {
+                "count": len(samples),
+                "mean": sum(samples) / len(samples) if samples else None,
+                "max": max(samples) if samples else None,
+            }
     return {
         "counts": counts,
         "latency": stats,
@@ -229,6 +308,8 @@ def source_summary(path: Path) -> dict:
         "adaptive_k": adaptive,
         "adaptive_k_live": adaptive_live,
         "verify_profile": verify_profile,
+        "world_flow": world_flow,
+        "draft_evidence": draft_evidence,
     }
 
 
@@ -252,6 +333,12 @@ def main() -> None:
     parser.add_argument("--test-num", type=int, default=10)
     parser.add_argument("--run-root", type=Path, required=True)
     parser.add_argument("--result-root", type=Path, required=True)
+    parser.add_argument(
+        "--draft-config-name", default="robotwin_flashwam_step3000_v1a2"
+    )
+    parser.add_argument(
+        "--teacher-config-name", default="robotwin_lingbot_v2a4"
+    )
     parser.add_argument("--threshold", type=float, default=0.15)
     parser.add_argument("--tau", type=float, nargs="+", default=(50.0, 100.0))
     parser.add_argument("--pf-interval", type=int, default=2)
@@ -302,6 +389,8 @@ def main() -> None:
         "--mode", args.mode,
         "--port", str(args.port),
         "--save-root", str(args.run_root / "server" / args.task),
+        "--draft-config-name", args.draft_config_name,
+        "--teacher-config-name", args.teacher_config_name,
         "--threshold", str(args.threshold),
         "--tau-timesteps", *[str(value) for value in args.tau],
         "--pf-interval", str(args.pf_interval),
@@ -416,6 +505,8 @@ def main() -> None:
         "gpu": args.gpu,
         "client_gpu": client_gpu,
         "threshold": args.threshold,
+        "draft_config_name": args.draft_config_name,
+        "teacher_config_name": args.teacher_config_name,
         "tau": args.tau,
         "pf_interval": args.pf_interval,
         "flow_budget_threshold": args.flow_budget_threshold,

@@ -53,12 +53,19 @@ def test_live_progressive_k_stops_after_certified_first_probe(monkeypatch):
     assert result["accepted_prefix"] == 32
     assert result["adaptive_k_live_accepted"] is True
     assert result["tau_timesteps"].tolist() == [50.0]
+    assert result["world_flow_evidence"] == {
+        "available": False,
+        "reason": "requires_completed_k2",
+        "effective_verify_k": 1,
+    }
 
 
 def test_live_progressive_k_runs_second_probe_when_certificate_abstains(monkeypatch):
     server = _fake_server(monkeypatch)
+    draft = torch.zeros(1, 30, 2, 16, 1)
+    draft[:, 0, 0] = 1.0
     result = server.verify_action_chunk(
-        torch.zeros(1, 30, 2, 16, 1),
+        draft,
         tau_timesteps=(50.0, 100.0),
         threshold=0.15,
         gripper_consensus=True,
@@ -70,3 +77,34 @@ def test_live_progressive_k_runs_second_probe_when_certificate_abstains(monkeypa
     assert result["effective_verify_k"] == 2
     assert result["adaptive_k_live_accepted"] is False
     assert result["tau_timesteps"].tolist() == [50.0, 100.0]
+    assert result["world_flow_evidence"]["available"] is True
+    assert result["world_flow_evidence"]["cross_tau_half_gap_max"] == 0.0
+    assert result["world_flow_evidence"]["conditioned_frame_count"] == 1
+    assert result["world_flow_evidence"]["evidence_frame_count"] == 1
+    assert result["world_flow_evidence"]["evidence_action_steps"] == 16
+    assert len(result["world_flow_evidence"]["cross_tau_half_gap"]) == 1
+
+
+def test_world_flow_telemetry_failure_does_not_change_k2_decision(monkeypatch):
+    server = _fake_server(monkeypatch)
+
+    def fail_telemetry(*args, **kwargs):
+        raise RuntimeError("diagnostic failure")
+
+    monkeypatch.setattr(server_module, "cross_tau_flow_evidence", fail_telemetry)
+    result = server.verify_action_chunk(
+        torch.zeros(1, 30, 2, 16, 1),
+        tau_timesteps=(50.0, 100.0),
+        threshold=0.15,
+        gripper_consensus=True,
+        adaptive_k_live=True,
+        adaptive_k_distance_threshold=0.05,
+        decoded_draft_gripper_switch=True,
+    )
+
+    assert result["accepted_prefix"] == 32
+    assert result["world_flow_evidence"] == {
+        "available": False,
+        "reason": "telemetry_error:RuntimeError",
+        "effective_verify_k": 2,
+    }

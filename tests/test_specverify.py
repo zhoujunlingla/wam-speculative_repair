@@ -10,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from adaptive_verify import k1_full_accept_certificate  # noqa: E402
 
 from specverify import (  # noqa: E402
+    cross_tau_flow_evidence,
     gripper_consensus_prefix,
     gripper_switch_info,
     latent_frame_motion_stats,
@@ -109,6 +110,27 @@ def test_normalized_l2_uses_only_continuous_channels():
     assert distances.shape == (2, 2, 16)
     assert distances[0].max().item() == 0
     assert torch.isclose(distances[1, 1, 4], torch.tensor(1.0))
+
+
+def test_cross_tau_flow_evidence_uses_midpoint_gap_and_direction():
+    draft = torch.zeros(1, 30, 2, 2, 1)
+    reconstructed = torch.zeros(2, 30, 2, 2, 1)
+    reconstructed[0, :14] = 1.0
+    reconstructed[1, :14] = 3.0
+    reconstructed[:, 28:30] = 100.0
+
+    evidence = cross_tau_flow_evidence(reconstructed, draft)
+
+    assert torch.allclose(
+        evidence["endpoint_midpoint_distance"], torch.full((2, 2), 2.0)
+    )
+    assert torch.allclose(
+        evidence["cross_tau_half_gap"], torch.full((2, 2), 1.0)
+    )
+    assert torch.allclose(
+        evidence["correction_cosine"], torch.ones(2, 2)
+    )
+    assert evidence["correction_cosine_valid"].all()
 
 
 def test_prefix_is_minimum_over_all_tau_rows():

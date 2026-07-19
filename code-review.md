@@ -738,3 +738,16 @@ No blocking correctness finding remains.
 Allowed to proceed to the four-GPU low10x20 development evaluation. The result
 is diagnostic unless its episode manifests are matched to the Motion-on
 baseline.
+# ACP Low10x20 launcher review
+
+- Added a four-GPU formal launcher derived from the validated Official-step2000
+  Motion-on launcher. It preserves the model/config, K2, tau, PF, gripper,
+  renderfix, timeout, sharding, and merged-summary paths.
+- The launcher passes and then validates all three Motion-Jerk controls in every
+  task summary: jerk ratio 1.3, strict verifier delta 0.10, and strict prefix 16.
+- `GPU_COUNT=4` and `TEST_NUM=20` are fail-closed requirements, so this command
+  cannot silently become a smaller smoke test or a differently sharded run.
+- `bash -n scripts/acp_motion_jerk_step2000_low10_4gpu.sh`: passed.
+
+Decision: allowed to submit. Risk remains experimental policy quality, not
+launcher/configuration ambiguity.

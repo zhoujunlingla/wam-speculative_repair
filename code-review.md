@@ -704,3 +704,37 @@ may start only when `CODE_COMMIT` exactly matches that clean checkout and model
 preflight passes. It is considered successfully started only after all four
 shards load both models, pass SAPIEN rendering, enter real RoboTwin trials, and
 write nonempty verifier traces; ACP `RUNNING` alone is insufficient evidence.
+## 2026-07-19 Motion-Jerk Stratified Verification
+
+### Findings
+
+No blocking correctness finding remains.
+
+- Risk: medium. The new live route changes high-motion actions, but it is
+  opt-in and fails closed to the existing full-teacher path when dynamics
+  telemetry is missing, non-finite, or above the relative-jerk threshold.
+- The legacy Motion-on behavior is unchanged when
+  `video_motion_jerk_gate_threshold=0`.
+- The strict route cannot enlarge the verifier prefix: it requires a full
+  32-action K2 pass at threshold 0.10, rejects any gripper-consensus failure,
+  and caps execution at 16 actions.
+- The route reuses zero-extra-forward draft dynamics telemetry and the existing
+  read-only teacher verifier. It does not mutate either model cache during
+  verification.
+- CLI parameters are propagated through the task launcher and single-server
+  entry point and persisted in each task summary.
+
+### Verification
+
+- `python -m py_compile` passed for all changed Python files.
+- Host-only policy and launcher tests passed: 48 tests.
+- `git diff --check` passed.
+- Full server tests could not be collected under `/usr/bin/python` because that
+  interpreter lacks `diffusers`; the changed server entry point passed bytecode
+  compilation, and a real smoke is the integration gate.
+
+### Decision
+
+Allowed to proceed to the four-GPU low10x20 development evaluation. The result
+is diagnostic unless its episode manifests are matched to the Motion-on
+baseline.

@@ -564,3 +564,29 @@ only step2000. This run therefore uses the surviving official step2000
 checkpoint and must not be presented as a same-checkpoint causal comparison
 against 146/200. Its purpose is to establish a new, reproducible step2000
 reference and collect the evidence needed to calibrate the next live policy.
+
+## Motion-Jerk Stratified Verification
+
+The official-step2000 Motion-on run improves direct draft from 121/200 to
+136/200, but raises the full-teacher action rate to 20.87%. Raw latent motion
+is task-biased: `place_can_basket` triggers 17 full-teacher actions without a
+quality gain, while `hanging_mug` gains four successes. Existing telemetry
+shows that relative action jerk, `jerk_rms / max(velocity_rms, 0.01)`, separates
+successful and failed high-motion hanging rounds more strongly than raw motion.
+
+The opt-in Motion-Jerk policy keeps the existing motion threshold at 1.2. A
+high-motion draft with relative jerk at least 1.3 follows the unchanged direct
+teacher fallback. A smoother high-motion draft is not accepted directly: it
+must pass both existing tau probes at a stricter 0.10 endpoint threshold, with
+no gripper-consensus failure. A strict full-chunk pass executes only the first
+16 actions and replans from a new observation; every other outcome falls back
+to the teacher. Motion below 1.2 uses the frozen K2 threshold 0.15 path.
+
+The development test uses official step2000 v1/a2 draft, LingBot v2/a4
+teacher, fixed K2 tau 50/100, PF20, gripper consensus/fallback, and no
+Progressive-K or repair. It runs all ten low10 tasks for 20 trials each across
+four development GPUs. Promotion requires no runtime/cache error, aggregate
+success above the step2000 Motion-on reference (136/200), `hanging_mug` no
+worse than 4/20, no task regression larger than 2/20, and a lower full-teacher
+action rate. The experiment is diagnostic if its scenes are not
+manifest-matched; no causal claim is made from unmatched episode differences.

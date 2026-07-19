@@ -351,6 +351,9 @@ def main() -> None:
     parser.add_argument("--delayed-error-consecutive", type=int, default=2)
     parser.add_argument("--delayed-error-teacher-rounds", type=int, default=2)
     parser.add_argument("--video-motion-gate-threshold", type=float, default=0.0)
+    parser.add_argument("--video-motion-jerk-gate-threshold", type=float, default=0.0)
+    parser.add_argument("--video-motion-strict-verify-threshold", type=float, default=0.10)
+    parser.add_argument("--video-motion-strict-prefix", type=int, default=16)
     parser.add_argument("--gripper-full-window", type=int, default=1)
     parser.add_argument("--gripper-consensus", action="store_true")
     parser.add_argument(
@@ -403,6 +406,11 @@ def main() -> None:
         "--delayed-error-consecutive", str(args.delayed_error_consecutive),
         "--delayed-error-teacher-rounds", str(args.delayed_error_teacher_rounds),
         "--video-motion-gate-threshold", str(args.video_motion_gate_threshold),
+        "--video-motion-jerk-gate-threshold", str(
+            args.video_motion_jerk_gate_threshold),
+        "--video-motion-strict-verify-threshold", str(
+            args.video_motion_strict_verify_threshold),
+        "--video-motion-strict-prefix", str(args.video_motion_strict_prefix),
         "--gripper-full-window", str(args.gripper_full_window),
         "--adaptive-k-distance-threshold", str(
             args.adaptive_k_distance_threshold),
@@ -518,6 +526,11 @@ def main() -> None:
         "delayed_error_consecutive": args.delayed_error_consecutive,
         "delayed_error_teacher_rounds": args.delayed_error_teacher_rounds,
         "video_motion_gate_threshold": args.video_motion_gate_threshold,
+        "video_motion_jerk_gate_threshold": args.video_motion_jerk_gate_threshold,
+        "video_motion_strict_verify_threshold": (
+            args.video_motion_strict_verify_threshold
+        ),
+        "video_motion_strict_prefix": args.video_motion_strict_prefix,
         "gripper_full_window": args.gripper_full_window,
         "gripper_consensus": args.gripper_consensus,
         "teacher_gripper_fallback": args.teacher_gripper_fallback,

@@ -10,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import evaluation.robotwin.realtime_flash_policy as policy_module
 from evaluation.robotwin.realtime_flash_policy import (
     continuous_action_dynamics_stats,
+    relative_action_jerk,
     RealtimeFlashPolicy,
     adaptive_k_pass_candidate,
     first_gripper_switch,
@@ -34,6 +35,13 @@ def test_continuous_action_dynamics_stats_excludes_gripper_and_conditioned_steps
     assert np.isclose(stats["velocity_rms"], np.sqrt(46.0 / 42.0))
     assert np.isclose(stats["acceleration_rms"], np.sqrt(13.0 / 28.0))
     assert np.isclose(stats["jerk_rms"], np.sqrt(1.0 / 14.0))
+
+
+def test_relative_action_jerk_uses_velocity_floor():
+    assert np.isclose(
+        relative_action_jerk({"velocity_rms": 0.0, "jerk_rms": 0.02}),
+        2.0,
+    )
 
 
 def _action(switch_step=None, value=0.0):
@@ -1085,6 +1093,66 @@ def test_video_motion_gate_default_off_still_verifies():
 
     assert response["action_source"] == "draft_flash"
     assert [call for call in teacher.calls if call["kind"] == "verify"]
+
+
+def test_motion_jerk_smooth_high_motion_uses_strict_k2_and_short_prefix(tmp_path):
+    events = []
+    draft = _FakeModel("draft", events, video_motion_global=1.3)
+    teacher = _FakeModel("teacher", events)
+    log_path = tmp_path / "metrics.jsonl"
+    policy = RealtimeFlashPolicy(
+        draft,
+        teacher,
+        pf_interval=20,
+        video_motion_gate_threshold=1.2,
+        video_motion_jerk_gate_threshold=1.3,
+        video_motion_strict_verify_threshold=0.10,
+        video_motion_strict_prefix=16,
+        log_path=log_path,
+        rng=np.random.default_rng(7),
+    )
+    policy.infer({"reset": True, "prompt": "test task"})
+    initial = policy.infer(_action_request())
+    policy.infer(_cache_request("anchor", initial["action"]))
+
+    response = policy.infer(_action_request())
+
+    verify = next(call for call in teacher.calls if call["kind"] == "verify")
+    record = json.loads(log_path.read_text().splitlines()[-1])
+    assert verify["request"]["threshold"] == 0.10
+    assert response["action_source"] == "draft_flash"
+    assert response["accepted_prefix"] == 16
+    assert record["motion_jerk_route"] == "strict_k2"
+
+
+def test_motion_jerk_rough_high_motion_keeps_direct_teacher_fallback(tmp_path):
+    events = []
+    draft = _FakeModel("draft", events, video_motion_global=1.3)
+    trace = np.arange(32, dtype=np.float32) % 2
+    draft.action_latent[0, :14, :, :, 0] = trace.reshape(2, 16)
+    teacher = _FakeModel("teacher", events)
+    log_path = tmp_path / "metrics.jsonl"
+    policy = RealtimeFlashPolicy(
+        draft,
+        teacher,
+        pf_interval=20,
+        video_motion_gate_threshold=1.2,
+        video_motion_jerk_gate_threshold=1.3,
+        log_path=log_path,
+        rng=np.random.default_rng(7),
+    )
+    policy.infer({"reset": True, "prompt": "test task"})
+    initial = policy.infer(_action_request())
+    policy.infer(_cache_request("anchor", initial["action"]))
+
+    response = infer_with_replan(policy, _action_request())
+
+    teacher_verifies = [call for call in teacher.calls if call["kind"] == "verify"]
+    record = json.loads(log_path.read_text().splitlines()[-2])
+    assert not teacher_verifies
+    assert record["motion_jerk_ratio"] >= 1.3
+    assert record["motion_jerk_route"] == "teacher"
+    assert response["full_reason"] == "video_motion_risk"
 
 
 def test_zero_prefix_replans_same_observation_without_cache_update():

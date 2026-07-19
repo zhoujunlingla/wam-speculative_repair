@@ -166,6 +166,26 @@ def continuous_action_dynamics_stats(
     }
 
 
+def relative_action_jerk(
+    dynamics: dict,
+    *,
+    velocity_floor: float = 0.01,
+) -> float:
+    """Return scale-normalized jerk for routing already-computed draft dynamics."""
+
+    if not np.isfinite(velocity_floor) or velocity_floor <= 0:
+        raise ValueError("velocity_floor must be positive")
+    velocity = dynamics.get("velocity_rms")
+    jerk = dynamics.get("jerk_rms")
+    if velocity is None or jerk is None:
+        raise ValueError("velocity_rms and jerk_rms are required")
+    velocity = float(velocity)
+    jerk = float(jerk)
+    if not np.isfinite(velocity) or not np.isfinite(jerk) or velocity < 0 or jerk < 0:
+        raise ValueError("velocity_rms and jerk_rms must be finite and non-negative")
+    return jerk / max(velocity, float(velocity_floor))
+
+
 def longest_safe_prefix(
     distances: np.ndarray,
     threshold: float,
@@ -381,6 +401,9 @@ class RealtimeFlashPolicy:
         delayed_error_consecutive: int = 2,
         delayed_error_teacher_rounds: int = 2,
         video_motion_gate_threshold: float = 0.0,
+        video_motion_jerk_gate_threshold: float = 0.0,
+        video_motion_strict_verify_threshold: float = 0.10,
+        video_motion_strict_prefix: int = 16,
         adaptive_k_shadow: bool = False,
         adaptive_k_live: bool = False,
         adaptive_k_distance_threshold: float = 0.05,
@@ -413,6 +436,22 @@ class RealtimeFlashPolicy:
             raise ValueError("delayed-error recovery values must be positive")
         if not np.isfinite(video_motion_gate_threshold) or video_motion_gate_threshold < 0:
             raise ValueError("video_motion_gate_threshold must be non-negative")
+        if (
+            not np.isfinite(video_motion_jerk_gate_threshold)
+            or video_motion_jerk_gate_threshold < 0
+        ):
+            raise ValueError("video_motion_jerk_gate_threshold must be non-negative")
+        if (
+            not np.isfinite(video_motion_strict_verify_threshold)
+            or video_motion_strict_verify_threshold < 0
+        ):
+            raise ValueError("video_motion_strict_verify_threshold must be non-negative")
+        if video_motion_strict_prefix <= 0 or video_motion_strict_prefix % action_per_frame:
+            raise ValueError(
+                "video_motion_strict_prefix must be a positive action-frame multiple"
+            )
+        if video_motion_jerk_gate_threshold > 0 and video_motion_gate_threshold <= 0:
+            raise ValueError("motion-jerk routing requires the video motion gate")
         if (
             not np.isfinite(adaptive_k_distance_threshold)
             or adaptive_k_distance_threshold < 0
@@ -452,6 +491,13 @@ class RealtimeFlashPolicy:
         self.delayed_error_consecutive = int(delayed_error_consecutive)
         self.delayed_error_teacher_rounds = int(delayed_error_teacher_rounds)
         self.video_motion_gate_threshold = float(video_motion_gate_threshold)
+        self.video_motion_jerk_gate_threshold = float(
+            video_motion_jerk_gate_threshold
+        )
+        self.video_motion_strict_verify_threshold = float(
+            video_motion_strict_verify_threshold
+        )
+        self.video_motion_strict_prefix = int(video_motion_strict_prefix)
         self.adaptive_k_shadow = bool(adaptive_k_shadow)
         self.adaptive_k_live = bool(adaptive_k_live)
         self.adaptive_k_distance_threshold = float(
@@ -807,8 +853,22 @@ class RealtimeFlashPolicy:
             global_motion = float(video_motion_stats["global_mean"])
             if not np.isfinite(global_motion):
                 raise ValueError("draft global video motion must be finite")
-        if self.video_motion_gate_threshold > 0:
-            if global_motion >= self.video_motion_gate_threshold:
+        high_motion = bool(
+            self.video_motion_gate_threshold > 0
+            and global_motion >= self.video_motion_gate_threshold
+        )
+        motion_jerk_ratio = None
+        smooth_high_motion = False
+        if high_motion:
+            if self.video_motion_jerk_gate_threshold > 0:
+                try:
+                    motion_jerk_ratio = relative_action_jerk(action_dynamics_stats)
+                except ValueError:
+                    motion_jerk_ratio = float("inf")
+                smooth_high_motion = (
+                    motion_jerk_ratio < self.video_motion_jerk_gate_threshold
+                )
+            if not smooth_high_motion:
                 self.force_full_reason = "video_motion_risk"
                 self.last_source = "replan"
                 self.round_id += 1
@@ -827,6 +887,8 @@ class RealtimeFlashPolicy:
                     executed_action_hash=None,
                     video_motion_stats=video_motion_stats,
                     action_dynamics_stats=action_dynamics_stats,
+                    motion_jerk_ratio=motion_jerk_ratio,
+                    motion_jerk_route="teacher",
                     video_motion_gate_threshold=self.video_motion_gate_threshold,
                     elapsed_sec=time.perf_counter() - start,
                 )
@@ -851,7 +913,11 @@ class RealtimeFlashPolicy:
             verify_action=True,
             action_latent=action_latent,
             verify_noise=self.rng.standard_normal(action_latent.shape).astype(np.float32),
-            threshold=self.threshold,
+            threshold=(
+                self.video_motion_strict_verify_threshold
+                if smooth_high_motion
+                else self.threshold
+            ),
             tau_timesteps=self.tau_timesteps,
             frame_st_id=self.frame_st_id,
             gripper_consensus=self.gripper_consensus,
@@ -871,6 +937,8 @@ class RealtimeFlashPolicy:
             ).astype(np.float32)
         verify_response = self._call(self.teacher, verify_request)
         verified_prefix = self._accepted_prefix(action_latent, verify_response, horizon)
+        if smooth_high_motion and verified_prefix < horizon:
+            verified_prefix = 0
         adaptive_telemetry, adaptive_prediction = adaptive_k_pass_candidate(
             verify_response,
             action,
@@ -901,6 +969,13 @@ class RealtimeFlashPolicy:
             ),
             "video_motion_stats": video_motion_stats,
             "action_dynamics_stats": action_dynamics_stats,
+            "motion_jerk_ratio": motion_jerk_ratio,
+            "motion_jerk_route": "strict_k2" if smooth_high_motion else "normal_k2",
+            "motion_verify_threshold": (
+                self.video_motion_strict_verify_threshold
+                if smooth_high_motion
+                else self.threshold
+            ),
             "world_flow_evidence": verify_response.get(
                 "world_flow_evidence"
             ),
@@ -961,6 +1036,16 @@ class RealtimeFlashPolicy:
         if self.gripper_consensus and gripper_consensus_failure is not None:
             self.force_full_reason = "gripper_consensus"
             self.gripper_full_rounds_left = self.gripper_full_window
+
+        if smooth_high_motion:
+            if gripper_consensus_failure is not None:
+                accepted_prefix = 0
+                self.force_full_reason = "video_motion_strict_gripper"
+            elif verified_prefix == horizon:
+                accepted_prefix = min(
+                    accepted_prefix,
+                    self.video_motion_strict_prefix,
+                )
 
         self.round_id += 1
         if accepted_prefix == 0:

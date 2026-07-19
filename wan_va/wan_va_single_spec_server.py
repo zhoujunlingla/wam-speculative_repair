@@ -152,6 +152,9 @@ def build_policy(args: argparse.Namespace):
         delayed_error_consecutive=args.delayed_error_consecutive,
         delayed_error_teacher_rounds=args.delayed_error_teacher_rounds,
         video_motion_gate_threshold=args.video_motion_gate_threshold,
+        video_motion_jerk_gate_threshold=args.video_motion_jerk_gate_threshold,
+        video_motion_strict_verify_threshold=args.video_motion_strict_verify_threshold,
+        video_motion_strict_prefix=args.video_motion_strict_prefix,
         adaptive_k_shadow=args.adaptive_k_shadow,
         adaptive_k_live=args.adaptive_k_live,
         adaptive_k_distance_threshold=args.adaptive_k_distance_threshold,
@@ -195,6 +198,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--delayed-error-consecutive", type=int, default=2)
     parser.add_argument("--delayed-error-teacher-rounds", type=int, default=2)
     parser.add_argument("--video-motion-gate-threshold", type=float, default=0.0)
+    parser.add_argument("--video-motion-jerk-gate-threshold", type=float, default=0.0)
+    parser.add_argument("--video-motion-strict-verify-threshold", type=float, default=0.10)
+    parser.add_argument("--video-motion-strict-prefix", type=int, default=16)
     parser.add_argument("--adaptive-k-shadow", action="store_true")
     parser.add_argument("--adaptive-k-live", action="store_true")
     parser.add_argument("--adaptive-k-distance-threshold", type=float, default=0.05)

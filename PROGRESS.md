@@ -170,3 +170,192 @@ teacher quality with materially lower teacher use.
 - The feature remains default-off for future analysis, but it is not promoted.
   Four-task TN=10 now evaluates the motion-only policy before any further
   routing or adaptive-K change.
+# 2026-07-16: Adaptive-K paired validation branch
+
+- Created `experiment/adaptive-k-paired-20260715` directly from frozen
+  Motion-on commit `46f0c38`.
+- Migrated shadow-only K1 pass/fail candidate certificates. Shadow still runs
+  the unchanged K=2 verifier and cannot alter routing or actions.
+- Added fail-closed RoboTwin scene manifests, episode-local verifier/video/
+  action RNG streams, executed-action hashes, actual KV cache checksums, and a
+  paired trace comparator.
+- Fixed review findings where client override keys were dropped, empty traces
+  passed equivalence, cache hashes did not inspect KV tensors, fail
+  certificates ignored gripper routing, and reruns appended stale traces.
+- Live adaptive-K remains intentionally absent. Next gate is remote pytest,
+  manifest TN=1 smoke, then 20-scene off/shadow paired evaluation for
+  `hanging_mug` and `open_microwave`.
+
+## 2026-07-16: TN=1 shadow isolation failure
+
+- The first same-manifest off/shadow smoke failed the exact-equivalence gate.
+  Shadow produced one certificate conflict; the first cache mismatch appeared
+  at trace index 29 and the following draft action diverged at decision 17.
+- The root cause was shadow-only CUDA tensor work inside the shared
+  draft/teacher process. Read-only verifier inputs were insufficient because
+  the extra allocations and kernels changed later allocator/workspace state.
+- The fail-certificate matcher also compared an internal first-failure witness,
+  even when K1 and K2 produced the same final policy fallback. This was not a
+  policy-level certificate.
+- The corrective implementation keeps the K=2 teacher request and CUDA path
+  byte-for-byte identical between off and shadow. A host-only policy helper now
+  derives only conservative K1 pass candidates from returned CPU telemetry and
+  compares their predicted action hash, prefix, source, and fallback reason
+  with the completed K=2 policy decision.
+- Fail candidates are intentionally omitted. The comparator now fails closed
+  on malformed matches and requires nonzero candidate coverage in addition to
+  zero conflicts and exact action/cache traces.
+- Formal TN=20 and live adaptive-K remain blocked. The next action is remote
+  tests followed by a repeat of the same TN=1 manifest on the same GPU.
+
+## 2026-07-16: Baseline reproducibility failure
+
+- The corrected host-only shadow produced one pass candidate, one exact match,
+  and zero certificate conflicts, but the separate off/shadow executions still
+  diverged at cache trace 29 and action decision 17.
+- A third run using adaptive-off, the same commit, GPU2, manifest, and seeds
+  also diverged from the first off run at exactly cache trace 29 / decision 17.
+  This falsifies the hypothesis that shadow instrumentation caused the split.
+- `attn_mode=torch` currently leaves CUDA SDPA backend selection unconstrained.
+  Cross-process bitwise comparison is invalid until the baseline itself is
+  deterministic.
+- An audit-only deterministic profile fixed cuBLAS workspace behavior,
+  deterministic algorithms/cuDNN, disabled TF32, and forced math SDPA. Even
+  then, off/off diverged by cache trace 27 / action decision 15.
+- Cross-process closed-loop bitwise comparison is rejected. Formal validation
+  now uses the same-run counterfactual certificate against the canonical K=2
+  decision, with nonzero coverage and zero conflicts. Live remains blocked
+  until both frozen TN=20 manifests pass that gate.
+
+## 2026-07-16: Live progressive-K implementation gate
+
+- The two frozen TN=20 shadow manifests produced 554 conservative K1
+  certificates over 1,119 verifier calls (49.5% coverage), all matching the
+  completed K2 policy decision with zero certificate conflicts. The implied
+  verifier-forward reduction is 24.8%.
+- Implemented an opt-in real `K=1 -> gray-zone K=2` path. It stops after tau50
+  only for a full 32-action prefix with maximum normalized distance at most
+  0.05, exact phase agreement, and no latent, draft, or decoded gripper switch.
+  All other calls reuse the same draft/noise/cache and continue to tau100.
+- Live mode is incompatible with the K2 flow-error budget and fails at config
+  validation instead of silently changing its semantics.
+- Review fixed effective-K postprocessing, request injection, and timing bias.
+  Remote tests passed in the same Torch 2.9 path used by the server; the focused
+  server-method test passed both K1 and K2 routes.
+- An earlier test collection failure was caused by using host Torch, which
+  lacks the serving runtime's composable FSDP API. Future server tests must use
+  `env/torch29_clean_pkgs`, matching `runtime_env()`.
+- Next evidence is a GPU6/7 TN=1 paired speed smoke. This is speed telemetry,
+  not a success-rate claim.
+
+### Active GPU6/7 speed smoke
+
+- Commit: `8e7b7fb`.
+- Task/manifest: `open_microwave`, first scene from the frozen TN=20 manifest.
+- GPU6 fixed-K2 screen: `progk_k2_g6`; run/result label
+  `20260716_progressivek_speed_smoke_k2_open_tn1_g6`.
+- GPU7 live progressive-K screen: `progk_live_g7`; run/result label
+  `20260716_progressivek_speed_smoke_live_open_tn1_g7`.
+- Both runs use Motion-on controls (`PF=20`, motion threshold 1.2, gripper
+  consensus, delta 0.15, tau 50/100), paired RNG, and verifier CUDA-event
+  profiling. The only policy difference is `--adaptive-k-live` on GPU7.
+- Early runtime evidence after three verifier calls: fixed K is `[2,2,2]`;
+  live effective K is `[1,2,1]`. The first warmup-contaminated sample is not a
+  speed claim; the first later K1 sample was about 46 ms versus a nearby K2
+  sample around 77 ms. Final p50 waits for episode completion.
+
+### Completed smoke result
+
+- Both runs completed `open_microwave 1/1` with `client_rc=0`; source,
+  accepted-prefix, verified-prefix, fallback-reason, frame-id, and full-reason
+  sequences matched for all 17 action rounds.
+- Live progressive K certified 14 of 16 verifier calls at K1 (87.5%). Teacher
+  verifier forwards fell from 32 to 18, a 43.75% reduction, with mean effective
+  K 1.125.
+- Verifier p50 fell from 78.3 ms to 46.7 ms (40.4%). Draft-round p50 fell from
+  396.4 ms to 382.9 ms (3.4%), while its mean fell from 400.5 ms to 377.2 ms
+  (5.8%). Teacher action-source remained identical at 1/17 = 5.88%.
+- This passes the functional and verifier-speed checks, but the model-path p50
+  does not yet meet the predeclared 5% promotion gate. TN=1 and different GPUs
+  are insufficient for a final speed claim. The next test should cross fixed
+  K/live assignments on the same GPU or run sequentially on one exclusive GPU.
+- The completed result was sent to the configured Feishu group.
+
+### Active same-GPU crossover
+
+- The first screen wrapper exited before creating any run because its shared
+  shell variable was not exported into the nested `bash -lc`. It consumed no
+  GPU work and produced no trial. The relaunch expands every argument inside
+  each screen command; do not reuse parent-shell variables in nested screens.
+- GPU6 screen `progk_cross_g6` runs fixed K2 then live progressive K. Result
+  labels are `20260716_progk_cross_g6_k2_open_tn3` and
+  `20260716_progk_cross_g6_live_open_tn3`.
+- GPU7 screen `progk_cross_g7` runs live progressive K then fixed K2. Result
+  labels are `20260716_progk_cross_g7_live_open_tn3` and
+  `20260716_progk_cross_g7_k2_open_tn3`.
+- All four runs use the same first three scenes from the frozen
+  `open_microwave` manifest and the same Motion-on controls. This AB/BA order
+  is intended to separate adaptive-K savings from GPU and warm-cache order.
+
+### Completed same-GPU crossover result
+
+- All four TN=3 runs completed without runtime/cache/render errors. On GPU6,
+  fixed K2 and live progressive K both scored 3/3. On GPU7, both scored 2/3.
+  Thus each same-GPU comparison preserved the observed task outcome.
+- GPU6: verifier p50 80.6 -> 42.7 ms (-47.0%); draft-round p50
+  429.6 -> 393.7 ms (-8.3%), mean 440.8 -> 400.4 ms (-9.2%).
+- GPU7: verifier p50 81.0 -> 43.0 ms (-47.0%); draft-round p50
+  428.8 -> 397.7 ms (-7.3%), mean 440.8 -> 411.1 ms (-6.8%).
+- Across live runs, 136/184 verifier calls exited after K1 (73.9%). Effective
+  teacher verifier forwards were 232 instead of 368, a 37.0% reduction.
+- Teacher action-source remained approximately unchanged: 9.47% live versus
+  9.28% K2 on GPU6, and exactly 9.18% for both on GPU7. Progressive K reduces
+  verification compute; it does not claim to reduce full-teacher routing.
+- The speed gate passes on both GPUs: model-path p50 improves by more than the
+  predeclared 5%, not merely verifier micro-latency. Live progressive K may
+  proceed to a larger frozen-manifest quality check before becoming default.
+
+### Active frozen-manifest quality gate
+
+- GPU5 screen `progk_q_live_h_g5`: live progressive K on `hanging_mug TN=20`,
+  result label `20260716_progk_quality_live_hanging_tn20_g5`.
+- GPU6 screen `progk_q_live_o_g6`: live progressive K on
+  `open_microwave TN=20`, result label
+  `20260716_progk_quality_live_open_tn20_g6`.
+- GPU7 screen `progk_q_k2_g7`: fixed K2 on `hanging_mug TN=20`, then fixed K2
+  on `open_microwave TN=20`; result labels
+  `20260716_progk_quality_k2_hanging_tn20_g7` and
+  `20260716_progk_quality_k2_open_tn20_g7`.
+- Each live/control pair uses the same frozen manifest, Motion-on controls,
+  model checkpoints, and policy seed. The only behavior difference is live
+  K1 early exit. Adaptive threshold changes remain locked until this quality
+  comparison completes.
+- GPU2 became free before GPU7 finished the Hanging control. The Open K2
+  control was therefore started immediately on GPU2 in screen
+  `progk_q_k2_o_g2`, result label
+  `20260716_progk_quality_k2_open_tn20_g2`. A nonempty cancellation sentinel
+  was placed in the previously queued GPU7 Open run root so the chained command
+  exits instead of duplicating the same 20 episodes after Hanging completes.
+
+### Completed frozen-manifest quality result
+
+- Live progressive K scored `hanging_mug 4/20` and `open_microwave 11/20`,
+  totaling 15/40. Fixed K2 scored 5/20 and 11/20, totaling 16/40. The aggregate
+  delta is -1/40 and within the predeclared two-success tolerance.
+- Paired outcomes were highly stochastic rather than a one-way live
+  regression: live-only successes = 8, K2-only successes = 9 across the 40
+  fixed scenes (exact sign/McNemar evidence is null; two-sided p=1.0). Open had
+  five live-only and five K2-only successes despite equal totals.
+- Live K1 coverage was 567/1,116 = 50.8%. Effective verifier forwards were
+  1,665 instead of 2,232, a 25.4% reduction. Hanging coverage was only 10.8%,
+  while Open coverage was 78.4%, confirming that contact-heavy phases fail
+  closed to K2.
+- Pooled verifier p50 fell 81.3 -> 50.0 ms (-38.5%). Draft-round p50 fell
+  436.6 -> 421.0 ms (-3.6%), and mean fell 443.2 -> 421.0 ms (-5.0%).
+- Teacher action-source was 17.39% live versus 16.63% K2; this small increase
+  follows divergent closed-loop trajectories because progressive K does not
+  alter the full-teacher routing rule.
+- The larger quality gate passes for continuing research: no significant
+  quality regression, no runtime/cache error, and material verifier/NFE
+  savings. Progressive K is a compute optimization, not evidence of lower
+  full-teacher use. Adaptive-threshold work may now begin as a separate change.

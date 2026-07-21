@@ -167,6 +167,59 @@ Decision: allowed to proceed to one RoboTwin smoke. Formal evaluation requires
 nonzero budget telemetry, correct reset after a budget-triggered full round,
 and no cache/reset/render error.
 
+## Live Progressive-K Speed Gate Review
+
+### Scope
+
+- Run tau 50 first and stop at K=1 only for a conservative full-chunk
+  certificate.
+- Reuse the same draft, Gaussian probe, frame id, and read-only teacher cache
+  when an uncertified sample escalates to tau 100.
+- Add opt-in CUDA-event profiling and effective-K telemetry. Defaults preserve
+  the frozen Motion-on policy.
+
+### Findings
+
+No blocking code finding remains before a real smoke.
+
+Fixed during review:
+
+1. K=1 early exit originally left two postprocessing loops sized by requested
+   K=2. They now use `effective_k`, preventing empty-row gripper/phase access.
+2. Request dictionaries could carry caller-provided adaptive fields into an
+   off run. The policy now removes all such fields and adds only configured
+   values.
+3. A K=1 distance cannot update the existing K=2 flow-error budget faithfully.
+   Live adaptive K now fails closed when either flow-budget option is enabled.
+4. Per-probe host synchronization biased K=2 timing. Profiling now records CUDA
+   events and performs one synchronization after finalization.
+5. The first unit-test command used the host Torch instead of the serving
+   runtime and failed on `fully_shard`. Re-running with
+   `env/torch29_clean_pkgs`, exactly as the launcher does, passed.
+
+Residual experiment risk is medium. The K=1 certificate is an empirical
+counterfactual validated on frozen traces, not a proof that tau 100 can never
+change the outcome. The live path is therefore allowed only as a speed smoke;
+it is not promoted to a quality benchmark until effective-K, cache safety, and
+latency gates pass.
+
+### Verification
+
+- `git diff --check`: passed.
+- `py_compile` for policy, launcher, both servers, shared certificate helper,
+  and server test: passed.
+- Remote policy/specverify/progressive-server test command: exit code 0 in the
+  serving Torch 2.9 runtime.
+- Focused real server-method test: `2 passed`, covering certified K=1 and
+  decoded-gripper escalation to K=2.
+
+### Decision
+
+Allowed to run a TN=1 paired speed smoke on free GPU6/7. Promotion requires a
+nonzero K=1 hit rate, no cache/reset/runtime error, at least 15% lower verifier
+latency, and at least 5% lower model-path latency. Otherwise live adaptive K is
+rejected without changing the Motion-on baseline.
+
 ## Previous-Gripper State Parity Fix Review
 
 The audit found a blocking migration gap: the reference Realtime-VLA-FLASH
@@ -432,3 +485,269 @@ Verification: remote focused suite `37 passed`; local `py_compile` and
 Decision: allowed to run four-task TN=3 with immediate motion threshold 1.2,
 flow threshold 0.4, low-motion ceiling 0.5, no delayed recovery/burst, PF20,
 K=2 endpoint verification, and gripper consensus.
+# Adaptive-K Paired Shadow Review (2026-07-16)
+
+## Decision
+
+Allowed to proceed to manifest and TN=1 off/shadow smoke only. Live adaptive-K
+is not implemented and is not approved by this review.
+
+## Findings
+
+- **P1 fixed:** RoboTwin override keys were initially lost when the client
+  reloaded `demo_clean.yml`. `scene_manifest_in/out`, `manifest_only`, and
+  `paired_rng` are now explicitly copied into the task args.
+- **P1 fixed:** the paired comparator initially accepted empty/unhashed traces.
+  It now rejects empty traces, missing cache hashes, missing executed-action
+  hashes, and traces without action decisions.
+- **P1 fixed:** the first cache audit hashed only mutation requests. Audit mode
+  now also reads active draft and teacher KV cache tensors and hashes per-layer
+  size, ID, prediction mask, sum, squared sum, and absolute sum. The request
+  chain remains as an independent logical-cache check.
+- **P1 fixed:** fail-certificate comparison initially ignored second-probe
+  gripper routing. A fail match now also requires identical reconstructed
+  switch presence and gripper-consensus failure index.
+- **P2 fixed:** ordinary runs would have acquired a fixed verifier seed. The
+  runner now passes `--seed` only when explicitly requested; paired episode
+  streams are controlled by the manifest seed on reset.
+- **P2 fixed:** existing nonempty policy traces are rejected instead of
+  appended, preventing contaminated paired results.
+
+## Residual Risk
+
+- The K1 pass condition is an empirical candidate certificate, not a theorem:
+  tau-50 below 0.05 does not mathematically bound tau-100 below 0.15. Zero
+  conflict on the frozen manifest is required by the requested gate, but a
+  later live implementation must retain deterministic full-K audits and must
+  not claim distributional equivalence outside the audited scenes.
+- The KV checksum is a compact numerical fingerprint rather than a bytewise
+  copy of every cache tensor. It reads actual cache state and is suitable for
+  detecting this verifier-mutation regression without transferring the full
+  multi-layer cache to CPU.
+- Manifest replay intentionally restores the recorded prompt instead of
+  rerunning expert planning. Scene actor/articulation state, RoboTwin commit,
+  tracked diff, episode metadata digest, and manifest file digest are all
+  validated fail closed.
+
+## Checks
+
+- `python3 -m py_compile` passed for all changed runtime, script, and test files.
+- `git diff --check` passed.
+- Focused policy tests for episode RNG replay and shadow forwarding passed via
+  direct Python invocation.
+- Synthetic paired trace and adaptive summary checks passed.
+- Local `pytest` is unavailable; the full focused pytest suite must pass in the
+  A800 runtime before any RoboTwin smoke.
+
+## Adaptive-K Host-Only Corrective Review (2026-07-16)
+
+### Findings
+
+- **P1 fixed:** shadow-only teacher-server tensor work changed later cache and
+  action hashes despite leaving the immediate K=2 decision unchanged. Adaptive
+  candidate logic now runs in the policy after the unchanged K=2 response and
+  performs only NumPy/host operations. The obsolete adaptive branch and its
+  request parameters were deleted from the teacher server, making accidental
+  shadow CUDA execution impossible through this API.
+- **P1 fixed:** the previous fail certificate compared an internal failure
+  index instead of the final policy decision. Fail candidates are removed; the
+  remaining pass candidate predicts the exact source, full action hash, prefix,
+  and fallback reason.
+- **P1 fixed:** candidate matching previously happened before gripper fallback
+  fields were written. Matching now uses the completed response, so a gripper
+  fallback cannot be reported as a pass match.
+- **P1 fixed:** malformed certificate rows could be ignored by the comparator.
+  Every declared certificate must carry a strict boolean match.
+- **P2 fixed:** zero-conflict shadow runs with zero coverage could pass. The
+  comparator now also requires at least one declared shadow certificate.
+- **P1 fixed after independent review:** incoming action requests could retain
+  stale adaptive fields. The policy now strips both fields before constructing
+  the teacher request, in addition to the server-side branch deletion.
+- **P1 fixed after independent review:** malformed host telemetry could raise
+  only in shadow mode. Candidate parsing now abstains on nonintegral K values,
+  nonfinite/nonintegral prefixes, malformed arrays, reordered tau values,
+  threshold mismatch, or missing shared-noise semantics.
+- **P1 fixed after independent review:** the comparator accepted unknown/fail
+  kinds and orphan match values. Its only legal schemas are now `(None, None)`
+  and `("pass", bool)`, and any off-side certificate invalidates the run.
+- **P2 fixed after independent review:** a nominal K=2 response did not prove it
+  was the configured probe pair. Candidates now require exact K counters, tau
+  values and order, verifier threshold, and shared-noise flag.
+
+### Residual Risk
+
+- The pass condition remains an empirical candidate, not a proof about the
+  entire flow trajectory. Live mode is prohibited until both the repeated TN=1
+  and formal paired TN=20 traces are exactly equivalent with zero conflicts.
+- Host-only telemetry must remain derived from the unchanged K=2 response. No
+  adaptive flag may be forwarded into the teacher server during shadow runs.
+- The compact cache fingerprint is not bytewise, but off and shadow execute the
+  same audit operations and it already detected the original isolation failure.
+
+### Checks and Decision
+
+- Local `python3 -m py_compile` and `git diff --check` pass.
+- Direct policy checks cover request stripping, strict candidate parsing, and
+  final policy-log match/conflict behavior; a synthetic comparator smoke covers
+  identical off/shadow decisions with nonzero pass coverage.
+- Local pytest is unavailable and must be run in the A800 environment.
+- Decision: code may be pushed for remote tests and the same-manifest TN=1
+  rerun only. Formal TN=20 and live mode are not yet approved.
+
+## Deterministic Audit Profile Review (2026-07-16)
+
+### Evidence and Scope
+
+The same current commit, GPU2, manifest, and seeds produced an off/off split at
+the identical cache/action indices as off/shadow. The deterministic profile is
+therefore an experiment-validity repair, not an adaptive-K behavior change.
+
+### Review
+
+- The profile is activated only by the separate `--deterministic-audit` flag.
+  `--equivalence-audit` records action/cache hashes without changing kernels.
+  Ordinary training, evaluation, future live routing, and latency runs do not
+  receive `CUBLAS_WORKSPACE_CONFIG` or math-SDPA forcing.
+- The cuBLAS environment is set by the parent runner before the server process
+  imports torch. Torch deterministic algorithms, cuDNN determinism, TF32
+  disablement, and SDPA backend selection are then applied before model load.
+- Parent-shell cuBLAS settings are removed from every child environment; only
+  the audited server receives the fixed value. Direct audit-server launches
+  without that value fail closed before model construction.
+- The client process is unchanged, so the profile cannot alter RoboTwin physics
+  or rendering. Off/off must still pass; otherwise exact cross-process closed-
+  loop validation is not feasible and request replay is required.
+
+### Risks and Gate
+
+- Math SDPA is slower and may use more memory. These numbers are invalid for
+  the requested live 5% speed gate.
+- A deterministic-algorithm error is fail-closed and blocks the experiment; no
+  fallback to a nondeterministic backend is allowed.
+- Math SDPA still failed off/off reproducibility, so independent closed-loop
+  comparison is not a valid shadow gate. Allow formal same-run counterfactual
+  TN=20: every candidate must exactly match the canonical K=2 decision, coverage
+  must be nonzero, and conflicts must be zero. Live and latency claims remain
+  blocked.
+
+## World-Flow Progressive-K Evidence Review (2026-07-17)
+
+### Scope
+
+- Preserve the live Motion-on and Progressive-K decision path.
+- Add no-extra-forward continuous-action and cross-tau world-flow telemetry.
+- Add a four-GPU low10x20 ACP runner with strict artifact completeness gates.
+- Use the surviving official FlashWAM step2000 v1/a2 draft and LingBot v2/a4
+  teacher. The historical step3000 transformer was removed by the explicit
+  checkpoint cleanup, so this run is not a same-checkpoint comparison with the
+  historical Motion-on 146/200 result.
+
+### Findings Fixed
+
+1. K2 telemetry reductions and host copies originally sat inside the CUDA
+   verifier timer. They now run after the timer completes.
+2. Action/world telemetry could originally raise and terminate routing. Both
+   paths now fail open for policy behavior while the formal artifact gate fails
+   closed on missing or non-finite evidence.
+3. Conditioned first-frame actions originally polluted world-flow statistics.
+   The server now compares consistently masked tensors and excludes conditioned
+   frames from every reported midpoint, gap, and correction-direction value.
+4. CLI defaults were briefly changed to step2000. Historical step3000 defaults
+   are restored; the formal runner selects the step2000 config explicitly.
+5. The first model preflight accepted only a single safetensors file. It now
+   parses sharded index JSON and verifies every referenced nonempty shard, while
+   also accepting the draft's valid single-file transformer.
+6. The first merge gate could claim completion after a shard failure or empty
+   telemetry. Completion now requires all ten tasks at 20 valid trials, zero
+   shard failures, exact frozen policy parameters, nonzero verifier and
+   Progressive-K calls, closed K1/K2 evidence accounting, numeric K2 evidence,
+   and finite action/video telemetry for every draft or replan row.
+7. A malformed K1 row could claim available K2 evidence. Classification now
+   requires requested K=2 and effective K=2; only the explicit effective-K1
+   abstention is accepted as normal missing cross-tau evidence.
+8. The original action-dynamics test used constant gripper values and did not
+   prove exclusion. It now uses adversarial conditioned-frame and gripper
+   trajectories and checks the exact continuous-only velocity, acceleration,
+   and jerk values.
+9. Each task now has a six-hour fail-closed timeout, and the result records the
+   reviewed commit, exact model configs/paths, resolved transformer paths, and
+   the checkpoint comparability limitation.
+
+### Residual Risk
+
+- Cross-tau endpoint gap is an empirical solver-disagreement proxy, not a
+  calibrated uncertainty estimate. It remains telemetry-only in this run.
+- The step2000 draft establishes a new reference; success-rate deltas cannot be
+  attributed to Progressive-K by comparing against the deleted step3000 run.
+- Future MC-FCR thresholding or repair requires calibration from this evidence
+  and a separate reviewed live-policy change.
+
+### Verification
+
+- Local `git diff --check`: passed.
+- Local `bash -n scripts/acp_worldflow_progressive_low10.sh`: passed.
+- Local `py_compile` for all changed Python runtime and test files: passed.
+- Local synthetic source-summary, non-finite telemetry, and exact
+  continuous-action isolation checks: passed.
+- Independent code and ACP reviews found the issues listed above; all blocking
+  findings were addressed.
+- A800 serving environment, with the same Torch package path and
+  `DIFFUSERS_DISABLE_BITSANDBYTES=1` as the launcher: `62 passed` in 34.92s.
+  An earlier collection attempt without that launcher variable failed in the
+  environment's system bitsandbytes/triton import and is not counted as a code
+  test.
+
+### Decision
+
+Allowed to commit and deploy a clean checkout. The formal four-GPU low10x20 run
+may start only when `CODE_COMMIT` exactly matches that clean checkout and model
+preflight passes. It is considered successfully started only after all four
+shards load both models, pass SAPIEN rendering, enter real RoboTwin trials, and
+write nonempty verifier traces; ACP `RUNNING` alone is insufficient evidence.
+## 2026-07-19 Motion-Jerk Stratified Verification
+
+### Findings
+
+No blocking correctness finding remains.
+
+- Risk: medium. The new live route changes high-motion actions, but it is
+  opt-in and fails closed to the existing full-teacher path when dynamics
+  telemetry is missing, non-finite, or above the relative-jerk threshold.
+- The legacy Motion-on behavior is unchanged when
+  `video_motion_jerk_gate_threshold=0`.
+- The strict route cannot enlarge the verifier prefix: it requires a full
+  32-action K2 pass at threshold 0.10, rejects any gripper-consensus failure,
+  and caps execution at 16 actions.
+- The route reuses zero-extra-forward draft dynamics telemetry and the existing
+  read-only teacher verifier. It does not mutate either model cache during
+  verification.
+- CLI parameters are propagated through the task launcher and single-server
+  entry point and persisted in each task summary.
+
+### Verification
+
+- `python -m py_compile` passed for all changed Python files.
+- Host-only policy and launcher tests passed: 48 tests.
+- `git diff --check` passed.
+- Full server tests could not be collected under `/usr/bin/python` because that
+  interpreter lacks `diffusers`; the changed server entry point passed bytecode
+  compilation, and a real smoke is the integration gate.
+
+### Decision
+
+Allowed to proceed to the four-GPU low10x20 development evaluation. The result
+is diagnostic unless its episode manifests are matched to the Motion-on
+baseline.
+# ACP Low10x20 launcher review
+
+- Added a four-GPU formal launcher derived from the validated Official-step2000
+  Motion-on launcher. It preserves the model/config, K2, tau, PF, gripper,
+  renderfix, timeout, sharding, and merged-summary paths.
+- The launcher passes and then validates all three Motion-Jerk controls in every
+  task summary: jerk ratio 1.3, strict verifier delta 0.10, and strict prefix 16.
+- `GPU_COUNT=4` and `TEST_NUM=20` are fail-closed requirements, so this command
+  cannot silently become a smaller smoke test or a differently sharded run.
+- `bash -n scripts/acp_motion_jerk_step2000_low10_4gpu.sh`: passed.
+
+Decision: allowed to submit. Risk remains experimental policy quality, not
+launcher/configuration ambiguity.

@@ -7,13 +7,41 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+import evaluation.robotwin.realtime_flash_policy as policy_module
 from evaluation.robotwin.realtime_flash_policy import (
+    continuous_action_dynamics_stats,
+    relative_action_jerk,
     RealtimeFlashPolicy,
+    adaptive_k_pass_candidate,
     first_gripper_switch,
     infer_with_replan,
     longest_safe_prefix,
     normalized_l2_step_distances,
 )
+
+
+def test_continuous_action_dynamics_stats_excludes_gripper_and_conditioned_steps():
+    action = np.zeros((1, 30, 2, 4, 1), dtype=np.float32)
+    action[0, 0, 0, :, 0] = np.array([100.0, -100.0, 100.0, -100.0])
+    action[0, 0, 1, :, 0] = np.array([0.0, 1.0, 4.0, 10.0])
+    action[0, 28:30, :, :, 0] = np.array(
+        [-1000.0, 1000.0, -1000.0, 1000.0] * 2
+    ).reshape(2, 4)
+
+    stats = continuous_action_dynamics_stats(action, skip_steps=4)
+
+    assert stats["action_steps"] == 4
+    assert stats["skipped_conditioned_steps"] == 4
+    assert np.isclose(stats["velocity_rms"], np.sqrt(46.0 / 42.0))
+    assert np.isclose(stats["acceleration_rms"], np.sqrt(13.0 / 28.0))
+    assert np.isclose(stats["jerk_rms"], np.sqrt(1.0 / 14.0))
+
+
+def test_relative_action_jerk_uses_velocity_floor():
+    assert np.isclose(
+        relative_action_jerk({"velocity_rms": 0.0, "jerk_rms": 0.02}),
+        2.0,
+    )
 
 
 def _action(switch_step=None, value=0.0):
@@ -127,6 +155,292 @@ def _anchored_policy(*, pf_interval=2, draft_action=None, verify_results=()):
     first = policy.infer(_action_request())
     policy.infer(_cache_request("anchor", first["action"]))
     return policy, draft, teacher, events
+
+
+def _first_verify_noise(policy, draft, teacher, seed):
+    policy.infer({
+        "reset": True,
+        "prompt": "test task",
+        "paired_rng_seed": seed,
+    })
+    first = policy.infer(_action_request())
+    policy.infer(_cache_request("anchor", first["action"]))
+    policy.infer(_action_request())
+    return next(
+        call["request"]["verify_noise"].copy()
+        for call in reversed(teacher.calls)
+        if call["kind"] == "verify"
+    )
+
+
+def test_action_dynamics_telemetry_failure_does_not_change_policy(monkeypatch):
+    policy, _, teacher, _ = _anchored_policy(pf_interval=20)
+
+    def fail_telemetry(*args, **kwargs):
+        raise RuntimeError("diagnostic failure")
+
+    monkeypatch.setattr(
+        policy_module, "continuous_action_dynamics_stats", fail_telemetry
+    )
+    response = policy.infer(_action_request())
+
+    assert response["action_source"] == "draft_flash"
+    assert any(call["kind"] == "verify" for call in teacher.calls)
+
+
+def test_paired_rng_reset_replays_verifier_noise_per_episode():
+    events = []
+    draft = _FakeModel("draft", events)
+    teacher = _FakeModel("teacher", events)
+    policy = RealtimeFlashPolicy(draft, teacher, pf_interval=20)
+
+    first = _first_verify_noise(policy, draft, teacher, 10003)
+    policy.rng.standard_normal((9, 9))
+    repeated = _first_verify_noise(policy, draft, teacher, 10003)
+    different = _first_verify_noise(policy, draft, teacher, 10004)
+
+    assert np.array_equal(first, repeated)
+    assert not np.array_equal(first, different)
+
+
+def test_adaptive_k_shadow_is_host_only_and_does_not_change_verify_request():
+    telemetry = {
+        "accepted_prefix": 32,
+        "requested_verify_k": 2,
+        "effective_verify_k": 2,
+        "primary_verify_forwards": 2,
+        "distances": np.zeros((2, 2, 16), dtype=np.float32),
+        "prefix_by_tau": [32, 32],
+        "gripper_phase_agreement_by_tau": [1.0, 1.0],
+        "gripper_switch_indices_by_tau": [None, None],
+        "draft_gripper_switch_index": None,
+        "tau_timesteps": [50.0, 100.0],
+        "threshold": 0.15,
+        "shared_noise": True,
+    }
+    policy, _, teacher, _ = _anchored_policy(
+        pf_interval=20, verify_results=(telemetry,)
+    )
+    policy.adaptive_k_shadow = True
+    policy.adaptive_k_distance_threshold = 0.05
+
+    request = _action_request()
+    request.update(
+        adaptive_k_shadow=True,
+        adaptive_k_distance_threshold=999.0,
+    )
+    response = policy.infer(request)
+    verify_call = next(call for call in teacher.calls if call["kind"] == "verify")
+
+    assert response["accepted_prefix"] == 32
+    assert "adaptive_k_shadow" not in verify_call["request"]
+    assert "adaptive_k_distance_threshold" not in verify_call["request"]
+
+
+def test_adaptive_k_live_requests_progressive_teacher_verification():
+    policy, _, teacher, _ = _anchored_policy(pf_interval=20)
+    policy.adaptive_k_live = True
+    policy.adaptive_k_distance_threshold = 0.05
+    policy.profile_verify_latency = True
+
+    request = _action_request()
+    request.update(
+        adaptive_k_live=False,
+        adaptive_k_distance_threshold=999.0,
+        decoded_draft_gripper_switch=True,
+        profile_verify_latency=False,
+    )
+    response = policy.infer(request)
+    verify_call = next(call for call in teacher.calls if call["kind"] == "verify")
+
+    assert response["accepted_prefix"] == 32
+    assert verify_call["request"]["adaptive_k_live"] is True
+    assert verify_call["request"]["adaptive_k_distance_threshold"] == 0.05
+    assert verify_call["request"]["decoded_draft_gripper_switch"] is False
+    assert verify_call["request"]["profile_verify_latency"] is True
+
+
+def test_adaptive_k_shadow_and_live_are_mutually_exclusive():
+    events = []
+    try:
+        RealtimeFlashPolicy(
+            _FakeModel("draft", events),
+            _FakeModel("teacher", events),
+            adaptive_k_shadow=True,
+            adaptive_k_live=True,
+        )
+    except ValueError as error:
+        assert "mutually exclusive" in str(error)
+    else:
+        raise AssertionError("shadow and live must not run together")
+
+
+def test_adaptive_k_live_rejects_flow_budget_dependency():
+    events = []
+    try:
+        RealtimeFlashPolicy(
+            _FakeModel("draft", events),
+            _FakeModel("teacher", events),
+            adaptive_k_live=True,
+            flow_budget_threshold=0.1,
+        )
+    except ValueError as error:
+        assert "flow budget" in str(error)
+    else:
+        raise AssertionError("K1 distances cannot update a K2 flow budget")
+
+
+def test_adaptive_k_pass_candidate_predicts_full_draft_decision():
+    action = _action(value=0.25)
+    telemetry, predicted = adaptive_k_pass_candidate(
+        {
+            "requested_verify_k": 2,
+            "effective_verify_k": 2,
+            "primary_verify_forwards": 2,
+            "distances": np.zeros((2, 2, 16), dtype=np.float32),
+            "prefix_by_tau": [32, 32],
+            "gripper_phase_agreement_by_tau": [1.0, 1.0],
+            "gripper_switch_indices_by_tau": [None, None],
+            "draft_gripper_switch_index": None,
+            "tau_timesteps": [50.0, 100.0],
+            "threshold": 0.15,
+            "shared_noise": True,
+        },
+        action,
+        enabled=True,
+        verify_threshold=0.15,
+        candidate_threshold=0.05,
+        expected_tau_timesteps=(50.0, 100.0),
+        action_per_frame=16,
+        gripper_channels=(7, 15),
+        gripper_threshold=0.5,
+    )
+
+    assert telemetry["adaptive_k_certificate_kind"] == "pass"
+    assert predicted["source"] == "draft_flash"
+    assert predicted["accepted_prefix"] == 32
+
+
+def test_adaptive_k_candidate_abstains_on_switch_or_malformed_schema():
+    action = _action(value=0.25)
+    base = {
+        "requested_verify_k": 2,
+        "effective_verify_k": 2,
+        "primary_verify_forwards": 2,
+        "distances": np.zeros((2, 2, 16), dtype=np.float32),
+        "prefix_by_tau": [32, 32],
+        "gripper_phase_agreement_by_tau": [1.0, 1.0],
+        "gripper_switch_indices_by_tau": [1, None],
+        "draft_gripper_switch_index": None,
+        "tau_timesteps": [50.0, 100.0],
+        "threshold": 0.15,
+        "shared_noise": True,
+    }
+    telemetry, predicted = adaptive_k_pass_candidate(
+        base,
+        action,
+        enabled=True,
+        verify_threshold=0.15,
+        candidate_threshold=0.05,
+        expected_tau_timesteps=(50.0, 100.0),
+        action_per_frame=16,
+        gripper_channels=(7, 15),
+        gripper_threshold=0.5,
+    )
+    assert telemetry["adaptive_k_certificate_kind"] is None
+    assert predicted is None
+
+    clean = {**base, "gripper_switch_indices_by_tau": [None, None]}
+    malformed_responses = (
+        {**clean, "prefix_by_tau": [np.nan, 32]},
+        {**clean, "tau_timesteps": [100.0, 50.0]},
+        {**clean, "threshold": 0.16},
+        {**clean, "shared_noise": False},
+        {**clean, "requested_verify_k": 2.5},
+    )
+    for malformed in malformed_responses:
+        telemetry, predicted = adaptive_k_pass_candidate(
+            malformed,
+            action,
+            enabled=True,
+            verify_threshold=0.15,
+            candidate_threshold=0.05,
+            expected_tau_timesteps=(50.0, 100.0),
+            action_per_frame=16,
+            gripper_channels=(7, 15),
+            gripper_threshold=0.5,
+        )
+        assert telemetry["adaptive_k_certificate_kind"] is None
+        assert predicted is None
+
+    malformed = {
+        **clean, "distances": np.zeros((1, 2, 16), dtype=np.float32)
+    }
+    telemetry, predicted = adaptive_k_pass_candidate(
+        malformed,
+        action,
+        enabled=True,
+        verify_threshold=0.15,
+        candidate_threshold=0.05,
+        expected_tau_timesteps=(50.0, 100.0),
+        action_per_frame=16,
+        gripper_channels=(7, 15),
+        gripper_threshold=0.5,
+    )
+    assert telemetry["adaptive_k_certificate_kind"] is None
+    assert predicted is None
+
+
+def test_adaptive_k_policy_logs_final_decision_match_and_conflict(tmp_path):
+    base = {
+        "accepted_prefix": 32,
+        "requested_verify_k": 2,
+        "effective_verify_k": 2,
+        "primary_verify_forwards": 2,
+        "distances": np.zeros((2, 2, 16), dtype=np.float32),
+        "prefix_by_tau": [32, 32],
+        "gripper_phase_agreement_by_tau": [1.0, 1.0],
+        "gripper_switch_indices_by_tau": [None, None],
+        "draft_gripper_switch_index": None,
+        "tau_timesteps": [50.0, 100.0],
+        "threshold": 0.15,
+        "shared_noise": True,
+    }
+    for name, verify_response, expected_match in (
+        ("match", base, True),
+        (
+            "conflict",
+            {
+                **base,
+                "gripper_switch_indices_by_tau": [None, 7],
+                "gripper_force_teacher": True,
+            },
+            False,
+        ),
+    ):
+        events = []
+        draft = _FakeModel("draft", events)
+        teacher = _FakeModel(
+            "teacher", events, verify_results=(verify_response,)
+        )
+        log_path = tmp_path / f"{name}.jsonl"
+        policy = RealtimeFlashPolicy(
+            draft,
+            teacher,
+            pf_interval=20,
+            adaptive_k_shadow=True,
+            adaptive_k_distance_threshold=0.05,
+            log_path=log_path,
+            rng=np.random.default_rng(7),
+        )
+        policy.infer({"reset": True, "prompt": "test task"})
+        first = policy.infer(_action_request())
+        policy.infer(_cache_request("anchor", first["action"]))
+        policy.infer(_action_request())
+        record = json.loads(log_path.read_text().splitlines()[-1])
+
+        assert record["adaptive_k_certificate_kind"] == "pass"
+        assert record["adaptive_k_certificate_matches_full"] is expected_match
 
 
 def test_normalized_l2_excludes_grippers_and_prefix_uses_every_k():
@@ -779,6 +1093,66 @@ def test_video_motion_gate_default_off_still_verifies():
 
     assert response["action_source"] == "draft_flash"
     assert [call for call in teacher.calls if call["kind"] == "verify"]
+
+
+def test_motion_jerk_smooth_high_motion_uses_strict_k2_and_short_prefix(tmp_path):
+    events = []
+    draft = _FakeModel("draft", events, video_motion_global=1.3)
+    teacher = _FakeModel("teacher", events)
+    log_path = tmp_path / "metrics.jsonl"
+    policy = RealtimeFlashPolicy(
+        draft,
+        teacher,
+        pf_interval=20,
+        video_motion_gate_threshold=1.2,
+        video_motion_jerk_gate_threshold=1.3,
+        video_motion_strict_verify_threshold=0.10,
+        video_motion_strict_prefix=16,
+        log_path=log_path,
+        rng=np.random.default_rng(7),
+    )
+    policy.infer({"reset": True, "prompt": "test task"})
+    initial = policy.infer(_action_request())
+    policy.infer(_cache_request("anchor", initial["action"]))
+
+    response = policy.infer(_action_request())
+
+    verify = next(call for call in teacher.calls if call["kind"] == "verify")
+    record = json.loads(log_path.read_text().splitlines()[-1])
+    assert verify["request"]["threshold"] == 0.10
+    assert response["action_source"] == "draft_flash"
+    assert response["accepted_prefix"] == 16
+    assert record["motion_jerk_route"] == "strict_k2"
+
+
+def test_motion_jerk_rough_high_motion_keeps_direct_teacher_fallback(tmp_path):
+    events = []
+    draft = _FakeModel("draft", events, video_motion_global=1.3)
+    trace = np.arange(32, dtype=np.float32) % 2
+    draft.action_latent[0, :14, :, :, 0] = trace.reshape(2, 16)
+    teacher = _FakeModel("teacher", events)
+    log_path = tmp_path / "metrics.jsonl"
+    policy = RealtimeFlashPolicy(
+        draft,
+        teacher,
+        pf_interval=20,
+        video_motion_gate_threshold=1.2,
+        video_motion_jerk_gate_threshold=1.3,
+        log_path=log_path,
+        rng=np.random.default_rng(7),
+    )
+    policy.infer({"reset": True, "prompt": "test task"})
+    initial = policy.infer(_action_request())
+    policy.infer(_cache_request("anchor", initial["action"]))
+
+    response = infer_with_replan(policy, _action_request())
+
+    teacher_verifies = [call for call in teacher.calls if call["kind"] == "verify"]
+    record = json.loads(log_path.read_text().splitlines()[-2])
+    assert not teacher_verifies
+    assert record["motion_jerk_ratio"] >= 1.3
+    assert record["motion_jerk_route"] == "teacher"
+    assert response["full_reason"] == "video_motion_risk"
 
 
 def test_zero_prefix_replans_same_observation_without_cache_update():

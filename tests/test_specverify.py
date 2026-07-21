@@ -5,8 +5,12 @@ import torch
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "wan_va"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from adaptive_verify import k1_full_accept_certificate  # noqa: E402
 
 from specverify import (  # noqa: E402
+    cross_tau_flow_evidence,
     gripper_consensus_prefix,
     gripper_switch_info,
     latent_frame_motion_stats,
@@ -15,6 +19,31 @@ from specverify import (  # noqa: E402
     normalized_l2_distances,
     quantize_prefix_to_frame_boundary,
 )
+
+
+def test_k1_certificate_requires_full_low_error_phase_stable_chunk():
+    base = dict(
+        distance_max=0.04,
+        continuous_prefix=32,
+        horizon=32,
+        phase_agreement=1.0,
+        reconstructed_switch=False,
+        draft_switch=False,
+        decoded_draft_switch=False,
+        verify_threshold=0.15,
+        certificate_threshold=0.05,
+    )
+    assert k1_full_accept_certificate(**base)
+    for change in (
+        {"distance_max": 0.051},
+        {"continuous_prefix": 16},
+        {"phase_agreement": 0.99},
+        {"reconstructed_switch": True},
+        {"draft_switch": True},
+        {"decoded_draft_switch": True},
+        {"distance_max": float("nan")},
+    ):
+        assert not k1_full_accept_certificate(**{**base, **change})
 
 
 def test_gripper_consensus_accepts_shared_transition_and_bounds_disagreement():
@@ -81,6 +110,27 @@ def test_normalized_l2_uses_only_continuous_channels():
     assert distances.shape == (2, 2, 16)
     assert distances[0].max().item() == 0
     assert torch.isclose(distances[1, 1, 4], torch.tensor(1.0))
+
+
+def test_cross_tau_flow_evidence_uses_midpoint_gap_and_direction():
+    draft = torch.zeros(1, 30, 2, 2, 1)
+    reconstructed = torch.zeros(2, 30, 2, 2, 1)
+    reconstructed[0, :14] = 1.0
+    reconstructed[1, :14] = 3.0
+    reconstructed[:, 28:30] = 100.0
+
+    evidence = cross_tau_flow_evidence(reconstructed, draft)
+
+    assert torch.allclose(
+        evidence["endpoint_midpoint_distance"], torch.full((2, 2), 2.0)
+    )
+    assert torch.allclose(
+        evidence["cross_tau_half_gap"], torch.full((2, 2), 1.0)
+    )
+    assert torch.allclose(
+        evidence["correction_cosine"], torch.ones(2, 2)
+    )
+    assert evidence["correction_cosine_valid"].all()
 
 
 def test_prefix_is_minimum_over_all_tau_rows():

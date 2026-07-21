@@ -27,6 +27,8 @@ from datetime import datetime
 import importlib
 import argparse
 import pdb
+import random
+import hashlib
 from evaluation.robotwin.geometry import euler2quat
 import numpy as np
 
@@ -43,6 +45,13 @@ from pathlib import Path
 from evaluation.robotwin.websocket_client_policy import WebsocketClientPolicy
 from evaluation.robotwin.realtime_flash_policy import infer_with_replan
 from evaluation.robotwin.test_render import Sapien_TEST
+from evaluation.robotwin.scene_manifest import (
+    SCHEMA_VERSION,
+    load_manifest,
+    robotwin_provenance,
+    scene_fingerprint,
+    write_manifest_atomic,
+)
 
 def write_json(data: dict, fpath: Path) -> None:
     """Write data to a JSON file.
@@ -56,6 +65,35 @@ def write_json(data: dict, fpath: Path) -> None:
     fpath.parent.mkdir(exist_ok=True, parents=True)
     with open(fpath, "w") as f:
         json.dump(data, f, indent=4, ensure_ascii=False)
+
+
+def _json_ready(value):
+    if isinstance(value, dict):
+        return {str(key): _json_ready(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_ready(item) for item in value]
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, np.generic):
+        return value.item()
+    return value
+
+
+def _json_digest(value) -> str:
+    payload = json.dumps(
+        _json_ready(value), sort_keys=True, separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode()
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _setup_manifest_scene(task_env, *, seed, **kwargs):
+    state = random.getstate()
+    try:
+        random.seed(int(seed))
+        task_env.setup_demo(seed=seed, **kwargs)
+    finally:
+        random.setstate(state)
 
 def add_title_bar(img, text, font_scale=0.8, thickness=2):
     """Add a black title bar with text above the image"""
@@ -318,6 +356,14 @@ def main(usr_args):
     args["task_config"] = task_config
     args["ckpt_setting"] = ckpt_setting
     args["save_root"] = save_root
+    for key in (
+        "scene_manifest_in",
+        "scene_manifest_out",
+        "manifest_only",
+        "paired_rng",
+    ):
+        if key in usr_args:
+            args[key] = usr_args[key]
 
     embodiment_type = args.get("embodiment")
     embodiment_config_path = os.path.join(CONFIGS_PATH, "_embodiment_config.yml")
@@ -398,7 +444,8 @@ def main(usr_args):
     test_num = usr_args["test_num"]
 
     
-    model = WebsocketClientPolicy(port=usr_args['port'])
+    model = None if usr_args.get("manifest_only", False) else \
+        WebsocketClientPolicy(port=usr_args['port'])
 
     st_seed, suc_num = eval_policy(task_name,
                                    TASK_ENV,
@@ -470,13 +517,86 @@ def eval_policy(task_name,
 
     args["eval_mode"] = True
 
+    manifest_in_path = Path(args["scene_manifest_in"]) \
+        if args.get("scene_manifest_in") else None
+    manifest_out_path = Path(args["scene_manifest_out"]) \
+        if args.get("scene_manifest_out") else None
+    if manifest_in_path and manifest_out_path:
+        raise ValueError("scene_manifest_in and scene_manifest_out are exclusive")
+    if args.get("manifest_only", False) and not manifest_out_path:
+        raise ValueError("manifest_only requires scene_manifest_out")
+    manifest = None
+    if manifest_in_path:
+        manifest = load_manifest(
+            manifest_in_path,
+            task_name=args["task_name"],
+            task_config=args["task_config"],
+            test_num=test_num,
+        )
+        recorded_robotwin = manifest.get("robotwin", {})
+        current_robotwin = robotwin_provenance(robowin_root)
+        if (
+            recorded_robotwin.get("commit") is not None
+            and current_robotwin.get("commit") != recorded_robotwin["commit"]
+        ):
+            raise RuntimeError("RoboTwin commit differs from scene manifest")
+        if (
+            recorded_robotwin.get("tracked_diff_sha256") is not None
+            and current_robotwin.get("tracked_diff_sha256")
+            != recorded_robotwin["tracked_diff_sha256"]
+        ):
+            raise RuntimeError("RoboTwin tracked changes differ from scene manifest")
+    elif manifest_out_path:
+        manifest = {
+            "schema_version": SCHEMA_VERSION,
+            "task_name": args["task_name"],
+            "task_config": args["task_config"],
+            "instruction_type": instruction_type,
+            "start_seed": st_seed,
+            "test_num": test_num,
+            "robotwin": robotwin_provenance(robowin_root),
+            "episodes": [],
+        }
+
     while succ_seed < test_num:
         render_freq = args["render_freq"]
         args["render_freq"] = 0
 
-        if expert_check:
+        replay_row = None
+        expert_scene_fingerprint = None
+        if manifest_in_path:
+            replay_row = manifest["episodes"][succ_seed]
+            if int(replay_row.get("episode_index", -1)) != succ_seed:
+                raise ValueError("scene manifest episode indices are not contiguous")
+            now_seed = int(replay_row["scene_seed"])
+            args["render_freq"] = render_freq
+            _setup_manifest_scene(
+                TASK_ENV,
+                now_ep_num=now_id,
+                seed=now_seed,
+                is_test=True,
+                **args,
+            )
+            actual_fingerprint = scene_fingerprint(TASK_ENV)
+            if actual_fingerprint != replay_row["scene_fingerprint"]:
+                TASK_ENV.close_env()
+                raise RuntimeError(
+                    f"scene manifest mismatch at episode {succ_seed}: "
+                    f"{actual_fingerprint} != {replay_row['scene_fingerprint']}"
+                )
+            episode_info = {"info": replay_row["episode_info"]}
+            if _json_digest(episode_info["info"]) != replay_row.get(
+                "episode_info_sha256"
+            ):
+                TASK_ENV.close_env()
+                raise RuntimeError("scene manifest episode metadata is corrupted")
+        elif expert_check:
+            manifest_random_state = random.getstate()
             try:
+                if manifest_out_path:
+                    random.seed(now_seed)
                 TASK_ENV.setup_demo(now_ep_num=now_id, seed=now_seed, is_test=True, **args)
+                expert_scene_fingerprint = scene_fingerprint(TASK_ENV)
                 episode_info = TASK_ENV.play_once()
                 TASK_ENV.close_env()
             except UnStableError as e:
@@ -491,8 +611,12 @@ def eval_policy(task_name,
                 print(f"error occurs ! {e}")
                 traceback.print_exc()
                 continue
+            finally:
+                if manifest_out_path:
+                    random.setstate(manifest_random_state)
 
-        if (not expert_check) or (TASK_ENV.plan_success and TASK_ENV.check_success()):
+        if manifest_in_path or (not expert_check) or \
+                (TASK_ENV.plan_success and TASK_ENV.check_success()):
             succ_seed += 1
             suc_test_seed_list.append(now_seed)
         else:
@@ -502,11 +626,57 @@ def eval_policy(task_name,
 
         args["render_freq"] = render_freq
 
-        TASK_ENV.setup_demo(now_ep_num=now_id, seed=now_seed, is_test=True, **args)
-        episode_info_list = [episode_info["info"]]
-        results = generate_episode_descriptions(args["task_name"], episode_info_list, test_num)
-        instruction = np.random.choice(results[0][instruction_type])
+        if not manifest_in_path:
+            if manifest_out_path:
+                _setup_manifest_scene(
+                    TASK_ENV,
+                    now_ep_num=now_id,
+                    seed=now_seed,
+                    is_test=True,
+                    **args,
+                )
+            else:
+                TASK_ENV.setup_demo(
+                    now_ep_num=now_id, seed=now_seed, is_test=True, **args
+                )
+            actual_fingerprint = scene_fingerprint(TASK_ENV)
+            if actual_fingerprint != expert_scene_fingerprint:
+                TASK_ENV.close_env()
+                raise RuntimeError(
+                    "expert and evaluation setup produced different scenes for "
+                    f"seed {now_seed}"
+                )
+            episode_info_list = [episode_info["info"]]
+            random_state = random.getstate()
+            try:
+                random.seed(now_seed)
+                results = generate_episode_descriptions(
+                    args["task_name"], episode_info_list, test_num
+                )
+            finally:
+                random.setstate(random_state)
+            instruction = np.random.default_rng(now_seed).choice(
+                results[0][instruction_type]
+            ).item()
+            if manifest_out_path:
+                manifest["episodes"].append({
+                    "episode_index": succ_seed - 1,
+                    "scene_seed": now_seed,
+                    "episode_info": _json_ready(episode_info["info"]),
+                    "episode_info_sha256": _json_digest(episode_info["info"]),
+                    "instruction": instruction,
+                    "scene_fingerprint": actual_fingerprint,
+                })
+                write_manifest_atomic(manifest_out_path, manifest)
+        else:
+            instruction = replay_row["instruction"]
         TASK_ENV.set_instruction(instruction=instruction)  # set language instruction
+
+        if args.get("manifest_only", False):
+            TASK_ENV.close_env()
+            now_id += 1
+            now_seed += 1
+            continue
 
         if TASK_ENV.eval_video_path is not None:
             ffmpeg = subprocess.Popen(
@@ -540,7 +710,16 @@ def eval_policy(task_name,
         succ = False
 
         prompt = TASK_ENV.get_instruction()
-        ret = model.infer(dict(reset = True, prompt=prompt, save_visualization=save_visualization))
+        reset_request = dict(
+            reset=True,
+            prompt=prompt,
+            save_visualization=save_visualization,
+            episode_index=succ_seed - 1,
+            scene_seed=now_seed,
+        )
+        if args.get("paired_rng", False):
+            reset_request["paired_rng_seed"] = now_seed
+        ret = model.infer(reset_request)
         
         first = True
         full_obs_list = []

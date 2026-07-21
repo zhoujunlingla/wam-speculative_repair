@@ -402,3 +402,191 @@ first or second tau is responsible for each rejected prefix.
 - Run a long-episode smoke with server and renderer memory recorded; no
   per-probe temporary KV cache may remain allocated.
 - Run direct draft and teacher smokes before speculative evaluation.
+
+## Adaptive-K Paired Validation
+
+This branch is cut directly from the frozen Motion-on commit `46f0c38`. Its
+only policy experiment is an adaptive-K certificate around the existing
+`tau={50,100}` verifier. It does not carry repair, alter the acceptance
+threshold, change gripper routing, change motion routing, or address false
+accepts.
+
+The experiment has three gated phases:
+
+1. Build and freeze a manifest containing 20 valid `hanging_mug` scenes and
+   20 valid `open_microwave` scenes. Each row records the accepted RoboTwin
+   seed, episode metadata digest, and selected instruction. Replay must fail
+   closed if any recorded scene or instruction cannot be reproduced.
+2. Run adaptive-K `off` and `shadow` from the same commit and manifest with
+   the same client, verifier, NumPy, and Torch random streams. Shadow always
+   executes the original two probes. Every policy round records the executed
+   action hash, accepted prefix, fallback reason, and cache-state fingerprint.
+   The pair may proceed only when all four fields match for every round and
+   `certificate_conflict == 0`.
+3. Enable `live` only after phase 2 passes. Live may skip the second teacher
+   probe only when the first-probe certificate proves that the unchanged K=2
+   result is already decided. If end-to-end model latency improves by less
+   than 5%, adaptive-K is deleted rather than maintained.
+
+The manifest is the source of episode identity. A failed setup, changed
+instruction, or digest mismatch is an experiment error; the client must not
+silently increment the seed. Audit fingerprints are debug instrumentation and
+are excluded from live latency measurement.
+
+Success-rate recovery is explicitly out of scope. Adaptive-K reduces verifier
+compute but cannot make a false-accepted draft correct. Any later work on
+success belongs to a separate false-accept verifier branch.
+
+### TN=1 isolation failure and corrective design
+
+The first paired smoke failed before the 20-scene run: shadow CUDA work inside
+the teacher server changed the later draft cache write, followed by a different
+executed action. Shadow instrumentation must therefore live above the model
+boundary. The corrected shadow has these constraints:
+
+- off and shadow send the exact same request to the K=2 teacher verifier;
+- the server performs no adaptive-K tensor operation or allocation;
+- the policy computes a pass-only candidate from the already-returned CPU K=2
+  telemetry and compares it with the final policy decision tuple;
+- fail candidates are omitted until the response exposes enough K1 gripper
+  state to reproduce the full policy decision without inference;
+- a declared candidate must carry a strict boolean match, and paired validation
+  requires both zero conflicts and nonzero candidate coverage.
+
+The failed TN=1 artifacts remain preserved as negative evidence. The same
+manifest and GPU are reused after the corrective commit; the 20-scene run is
+still blocked until the repeated TN=1 trace is exactly equivalent.
+
+### Cross-process determinism prerequisite
+
+The host-only rerun still diverged at cache trace 29 / action decision 17.
+Crucially, a second adaptive-off replica on the same commit, GPU, and manifest
+diverged at the same point. The paired gate is therefore measuring baseline
+CUDA/simulator reproducibility rather than a shadow side effect.
+
+Before repeating off/shadow, audit runs use a deterministic server profile:
+
+- `CUBLAS_WORKSPACE_CONFIG=:4096:8` is set before the server process imports
+  torch;
+- deterministic algorithms and deterministic cuDNN are enabled;
+- TF32 is disabled;
+- CUDA SDPA is restricted to the math backend.
+
+This profile is scoped to the separate `--deterministic-audit` diagnostic flag;
+`--equivalence-audit` only records hashes. It is not live behavior and must not
+be used for the final latency measurement.
+
+Math SDPA did not make two independent off runs bitwise equal: they diverged by
+cache trace 27 / action decision 15. Cross-process closed-loop equivalence is
+therefore rejected as an invalid gate. Formal validation uses one canonical K=2
+execution with an in-process counterfactual candidate: candidate action hash,
+prefix, source, and fallback reason must exactly equal the actual K=2 decision;
+coverage must be nonzero and conflicts zero. There is only one executed action
+and one cache trajectory, so shadow cannot perturb either by construction.
+
+## Live Progressive-K Speed Gate
+
+The counterfactual shadow completed on the fixed `hanging_mug` and
+`open_microwave` TN=20 manifests. The conservative tau-50 certificate covered
+`554/1119` verifier calls and matched the completed K=2 policy decision in all
+554 cases. Live progressive verification may therefore be tested strictly as
+a compute optimization; it does not change the endpoint threshold or repair
+an action.
+
+For each normal Motion-on draft round, sample the same single Gaussian probe
+as before and evaluate tau 50 first. Stop after K=1 only when the first probe
+has a full 32-action continuous prefix, its maximum distance is at most `0.05`,
+its reconstructed gripper phase exactly matches the draft, and neither the
+draft nor reconstruction crosses a gripper phase boundary. Otherwise continue
+the existing serial loop with tau 100 and run the unchanged K=2 prefix and
+gripper-consensus finalization. The second probe reuses the same noise, draft
+latent, frame id, prompt/cache state, and first-probe tensors. Tau 50 is never
+recomputed.
+
+The decision remains inside one teacher request. Verification stays
+`update_cache=0`; no policy/client cache state may change. Telemetry records
+configured K, effective K, probe-one, probe-two, finalization, and total
+verifier latency. Shadow and live modes are mutually exclusive.
+
+The speed-only gate is zero cache/frame mutation, effective K below 2, at least
+15% lower verifier latency, and at least 5% lower total model-path latency. If
+the model-path gain is below 5%, progressive K is rejected before any
+adaptive-delta or repair experiment.
+
+## World-Aware Progressive Verification Evidence Run
+
+This formal low10x20 run freezes the validated Motion-on policy and live
+Progressive-K decision path. It does **not** change the verifier threshold,
+accepted prefix, gripper fallback, periodic refresh, cache updates, or repair
+behavior. The purpose is to validate Progressive-K at low10 scale while
+collecting causal evidence for a later world-aware threshold or repair policy.
+
+The live policy remains:
+
+```text
+draft = FlashWAM official step2000 v1/a2
+teacher = LingBot posttrain v2/a4
+base verifier = tau {50,100}, delta 0.15, shared Gaussian noise
+motion gate = future-video latent global_mean >= 1.2 -> replan
+K1 certificate = tau50 full-prefix, max distance <= 0.05,
+                 exact gripper phase, no draft/reconstruction phase switch
+otherwise = append tau100 and run the unchanged K2 finalizer
+PF = 20, gripper consensus and teacher gripper fallback enabled
+```
+
+No-extra-forward telemetry is emitted from tensors already computed by this
+path:
+
+- future-video latent motion statistics from the draft rollout;
+- continuous-action velocity, acceleration, and jerk statistics from the
+  normalized draft action latent (gripper channels excluded);
+- for completed K2 calls, the draft-to-endpoint-midpoint distance, half of the
+  tau50/tau100 endpoint gap, and cosine agreement between the two endpoint
+  correction directions;
+- delayed predicted-versus-observed video latent error remains logged on the
+  following cache acknowledgement, preserving causal frame alignment.
+
+For K2, the endpoint midpoint is exactly the mean of the two reconstructed
+endpoints. The cross-tau gap is described only as a solver-disagreement proxy,
+not calibrated uncertainty. K1 early exits explicitly record that cross-tau
+evidence is unavailable; no missing second probe is synthesized.
+
+The formal artifact must contain the reviewed commit, exact command, model
+configs, ten task summaries with 20 valid trials each, source rates, verifier
+NFE/latency, and telemetry coverage. Promotion of a world-aware live policy is
+out of scope. This run is valid only if server/client startup reaches real
+RoboTwin trials on all four shards and the telemetry path leaves existing
+Progressive-K tests and policy decisions unchanged.
+
+The historical Motion-on 146/200 result used an official step3000 checkpoint.
+That transformer was removed by the explicit checkpoint cleanup that retained
+only step2000. This run therefore uses the surviving official step2000
+checkpoint and must not be presented as a same-checkpoint causal comparison
+against 146/200. Its purpose is to establish a new, reproducible step2000
+reference and collect the evidence needed to calibrate the next live policy.
+
+## Motion-Jerk Stratified Verification
+
+The official-step2000 Motion-on run improves direct draft from 121/200 to
+136/200, but raises the full-teacher action rate to 20.87%. Raw latent motion
+is task-biased: `place_can_basket` triggers 17 full-teacher actions without a
+quality gain, while `hanging_mug` gains four successes. Existing telemetry
+shows that relative action jerk, `jerk_rms / max(velocity_rms, 0.01)`, separates
+successful and failed high-motion hanging rounds more strongly than raw motion.
+
+The opt-in Motion-Jerk policy keeps the existing motion threshold at 1.2. A
+high-motion draft with relative jerk at least 1.3 follows the unchanged direct
+teacher fallback. A smoother high-motion draft is not accepted directly: it
+must pass both existing tau probes at a stricter 0.10 endpoint threshold, with
+no gripper-consensus failure. A strict full-chunk pass executes only the first
+16 actions and replans from a new observation; every other outcome falls back
+to the teacher. Motion below 1.2 uses the frozen K2 threshold 0.15 path.
+
+The development test uses official step2000 v1/a2 draft, LingBot v2/a4
+teacher, fixed K2 tau 50/100, PF20, gripper consensus/fallback, and no
+Progressive-K or repair. It runs all ten low10 tasks for 20 trials each across
+four development GPUs. Promotion requires no runtime/cache error, aggregate
+success above the step2000 Motion-on reference (136/200), `hanging_mug` no
+worse than 4/20, no task regression larger than 2/20, and a lower full-teacher
+action rate. The experiment is diagnostic if its scenes are not
+manifest-matched; no causal claim is made from unmatched episode differences.

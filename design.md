@@ -15,6 +15,142 @@ The first experiment contains no repair, risk router, world verifier, or
 Verify++ signal. The verifier is useful only if matched four-task success is
 better than direct draft and close to direct teacher.
 
+## Repair Counterfactual Audit
+
+The promoted four-task configuration reached `24/40`, versus matched draft
+`21/40` and teacher `23/40`, with `17.67%` teacher action rounds. Repair is not
+allowed to execute yet: 18 of the 20 zero-prefix events occurred in failed
+episodes, and earlier endpoint-repair variants often passed a reused verifier
+probe without improving task success.
+
+The first repair experiment is therefore shadow-only. It runs only for a pure
+continuous zero-prefix rejection, never for video-motion, gripper, phase, or
+periodic-refresh fallbacks. It:
+
+1. moves only the first 16 steps of the 14 continuous action-latent channels
+   toward the mean teacher endpoint returned by the primary verifier;
+2. freezes both gripper channels and the remaining 16-step suffix;
+3. caps the per-step correction norm;
+4. reverifies with an independent Gaussian probe from a dedicated repair RNG;
+5. logs the original and holdout prefixes, correction norm, and eligibility;
+6. still executes the existing teacher fallback regardless of the shadow
+   result.
+
+This is a counterfactual audit, not a claimed rescue mechanism. Execution may
+be enabled only in a later change if the holdout prefix reaches at least 16,
+the candidate remains phase-safe, and accepted shadow candidates correlate
+with episode recovery. The dedicated RNG is required so enabling shadow mode
+does not alter the primary verifier noise stream or baseline actions.
+
+## Motion-Baseline Repair Experiment
+
+The frozen quality reference is the completed hard-motion low10 x 20 run:
+`146/200 = 73.0%`, with `728/3366 = 21.63%` full-Teacher action rounds.
+Its full-path reasons were initial anchor 200, video motion 109, gripper
+consensus 304, zero prefix 90, and periodic refresh 25. Initial, motion, and
+periodic paths remain unchanged; only gripper-consensus and continuous
+zero-prefix fallbacks are eligible for repair.
+
+The repair experiment has two separately gated stages:
+
+1. **Gripper phase snap.** When all primary tau probes accept the full
+   continuous chunk but disagree with the draft gripper phase, a same-noise
+   tau=75 probe supplies a 2-of-3 phase vote. The candidate may change only
+   latent gripper channels 28/29, at no more than two action positions, and
+   only when each channel has at most one phase transition. Continuous action
+   channels remain byte-identical. An independent Gaussian K=2 holdout must
+   accept the complete chunk before the policy executes a conservative
+   16-action repaired prefix.
+2. **Zero-prefix flow-endpoint projection.** A pure continuous zero-prefix may
+   use the mean low-noise teacher endpoint already returned by the primary
+   action-flow verifier. The draft moves once along that endpoint residual,
+   with a per-step trust-region cap. This reuses the existing flow probe and
+   avoids a second construction forward. Only the first 16 actions of
+   continuous channels may change; gripper and suffix remain unchanged. A
+   separate Gaussian K=2 holdout must recover at least 16 actions before
+   execution.
+
+Rejected repairs cannot mutate cache state, frame ids, pending gripper state,
+or the primary verifier RNG. Accepted repaired actions use the normal draft
+cache acknowledgement path, and the client must return the repaired action
+that was actually executed. Full-Teacher action-source, action-only repair
+forward count, repair eligibility, independent holdout acceptance, correction
+norm, and repaired-episode outcome are reported separately.
+
+Promotion requires at least `150/200` success (stretch goal `151/200`) and
+full-Teacher action-source below 15%. Shadow acceptance alone is not evidence
+of task rescue; every executable stage requires a matched closed-loop run.
+
+## Flow-Consistent Repair Iteration
+
+The endpoint-interpolation repair above did not beat the frozen Motion-on
+reference (`146/200 = 73.0%`, `21.63%` full-Teacher action rounds). It is not
+the active repair mechanism. The next iteration keeps the proven Motion-on
+router and verifier unchanged (`K=2`, tau `50/100`, delta `0.15`, PF `20`,
+motion gate `1.2`, cross-tau gripper consensus) and replaces clean-space
+endpoint interpolation with teacher-flow re-denoising.
+
+### Continuous zero-prefix repair
+
+For a pure continuous zero-prefix rejection, the teacher can reuse a matching
+primary probe state and velocity or query a separately configured repair tau.
+Let `s` be that probe's scheduler sigma:
+
+```text
+z_s = (1 - s) * A_draft + s * eps
+v_s = teacher_action_flow(z_s, s | reference_cache)
+z_mid = z_s - 0.5 * s * v_s
+v_mid = teacher_action_flow(z_mid, 0.5 * s | reference_cache)
+A_rk2 = z_s - s * v_mid
+```
+
+When the repair tau matches a primary probe, only the midpoint action forward
+is new; `z_s` and `v_s` already exist. A dedicated tau (the first live run uses
+`150`, midpoint near `75`) uses the same primary Gaussian noise but requires a
+start and midpoint action forward. The scheduler supplies the exact
+sigma/timestep mapping and telemetry records whether the primary probe was
+reused.
+The candidate changes only continuous channels in the first configured repair
+window. Gripper channels, conditioned frames, unused channels, and the suffix
+remain byte-identical to the draft. Every continuous axis has an absolute
+latent correction cap and every action step has an RMS cap. Clipping and
+scaling are explicit and logged; a non-finite candidate is rejected.
+
+The repair candidate is accepted only by a new-noise call to the unchanged
+`verify_action_chunk`. Its quantized holdout prefix is executed exactly:
+`32 -> 32`, `16 -> 16`, `0 -> full Teacher`. The repaired candidate may not
+clear a motion, periodic, cache, decoded-gripper, or phase fallback. It is
+eligible only when the original continuous prefix is zero and no discrete
+phase failure is present.
+
+### Discrete gripper repair
+
+Continuous RK2 repair cannot establish a discrete contact event. A
+gripper-consensus fallback therefore keeps the existing three-probe phase
+vote: the two primary tau reconstructions plus one independent tie-break tau.
+It may edit only latent gripper channels, at no more than two positions, while
+leaving all continuous channels byte-identical. A new-noise K=2 holdout must
+accept the candidate and its gripper phase. If the holdout accepts 32 actions,
+the policy executes 32 rather than conservatively truncating to 16; otherwise
+it executes the verified 16 or falls back to the Teacher.
+
+### Evidence and accounting
+
+Repair telemetry must distinguish:
+
+- primary verifier action-only forwards;
+- midpoint flow-repair forwards;
+- independent holdout verifier forwards;
+- full-Teacher action-source rounds;
+- eligible, attempted, holdout-accepted, and executed repairs by kind;
+- repaired episode success, not only round-level verifier acceptance.
+
+The first closed-loop comparison is matched low10 x 20 against the frozen
+Motion-on reference. Promotion requires at least `150/200`, no task regression
+larger than `2/20`, full-Teacher action-source below `21.63%` with a target below
+`15%`, and lower total model time per executed action after counting all extra
+action-only repair forwards. Passing the verifier alone is not a quality claim.
+
 ## Runtime State Machine
 
 1. Reset both model caches and all speculative state.
@@ -402,3 +538,14 @@ first or second tau is responsible for each rejected prefix.
 - Run a long-episode smoke with server and renderer memory recorded; no
   per-probe temporary KV cache may remain allocated.
 - Run direct draft and teacher smokes before speculative evaluation.
+
+## ACP Low10x20 Runner
+
+The pool runner is orchestration only. It assigns the ten clean tasks to eight
+A800 workers, invokes the existing one-task launcher, and merges task summaries.
+It must not alter model configs or policy defaults. The formal repair command
+pins the completed Motion-on controls (`K=2`, tau 50/100, delta 0.15, PF=20,
+motion gate 1.2, gripper consensus) and adds only the two reviewed repair flags.
+Merged artifacts include per-task success, Teacher action-source rate, repair
+eligibility/attempt/execution counts, repair kinds, extra verifier forwards,
+and per-source latency.

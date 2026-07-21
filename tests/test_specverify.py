@@ -7,6 +7,8 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "wan_va"))
 
 from specverify import (  # noqa: E402
+    bounded_continuous_prefix_repair,
+    flow_euler_step,
     gripper_consensus_prefix,
     gripper_switch_info,
     latent_frame_motion_stats,
@@ -15,6 +17,44 @@ from specverify import (  # noqa: E402
     normalized_l2_distances,
     quantize_prefix_to_frame_boundary,
 )
+
+
+def test_explicit_midpoint_endpoint_uses_full_interval_from_start():
+    start = torch.tensor([10.0])
+    velocity_start = torch.tensor([2.0])
+    velocity_mid = torch.tensor([4.0])
+
+    midpoint = flow_euler_step(start, velocity_start, 0.2, 0.1)
+    endpoint = flow_euler_step(start, velocity_mid, 0.2, 0.0)
+    two_half_euler = flow_euler_step(midpoint, velocity_mid, 0.1, 0.0)
+
+    assert torch.allclose(midpoint, torch.tensor([9.8]))
+    assert torch.allclose(endpoint, torch.tensor([9.2]))
+    assert torch.allclose(two_half_euler, torch.tensor([9.4]))
+    assert not torch.equal(endpoint, two_half_euler)
+
+
+def test_bounded_continuous_prefix_repair_preserves_phase_and_suffix():
+    draft = torch.zeros(1, 30, 2, 16, 1)
+    draft[:, 28:30] = -1
+    target = torch.full_like(draft, 2.0)
+
+    candidate, stats = bounded_continuous_prefix_repair(
+        draft,
+        target,
+        prefix_len=16,
+        conditioned_frame_count=0,
+        max_axis_delta=0.2,
+        max_step_rms=0.15,
+    )
+
+    assert torch.equal(candidate[:, 28:30], draft[:, 28:30])
+    assert torch.equal(candidate[:, :, 1:], draft[:, :, 1:])
+    assert candidate[:, :14, 0].abs().max().item() <= 0.2
+    step_rms = candidate[:, :14, 0, :, 0].float().square().mean(dim=1).sqrt()
+    assert step_rms.max().item() <= 0.15001
+    assert stats["raw_max_axis_delta"] == 2.0
+    assert stats["clipped_fraction"] > 0
 
 
 def test_gripper_consensus_accepts_shared_transition_and_bounds_disagreement():

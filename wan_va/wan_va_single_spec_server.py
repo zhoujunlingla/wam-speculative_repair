@@ -87,7 +87,21 @@ def build_policy(args: argparse.Namespace):
         video_motion_gate_threshold=args.video_motion_gate_threshold,
         gripper_full_window=args.gripper_full_window,
         gripper_consensus=args.gripper_consensus,
+        gripper_repair=args.gripper_repair,
+        gripper_repair_tau=args.gripper_repair_tau,
+        zero_prefix_repair=args.zero_prefix_repair,
+        flow_consistent_repair=args.flow_consistent_repair,
+        flow_repair_tau=args.flow_repair_tau,
+        flow_repair_max_axis_delta=args.flow_repair_max_axis_delta,
+        repair_max_per_episode=args.repair_max_per_episode,
+        repair_shadow=args.repair_shadow,
+        repair_strength=args.repair_strength,
+        repair_max_step_rms=args.repair_max_step_rms,
+        repair_prefix_len=args.repair_prefix_len,
         rng=None if args.seed is None else np.random.default_rng(args.seed),
+        repair_rng=None
+        if args.seed is None
+        else np.random.default_rng(args.seed + 1),
         log_path=args.log_path,
     )
 
@@ -125,6 +139,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--video-motion-gate-threshold", type=float, default=0.0)
     parser.add_argument("--gripper-full-window", type=int, default=1)
     parser.add_argument("--gripper-consensus", action="store_true")
+    parser.add_argument("--gripper-repair", action="store_true")
+    parser.add_argument("--gripper-repair-tau", type=float, default=75.0)
+    parser.add_argument("--zero-prefix-repair", action="store_true")
+    parser.add_argument("--flow-consistent-repair", action="store_true")
+    parser.add_argument("--flow-repair-tau", type=float, default=0.0)
+    parser.add_argument("--flow-repair-max-axis-delta", type=float, default=0.2)
+    parser.add_argument("--repair-max-per-episode", type=int, default=2)
+    parser.add_argument("--repair-shadow", action="store_true")
+    parser.add_argument("--repair-strength", type=float, default=0.5)
+    parser.add_argument("--repair-max-step-rms", type=float, default=0.15)
+    parser.add_argument("--repair-prefix-len", type=int, default=16)
     parser.add_argument(
         "--tau-timesteps", type=float, nargs="+", default=(50.0, 100.0)
     )

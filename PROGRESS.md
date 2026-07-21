@@ -170,3 +170,35 @@ teacher quality with materially lower teacher use.
 - The feature remains default-off for future analysis, but it is not promoted.
   Four-task TN=10 now evaluates the motion-only policy before any further
   routing or adaptive-K change.
+
+## 2026-07-14 - Flow-Consistent Repair Implementation
+
+- The frozen comparison remains Motion-on SpecVerify low10 x 20:
+  `146/200 = 73.0%`, with `728/3366 = 21.63%` full-Teacher action rounds.
+- Full-path attribution was audited before implementation: 304 gripper
+  consensus, 109 video-motion, 90 continuous zero-prefix, 25 periodic, and 200
+  initial-anchor Teacher rounds. Of the 90 zero-prefix events, 89 were
+  cross-tau disagreements rather than both probes rejecting the full chunk;
+  this supports a local flow correction plus independent holdout rather than
+  unconditional regeneration.
+- The superseded clean-space endpoint interpolation remains off. The new
+  continuous repair re-enters the Teacher action flow at a configurable repair
+  timestep, evaluates an explicit midpoint velocity, reconstructs an RK2
+  endpoint from the original noisy state, and bounds only the first 16 actions
+  of continuous channels. Gripper, conditioned frames, unused channels, and
+  the remaining suffix stay unchanged.
+- Every repaired candidate is reverified with a new Gaussian probe by the
+  unchanged K=2 endpoint verifier. The exact holdout prefix is executed:
+  32/16/0 maps to 32/16/full Teacher. Motion, periodic/cache, and discrete
+  phase fallbacks cannot be cleared by continuous repair.
+- Gripper-consensus repair remains a separate discrete phase operation. It
+  uses the two primary probes plus one tie-break probe, edits only gripper
+  phase, and also requires independent K=2 holdout verification.
+- Telemetry now separates primary verify, repair construction, and holdout
+  action-only forwards, and joins repair execution to final episode success.
+  Non-finite midpoint states fail closed without calling the Teacher on an
+  invalid latent.
+- Remote focused tests passed `56/56`; local bytecode compilation and
+  `git diff --check` passed. A real-model smoke is pending a usable A800 slot;
+  the remaining free-looking cards are currently occupied by the older
+  endpoint-repair queue or unrelated jobs.

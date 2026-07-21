@@ -237,6 +237,15 @@ Threshold and periodic-refresh tuning may begin only after the implementation
 passes unit tests and a real episode smoke. Repair remains locked until this
 gate passes.
 
+## Runtime Cache Isolation
+
+The model server and RoboTwin client intentionally use different Torch
+runtimes. The launcher may provide a default cuRobo extension cache, but an
+explicit `TORCH_EXTENSIONS_DIR` must be preserved so a run can select a cache
+compiled for the client's Torch ABI. The server does not import cuRobo. This
+override changes only extension loading and must not change model or policy
+configuration.
+
 Launcher readiness is determined by a successful localhost TCP connection and
 a live server process. Log text is diagnostic only; model/server logging may be
 buffered or configured differently and cannot be the synchronization primitive.
@@ -527,6 +536,140 @@ round must log the existing verifier distances, per-tau prefixes, and tau values
 This is diagnostic-only and must not change acceptance. The resulting traces
 support exact offline replay of candidate thresholds and identify whether the
 first or second tau is responsible for each rejected prefix.
+
+## WCAS V0: World-Certified Adaptive Speculation
+
+### Audited scope
+
+The frozen Motion-on result is `146/200 = 73.0%` with 728 teacher-sourced
+actions out of 3366 (`21.63%`). The exact teacher-source attribution is:
+
+```text
+initial anchor        200
+video motion gate     109
+gripper consensus     304
+zero prefix            90
+periodic refresh       25
+```
+
+Therefore adaptive periodic refresh alone cannot reduce the recorded teacher
+action-source rate below 15%; removing every periodic refresh would only lower
+it to about 20.89%. This version does not duplicate the cumulative flow-budget
+or delayed-video recovery controllers, because both already exist and their
+online pilots regressed. Delayed video error remains a supervision and
+calibration signal only. Repair remains out of scope.
+
+The first implementation targets a measured compute cost instead: the second
+action-verifier probe. Offline replay found that a low-residual first probe can
+certify 55.6% of eligible K=2 calls without changing the observed second-probe
+prefix or phase decision. WCAS V0 adds an optional adaptive-K path around this
+existing verifier; it does not change the endpoint reconstruction formula,
+the acceptance threshold, action prefix quantization, or teacher fallback.
+
+### Adaptive-K certificate
+
+For requested probes `tau={50,100}`, always evaluate the first probe. It may
+certify the full draft chunk only when all of the following hold:
+
+1. its maximum continuous-channel endpoint distance is at most 0.05;
+2. its continuous accepted prefix covers the complete chunk;
+3. reconstructed and draft gripper phases agree at every action step;
+4. neither sequence contains a gripper transition relative to the previous
+   phase; and
+5. the caller did not request a deterministic audit.
+
+`shadow` mode always evaluates both probes and records whether the first probe
+would have skipped the second. `live` mode skips the remaining probes only for
+certified calls. Every configured audit interval forces the normal K=2 path so
+that false certificates remain measurable without changing random seeds. Live
+adaptive K is incompatible with action repair in V0; shadow mode is allowed.
+
+The response records requested/effective tau, requested/effective K, verifier
+forward count, sentinel distance and phase properties, whether the call would
+skip, whether it actually skipped, and whether it was audited. The existing
+gripper-consensus result remains authoritative for full K. For a certified K=1
+call, full draft/reconstruction phase agreement is itself the consensus
+certificate.
+
+### Cross-tau flow stability
+
+When two or more probes are evaluated, the verifier additionally reports the
+continuous-channel disagreement between reconstructed endpoints at different
+tau values. Mean, maximum, and p95 normalized L2 disagreement are telemetry
+only. This is distinct from the existing endpoint-to-draft distance and gives
+an explicit measure of whether the teacher flow field converges to one action
+endpoint across noise levels.
+
+### Delayed-video alignment
+
+The delayed world-latent error must compare exactly the number of frames
+created by the executed action prefix. The observed latent frame count must
+equal that expected count and the cached prediction must contain at least that
+many frames. The helper may take the matching prefix of a longer prediction,
+but must never silently truncate both tensors with `min(predicted, observed)`.
+An alignment mismatch returns invalid telemetry rather than a plausible score.
+
+### Non-goals
+
+- no action repair or repaired-action execution;
+- no new model, dependency, training loss, or decoded video;
+- no promotion of delayed-video error into a recovery trigger;
+- no new adaptive-refresh controller on top of the rejected flow budget;
+- no change to `K=2`, `tau={50,100}`, `delta=0.15`, PF=20, motion gate 1.2,
+  or gripper consensus when adaptive K is disabled.
+
+### Acceptance criteria
+
+- With adaptive K off or shadowed, policy actions and fallback reasons are
+  byte-for-byte unchanged for deterministic fake-model tests.
+- Shadow replay reproduces the full K=2 result while logging certificate
+  precision and potential forward savings.
+- Live certified calls perform one action-only teacher forward; audited or
+  uncertified calls perform the original K forwards.
+- A deliberately unsafe first probe cannot skip the second.
+- Delayed-video shape mismatches produce invalid telemetry and no routing
+  decision.
+- Existing policy, verifier, launcher, and summary tests remain green.
+
+### WCAS V1: dual K1 certificates
+
+The first matched shadow run showed that V0 is safe but modest. As the run
+grew to 678 verifier calls, the `0.05` pass certificate covered 334 calls
+(`49.05%`), equivalent to at most `24.52%` verifier-forward savings, with no
+observed K1/K2 decision conflict. A post-hoc `0.06` sweep covered 395 calls but
+produced an `open_microwave` false certificate: K1 accepted 32 actions while
+K2 accepted only 3 raw actions and the final quantized prefix was zero
+(`sentinel_distance=0.059837`). V1 therefore keeps `0.05`; the extra saving
+must come from the exact fail certificate rather than a relaxed empirical
+boundary. Motion-conditioned relaxation is also out of scope because observed
+false certificates occur at low video motion.
+
+V1 adds an exact fail certificate alongside the existing pass certificate.
+The K-probe verifier combines continuous and gripper decisions by intersection:
+adding another probe can only shorten the accepted prefix. Consequently, if
+the first probe alone already quantizes either the continuous prefix or the
+draft/teacher gripper-consensus prefix to zero, the final K=2 prefix must also
+be zero. The second probe may be skipped without changing the teacher fallback.
+
+The verifier records:
+
+- certificate kind (`pass`, `fail`, or none);
+- K1 continuous, gripper-consensus, and final quantized prefixes;
+- the first K1 gripper disagreement index;
+- whether the shadow certificate agrees with the full K=2 decision; and
+- per-kind certificate and conflict counts in the run summary.
+
+V1 remains shadow-only for evaluation. It does not add a 16-step positive
+certificate: accepting a shorter prefix changes replanning/cache frequency and
+is not equivalent to the full K=2 policy. It also does not change motion
+routing, teacher fallback, `delta`, tau values, periodic refresh, or repair.
+Live adaptive K is rejected when cumulative flow-budget routing is enabled,
+because a skipped K2 probe would otherwise change the budget telemetry and may
+alter later routing decisions.
+
+V1 may enter live mode only if both certificate kinds have zero decision
+conflicts on the matched task manifest and the measured verifier savings are
+material after including server latency.
 
 ## Verification Plan
 

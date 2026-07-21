@@ -202,3 +202,68 @@ teacher quality with materially lower teacher use.
   `git diff --check` passed. A real-model smoke is pending a usable A800 slot;
   the remaining free-looking cards are currently occupied by the older
   endpoint-repair queue or unrelated jobs.
+## 2026-07-15 WCAS V0 implementation
+
+- Started from clean commit `e0cca59` on branch
+  `feature/wcas-shadow-20260715`; the source worktree was not modified.
+- Audited the frozen Motion-on teacher attribution: 200 initial anchors, 109
+  motion gates, 304 gripper-consensus fallbacks, 90 zero-prefix fallbacks, and
+  only 25 periodic refreshes. Adaptive refresh alone therefore cannot reach a
+  15% teacher action-source rate under the current metric.
+- Reused the existing delayed-video residual and rejected flow-budget paths
+  instead of adding another controller. Delayed-video comparison now requires
+  action-aligned frame counts and reports invalid telemetry on mismatch.
+- Added WCAS adaptive-K `off|shadow|live` modes. The first verifier probe may
+  skip later probes only for a full continuous prefix, max residual <= 0.05,
+  exact draft/reconstruction gripper agreement, and no gripper transition.
+  Live mode supports deterministic full-K audits and is blocked when action
+  repair is enabled.
+- Added cross-tau reconstructed-endpoint disagreement and requested/effective
+  verifier-forward telemetry. No repair, world-latent recovery, or new refresh
+  policy was added.
+- Verification:
+  - local `python3 -m py_compile`: passed for changed code and tests;
+  - `git diff --check`: passed;
+  - A800 targeted tests with the established LingBot `PYTHONPATH`:
+    `65 passed in 9.05s`;
+  - full `tests/` collection remains blocked by the pre-existing environment
+    error `ModuleNotFoundError: No module named 'triton.ops'` through
+    `bitsandbytes` while importing `tests/test_readonly_cache.py`.
+- No model smoke or RoboTwin evaluation has been launched. First runtime gate
+  is adaptive-K shadow on the frozen Motion-on controls; live routing is not
+  allowed until shadow audit confirms zero decision disagreements.
+# 2026-07-15 WCAS shadow runtime smoke
+
+- R2 failed before any episode with
+  `geom_cu.so: undefined symbol: _ZN3c1015SmallVectorBaseIjE8grow_podEPvmm`.
+- Root cause: the outer command leaked server-only `torch29_clean_pkgs` into
+  the RoboTwin client and contaminated the shared cuRobo extension cache.
+- The older `env/codex_runs/torch_extensions` cache imports successfully with
+  the working system Torch 2.3 client (`kinematics_fused_cu` and `geom_cu`).
+- The launcher now preserves an explicitly selected extension cache. Default
+  behavior is unchanged.
+
+## 2026-07-15 WCAS shadow diagnosis and V1 adjustment
+
+- WCAS V0 shadow does not change actions and therefore cannot improve success
+  or reduce actual runtime; it measures potential K2 savings. Treating partial
+  task success as an adaptive-K quality result is invalid.
+- On 678 available verifier rows, the `0.05` pass certificate covered 334
+  calls (`49.05%`, at most `24.52%` of K=2 forwards) with zero observed
+  conflicts. A post-hoc `0.06` replay produced an `open_microwave` false pass
+  at distance `0.059837`: K1 accepted 32 actions, K2 accepted only 3 raw
+  actions, and the final prefix was zero. Relaxing the pass threshold is
+  rejected; low-motion conflicts also prohibit motion-conditioned relaxation.
+- Added a shadow-only exact fail certificate. Because K probes are intersected,
+  a K1 continuous or gripper-consensus prefix already quantized to zero cannot
+  become executable after K2. This targets hard rounds where pass coverage is
+  low without changing teacher fallback.
+- A skipped K1 call must never be counted as a measured full-K match. Only
+  shadow or forced-audit calls that actually run K2 contribute to certificate
+  precision. Summaries now separate pass/fail conflicts and actual/potential
+  saved forwards.
+- Live adaptive K is blocked with flow-budget routing: K1-only distances would
+  change later budget decisions. V1 remains shadow-only pending a fresh matched
+  run and a real-model live smoke.
+- A800 focused verification passed `67/67`; no new evaluation has been launched
+  from V1 yet.

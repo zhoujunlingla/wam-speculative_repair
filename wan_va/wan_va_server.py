@@ -40,6 +40,7 @@ from specverify import (
     action_verify_frame_start,
     bounded_continuous_prefix_repair,
     build_verify_action_input,
+    cross_tau_endpoint_distances,
     flow_euler_step,
     gripper_consensus_prefix,
     gripper_switch_info,
@@ -429,6 +430,9 @@ class VA_Server:
                             gripper_threshold=0.0,
                             gripper_consensus=False,
                             return_gripper_phase=False,
+                            adaptive_k_mode='off',
+                            adaptive_k_distance_threshold=0.05,
+                            adaptive_k_force_full=False,
                             flow_repair=False,
                             flow_repair_tau=0.0,
                             flow_repair_prefix_len=16,
@@ -444,18 +448,27 @@ class VA_Server:
             raise ValueError(
                 'dual-arm verification requires latent gripper channels 28/29')
 
-        tau_timesteps = torch.as_tensor(tau_timesteps,
-                                        dtype=torch.float32,
-                                        device=self.device).flatten()
-        if tau_timesteps.numel() < 1:
+        requested_tau_timesteps = torch.as_tensor(
+            tau_timesteps, dtype=torch.float32, device=self.device
+        ).flatten()
+        if requested_tau_timesteps.numel() < 1:
             raise ValueError('tau_timesteps must be non-empty')
-        if gripper_consensus and tau_timesteps.numel() < 2:
+        if gripper_consensus and requested_tau_timesteps.numel() < 2:
             raise ValueError('gripper consensus requires at least two tau probes')
+        if adaptive_k_mode not in ('off', 'shadow', 'live'):
+            raise ValueError('adaptive_k_mode must be off, shadow, or live')
+        if adaptive_k_mode != 'off' and requested_tau_timesteps.numel() < 2:
+            raise ValueError('adaptive K requires at least two tau probes')
+        if (not np.isfinite(adaptive_k_distance_threshold)
+                or adaptive_k_distance_threshold < 0):
+            raise ValueError('adaptive K distance threshold must be non-negative')
+        if adaptive_k_mode == 'live' and flow_repair:
+            raise ValueError('live adaptive K is incompatible with flow repair')
 
         draft = draft_actions.to(device=self.device, dtype=self.dtype).clone()
         draft[:, ~self.action_mask] = 0
-        batch_size = tau_timesteps.numel()
-        draft_batch = draft.repeat(batch_size, 1, 1, 1, 1)
+        requested_batch_size = requested_tau_timesteps.numel()
+        draft_batch = draft.repeat(requested_batch_size, 1, 1, 1, 1)
         if verify_noise is None:
             shared_noise = sample_verify_noise_like(draft, verify_seed)
         else:
@@ -466,7 +479,7 @@ class VA_Server:
                 raise ValueError('verify_noise must match action_latent shape')
             shared_noise = shared_noise.clone()
         shared_noise[:, ~self.action_mask] = 0
-        noise_batch = shared_noise.repeat(batch_size, 1, 1, 1, 1)
+        noise_batch = shared_noise.repeat(requested_batch_size, 1, 1, 1, 1)
 
         conditioned_frame_count = action_verify_frame_start(frame_st_id)
         if conditioned_frame_count:
@@ -476,28 +489,170 @@ class VA_Server:
             scheduler=self.verify_scheduler,
             clean=draft_batch,
             noise=noise_batch,
-            timesteps=tau_timesteps,
+            timesteps=requested_tau_timesteps,
         )
         # ponytail: microbatch K probes through the read-only cache path. A
         # parallel temporary KV copy grows with episode length on A800.
-        velocity = torch.cat([
-            self.forward_action_only_verify(
-                z_tau[index:index + 1],
-                tau_timesteps[index:index + 1],
-                frame_st_id=frame_st_id,
-                cache_name=cache_name,
-            ) for index in range(batch_size)
-        ], dim=0)
-        reconstructed = scheduler_step_to_final_batched(
-            scheduler=self.verify_scheduler,
-            model_output=velocity,
-            timesteps=tau_timesteps,
-            sample=z_tau,
+        velocity_first = self.forward_action_only_verify(
+            z_tau[:1],
+            requested_tau_timesteps[:1],
+            frame_st_id=frame_st_id,
+            cache_name=cache_name,
         )
-        reconstructed[:, ~self.action_mask] = 0
+        reconstructed_first = scheduler_step_to_final_batched(
+            scheduler=self.verify_scheduler,
+            model_output=velocity_first,
+            timesteps=requested_tau_timesteps[:1],
+            sample=z_tau[:1],
+        )
+        reconstructed_first[:, ~self.action_mask] = 0
         if conditioned_frame_count:
-            reconstructed[:, :, :conditioned_frame_count] = draft_batch[:, :,
-                                                                          :conditioned_frame_count]
+            reconstructed_first[:, :, :conditioned_frame_count] = draft_batch[
+                :1, :, :conditioned_frame_count
+            ]
+
+        sentinel_distances = normalized_l2_distances(
+            reconstructed_first, draft_batch[:1]
+        )
+        sentinel_valid_distances = sentinel_distances[
+            :, conditioned_frame_count:, :
+        ]
+        sentinel_raw_prefix, _, _ = longest_prefix_min_over_k(
+            sentinel_valid_distances, threshold
+        )
+        sentinel_continuous_raw_prefix = (
+            conditioned_frame_count * self.action_per_frame
+            + sentinel_raw_prefix
+        )
+        sentinel_continuous_prefix = quantize_prefix_to_frame_boundary(
+            sentinel_continuous_raw_prefix,
+            action_per_frame=self.action_per_frame,
+            frame_chunk_size=self.job_config.frame_chunk_size,
+        )
+        gripper_channels = (28, 29)
+        sentinel_phase_agreement = bool(torch.all(
+            (reconstructed_first[
+                :, gripper_channels, conditioned_frame_count:
+            ] >= gripper_threshold)
+            == (draft_batch[
+                :1, gripper_channels, conditioned_frame_count:
+            ] >= gripper_threshold)
+        ).item())
+        sentinel_reconstructed_switch = gripper_switch_info(
+            reconstructed_first,
+            previous=previous_gripper,
+            threshold=gripper_threshold,
+        )
+        sentinel_draft_switch = gripper_switch_info(
+            draft,
+            previous=previous_gripper,
+            threshold=gripper_threshold,
+        )
+        sentinel_distance_max = float(
+            sentinel_valid_distances.max().float().item()
+        )
+        sentinel_full_prefix = (
+            sentinel_raw_prefix == sentinel_valid_distances.numel()
+        )
+        sentinel_gripper_raw_prefix = None
+        sentinel_gripper_failure_index = None
+        if gripper_consensus:
+            sentinel_gripper_raw_prefix, sentinel_gripper_failure_index = \
+                gripper_consensus_prefix(
+                    reconstructed_first,
+                    draft,
+                    max_prefix=sentinel_continuous_prefix,
+                    threshold=gripper_threshold,
+                )
+        sentinel_gripper_prefix = None
+        sentinel_accepted_prefix = sentinel_continuous_prefix
+        if sentinel_gripper_raw_prefix is not None:
+            sentinel_gripper_prefix = quantize_prefix_to_frame_boundary(
+                sentinel_gripper_raw_prefix,
+                action_per_frame=self.action_per_frame,
+                frame_chunk_size=self.job_config.frame_chunk_size,
+            )
+            sentinel_accepted_prefix = min(
+                sentinel_continuous_prefix, sentinel_gripper_prefix
+            )
+
+        adaptive_k_pass_certificate = bool(
+            adaptive_k_mode != 'off'
+            and sentinel_distance_max <= adaptive_k_distance_threshold
+            and sentinel_full_prefix
+            and sentinel_phase_agreement
+            and not sentinel_reconstructed_switch['has_switch']
+            and not sentinel_draft_switch['has_switch']
+        )
+        # Adding probes intersects per-probe decisions, so a K1 zero prefix is
+        # an exact fail certificate: K2 cannot restore an executable prefix.
+        adaptive_k_fail_reason = None
+        if sentinel_continuous_prefix == 0:
+            adaptive_k_fail_reason = 'continuous'
+        elif gripper_consensus and sentinel_gripper_prefix == 0:
+            adaptive_k_fail_reason = 'gripper_consensus'
+        # V1 fail certificates stay shadow-only until matched K2 telemetry
+        # confirms zero conflicts. Existing live pass behavior is unchanged.
+        adaptive_k_fail_certificate = bool(
+            adaptive_k_mode == 'shadow'
+            and adaptive_k_fail_reason is not None
+        )
+        adaptive_k_certificate_kind = (
+            'pass' if adaptive_k_pass_certificate
+            else 'fail' if adaptive_k_fail_certificate
+            else None
+        )
+        adaptive_k_would_skip = adaptive_k_certificate_kind is not None
+        adaptive_k_skipped = bool(
+            adaptive_k_mode == 'live'
+            and adaptive_k_would_skip
+            and not adaptive_k_force_full
+        )
+        adaptive_k_audited = bool(
+            adaptive_k_mode == 'live'
+            and adaptive_k_would_skip
+            and adaptive_k_force_full
+        )
+
+        if adaptive_k_skipped:
+            velocity = velocity_first
+            reconstructed = reconstructed_first
+            tau_timesteps = requested_tau_timesteps[:1]
+            z_tau = z_tau[:1]
+            draft_batch = draft_batch[:1]
+        else:
+            remaining_velocity = [
+                self.forward_action_only_verify(
+                    z_tau[index:index + 1],
+                    requested_tau_timesteps[index:index + 1],
+                    frame_st_id=frame_st_id,
+                    cache_name=cache_name,
+                )
+                for index in range(1, requested_batch_size)
+            ]
+            velocity = torch.cat(
+                [velocity_first, *remaining_velocity], dim=0
+            ) if remaining_velocity else velocity_first
+            if remaining_velocity:
+                reconstructed_remaining = scheduler_step_to_final_batched(
+                    scheduler=self.verify_scheduler,
+                    model_output=velocity[1:],
+                    timesteps=requested_tau_timesteps[1:],
+                    sample=z_tau[1:],
+                )
+                reconstructed = torch.cat(
+                    [reconstructed_first, reconstructed_remaining], dim=0
+                )
+                reconstructed[:, ~self.action_mask] = 0
+                if conditioned_frame_count:
+                    reconstructed[:, :, :conditioned_frame_count] = draft_batch[
+                        :, :, :conditioned_frame_count
+                    ]
+            else:
+                reconstructed = reconstructed_first
+            tau_timesteps = requested_tau_timesteps
+
+        batch_size = tau_timesteps.numel()
 
         distances = normalized_l2_distances(reconstructed, draft_batch)
         valid_distances = distances[:, conditioned_frame_count:, :]
@@ -560,13 +715,17 @@ class VA_Server:
         consensus_prefix = accepted_before_gripper
         consensus_failure_index = None
         if gripper_consensus:
-            consensus_raw_prefix, consensus_failure_index = \
-                gripper_consensus_prefix(
-                    reconstructed,
-                    draft,
-                    max_prefix=accepted_before_gripper,
-                    threshold=gripper_threshold,
-                )
+            if adaptive_k_skipped:
+                consensus_raw_prefix = sentinel_gripper_raw_prefix
+                consensus_failure_index = sentinel_gripper_failure_index
+            else:
+                consensus_raw_prefix, consensus_failure_index = \
+                    gripper_consensus_prefix(
+                        reconstructed,
+                        draft,
+                        max_prefix=accepted_before_gripper,
+                        threshold=gripper_threshold,
+                    )
             consensus_prefix = quantize_prefix_to_frame_boundary(
                 consensus_raw_prefix,
                 action_per_frame=self.action_per_frame,
@@ -578,6 +737,17 @@ class VA_Server:
         elif any_reconstructed_switch:
             accepted_prefix = 0
             stitched_action_latent = teacher_endpoint
+
+        adaptive_k_certificate_matches_full = None
+        if batch_size == requested_batch_size:
+            if adaptive_k_certificate_kind == 'pass':
+                adaptive_k_certificate_matches_full = bool(
+                    accepted_prefix == draft.shape[2] * draft.shape[3]
+                )
+            elif adaptive_k_certificate_kind == 'fail':
+                adaptive_k_certificate_matches_full = bool(
+                    accepted_prefix == 0
+                )
 
         flow_repair_candidate = None
         flow_repair_stats = None
@@ -702,6 +872,18 @@ class VA_Server:
                         )
                         flow_repair_stats.update(bounded_stats)
 
+        cross_tau_distances = cross_tau_endpoint_distances(reconstructed)
+        if cross_tau_distances.numel():
+            cross_tau_stats = {
+                'mean': float(cross_tau_distances.mean().item()),
+                'max': float(cross_tau_distances.max().item()),
+                'p95': float(torch.quantile(
+                    cross_tau_distances.flatten(), 0.95
+                ).item()),
+            }
+        else:
+            cross_tau_stats = None
+
         teacher_endpoint_np = teacher_endpoint.detach().float().cpu().numpy()
         stitched_action_latent_np = stitched_action_latent.detach().float().cpu(
         ).numpy()
@@ -719,6 +901,35 @@ class VA_Server:
             'conditioned_frame_count': conditioned_frame_count,
             'distances': distances.detach().float().cpu(),
             'tau_timesteps': tau_timesteps.detach().float().cpu(),
+            'requested_tau_timesteps': requested_tau_timesteps.detach(
+            ).float().cpu().tolist(),
+            'requested_verify_k': int(requested_batch_size),
+            'effective_verify_k': int(batch_size),
+            'primary_verify_forwards': int(batch_size),
+            'adaptive_k_mode': adaptive_k_mode,
+            'adaptive_k_distance_threshold': float(
+                adaptive_k_distance_threshold),
+            'adaptive_k_force_full': bool(adaptive_k_force_full),
+            'adaptive_k_would_skip': adaptive_k_would_skip,
+            'adaptive_k_skipped': adaptive_k_skipped,
+            'adaptive_k_audited': adaptive_k_audited,
+            'adaptive_k_certificate_kind': adaptive_k_certificate_kind,
+            'adaptive_k_fail_reason': adaptive_k_fail_reason,
+            'adaptive_k_certificate_matches_full':
+                adaptive_k_certificate_matches_full,
+            'adaptive_k_sentinel_distance_max': sentinel_distance_max,
+            'adaptive_k_sentinel_full_prefix': sentinel_full_prefix,
+            'adaptive_k_sentinel_continuous_prefix':
+                sentinel_continuous_prefix,
+            'adaptive_k_sentinel_gripper_prefix': sentinel_gripper_prefix,
+            'adaptive_k_sentinel_accepted_prefix': sentinel_accepted_prefix,
+            'adaptive_k_sentinel_gripper_failure_index':
+                sentinel_gripper_failure_index,
+            'adaptive_k_sentinel_phase_agreement': sentinel_phase_agreement,
+            'adaptive_k_sentinel_gripper_switch': bool(
+                sentinel_reconstructed_switch['has_switch']
+                or sentinel_draft_switch['has_switch']),
+            'cross_tau_endpoint': cross_tau_stats,
             'threshold': float(threshold),
             'continuous_channels': list(range(14)),
             'gripper_channels': [28, 29],
@@ -1020,6 +1231,8 @@ class VA_Server:
         self.transformer.clear_pred_cache(self.cache_name)
         save_async(obs['obs'], os.path.join(self.exp_save_root, f'obs_data_{self.frame_st_id}.pt'))
         observed_latent = self._encode_obs(obs)
+        action_model_input = self.preprocess_action(obs['state'])
+        expected_video_frames = int(action_model_input.shape[2])
         delayed_video_error = None
         if obs.get('compare_video_prediction', False):
             if self.pending_video_prediction is None:
@@ -1028,8 +1241,23 @@ class VA_Server:
                 raise RuntimeError('video prediction/cache frame ids are misaligned')
             if observed_latent is None:
                 raise RuntimeError('video prediction comparison requires an observation')
-            delayed_video_error = latent_prediction_error_stats(
-                self.pending_video_prediction, observed_latent)
+            predicted_frames = int(self.pending_video_prediction.shape[2])
+            observed_frames = int(observed_latent.shape[2])
+            if (observed_frames != expected_video_frames
+                    or predicted_frames < expected_video_frames):
+                delayed_video_error = {
+                    'valid': False,
+                    'invalid_reason': 'latent_frame_alignment',
+                    'expected_latent_frames': expected_video_frames,
+                    'predicted_latent_frames': predicted_frames,
+                    'observed_latent_frames': observed_frames,
+                }
+            else:
+                delayed_video_error = latent_prediction_error_stats(
+                    self.pending_video_prediction,
+                    observed_latent,
+                    expected_frames=expected_video_frames,
+                )
             delayed_video_error.update(
                 prediction_frame_st_id=self.pending_video_prediction_frame_st_id,
                 real_frame_st_id=self.frame_st_id,
@@ -1043,7 +1271,6 @@ class VA_Server:
                 [self.init_latent, latent_model_input],
                 dim=2) if latent_model_input is not None else self.init_latent
 
-        action_model_input = self.preprocess_action(obs['state'])
         action_model_input = action_model_input.to(latent_model_input)
         logger.info(
             f"get KV cache obs: {latent_model_input.shape} {action_model_input.shape}"
@@ -1107,6 +1334,11 @@ class VA_Server:
                 gripper_threshold=float(obs.get('gripper_threshold', 0.0)),
                 gripper_consensus=bool(obs.get('gripper_consensus', False)),
                 return_gripper_phase=bool(obs.get('return_gripper_phase', False)),
+                adaptive_k_mode=str(obs.get('adaptive_k_mode', 'off')),
+                adaptive_k_distance_threshold=float(
+                    obs.get('adaptive_k_distance_threshold', 0.05)),
+                adaptive_k_force_full=bool(
+                    obs.get('adaptive_k_force_full', False)),
                 flow_repair=bool(obs.get('flow_repair', False)),
                 flow_repair_tau=float(obs.get('flow_repair_tau', 0.0)),
                 flow_repair_prefix_len=int(

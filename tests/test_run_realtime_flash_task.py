@@ -87,6 +87,57 @@ def test_source_summary_reports_repaired_episode_success(tmp_path):
     assert repair["episode_alignment_valid"] is True
 
 
+def test_source_summary_counts_adaptive_k_forward_savings(tmp_path):
+    path = tmp_path / "metrics.jsonl"
+    path.write_text(
+        '{"source":"draft_flash","requested_verify_k":2,'
+        '"effective_verify_k":1,"adaptive_k_would_skip":true,'
+        '"adaptive_k_skipped":true,"adaptive_k_audited":false,'
+        '"adaptive_k_certificate_kind":"pass"}\n'
+        '{"source":"draft_flash","requested_verify_k":2,'
+        '"effective_verify_k":2,"adaptive_k_would_skip":true,'
+        '"adaptive_k_skipped":false,"adaptive_k_audited":true,'
+        '"adaptive_k_certificate_kind":"fail",'
+        '"adaptive_k_certificate_matches_full":false}\n'
+    )
+
+    adaptive = source_summary(path)["adaptive_k"]
+
+    assert adaptive == {
+        "calls": 2,
+        "would_skip": 2,
+        "skipped": 1,
+        "audited": 1,
+        "certificate_kinds": {
+            "pass": {
+                "certificates": 1,
+                "evaluated": 0,
+                "matches": 0,
+                "conflicts": 0,
+                "skipped": 1,
+                "saved_forwards": 1,
+                "potential_saved_forwards": 1,
+            },
+            "fail": {
+                "certificates": 1,
+                "evaluated": 1,
+                "matches": 0,
+                "conflicts": 1,
+                "skipped": 0,
+                "saved_forwards": 0,
+                "potential_saved_forwards": 1,
+            },
+        },
+        "certificates_evaluated": 1,
+        "certificate_matches": 0,
+        "certificate_conflicts": 1,
+        "requested_forwards": 4,
+        "effective_forwards": 3,
+        "saved_forwards": 1,
+        "potential_saved_forwards": 2,
+    }
+
+
 def test_source_summary_rejects_misaligned_episode_outcomes(tmp_path):
     path = tmp_path / "metrics.jsonl"
     path.write_text('{"source":"reset"}\n{"source":"teacher_full"}\n')

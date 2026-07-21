@@ -1,5 +1,17 @@
 # Code Review: Realtime-VLA-FLASH Migration
 
+## 2026-07-15 Runtime Cache Override Review
+
+No blocking finding. `runtime_env` now uses `setdefault` for
+`TORCH_EXTENSIONS_DIR`, so existing launches retain the same default while a
+run can select a cuRobo cache compiled for the client Torch ABI. Server/client
+Torch isolation, CUDA visibility, model configs, verifier parameters, and
+policy decisions are untouched.
+
+Verification: shell command syntax passed; system Torch 2.3 imported both
+`kinematics_fused_cu` and `geom_cu` from the selected cache. Proceed to one
+real shadow smoke before any matched evaluation.
+
 ## Scope
 
 Clean LingBot-VA commit `7c6ffa9` plus a new one-server speculative policy,
@@ -657,3 +669,105 @@ Allowed to create the reviewed commit and run one final real-model smoke from
 that exact code. Formal low10 x 20 is allowed only after the final smoke has a
 valid artifact, no cache/reset/render error, and at least one repair path is
 observed or a dedicated server-level FCR probe succeeds.
+## WCAS V0 Adaptive-K Review (2026-07-15)
+
+### Scope
+
+This review covers the optional `off|shadow|live` adaptive-K verifier path,
+cross-tau endpoint telemetry, strict delayed-video frame alignment, launcher
+plumbing, summaries, tests, and design/progress artifacts. It does not cover
+action repair, new world-latent routing, training, or RoboTwin quality claims.
+
+### Findings
+
+No blocking static or policy-state-machine finding remains.
+
+- **Medium runtime risk:** the live server branch changes the number of
+  action-only teacher forwards inside `VA_Server.verify_action_chunk`. The
+  lightweight suite validates its configuration and policy protocol, but a
+  real-model smoke is still required to verify CUDA/cache preservation and
+  measured latency before live mode is allowed.
+- **Medium calibration risk:** the 0.05 sentinel threshold comes from offline
+  replay. It is implemented in `shadow` mode specifically so false
+  certificates can be measured under the frozen K=2 decision before any probe
+  is skipped.
+- **Low compatibility risk:** adaptive K defaults to `off`; the existing 65
+  verifier/policy/summary tests pass with defaults. Live mode rejects every
+  existing repair composition, preventing a K=1 certificate from silently
+  changing repair construction or holdout semantics.
+- **Low telemetry risk:** cross-tau endpoint disagreement is computed only on
+  the 14 continuous action channels. A certified K=1 call reports no
+  cross-tau statistic rather than manufacturing zero disagreement.
+- **Low latent-alignment risk:** a longer cached prediction may be sliced to
+  the exact executed frame count, but an observed-count mismatch or a shorter
+  prediction is marked invalid. Invalid delayed telemetry is logged and cannot
+  trigger the existing delayed-error controller.
+
+### Checks
+
+- `python3 -m py_compile` on all changed Python files and tests: passed.
+- `git diff --check`: passed.
+- A800 targeted suite using the established LingBot package path:
+  `65 passed in 9.43s`.
+- Full `tests/` collection: blocked before execution by the pre-existing
+  environment error `ModuleNotFoundError: No module named 'triton.ops'` from
+  `bitsandbytes` while importing `tests/test_readonly_cache.py`.
+- No model server smoke and no RoboTwin evaluation were run in this change.
+
+### Decision
+
+Allowed to proceed to **shadow-only** model smoke and matched evaluation.
+Live adaptive K is not approved until shadow logs show that every
+`adaptive_k_would_skip` call has the same K=2 prefix and gripper decision, and
+the server smoke confirms one saved teacher action-only forward without cache
+mutation. Repair and adaptive refresh remain excluded.
+
+## WCAS V1 Dual-Certificate Review (2026-07-15)
+
+### Scope
+
+This review covers the shadow-only K1 fail certificate, pass-threshold audit,
+certificate telemetry/summary accounting, and composition
+guards. It does not approve live fail certificates, task-conditioned
+thresholds, motion-conditioned thresholds, repair, or action changes.
+
+### Findings
+
+No blocking finding remains for shadow evaluation.
+
+- **Resolved high risk:** a skipped live K1 call originally reported itself as
+  matching full K even though K2 had not run. `certificate_matches_full` is now
+  nullable and is populated only when `effective_verify_k ==
+  requested_verify_k`.
+- **Resolved high risk:** the first draft accidentally exposed the new fail
+  certificate through the existing live mode. Fail certificates are now
+  shadow-only; existing live pass behavior is unchanged.
+- **Resolved medium risk:** a reconstructed gripper switch is not a universal
+  policy-level failure when gripper consensus/fallback is disabled. The exact
+  fail certificate is now limited to a zero continuous prefix or an enabled
+  gripper-consensus prefix of zero.
+- **Resolved medium risk:** live adaptive K now rejects cumulative flow-budget
+  routing, because skipping K2 would change the budget telemetry and could
+  alter subsequent routing.
+- **Resolved calibration risk:** the growing V0 log produced a false pass at
+  `0.06` (`open_microwave`, sentinel `0.059837`, K1 prefix 32 versus K2 raw
+  prefix 3/final zero). V1 retains `0.05`; the fresh matched run must report
+  zero conflicts separately for pass and fail certificates.
+- **Residual medium runtime risk:** helper/policy tests do not replace a
+  real-model live smoke. No live mode is approved by this review.
+
+### Verification
+
+- `python3 -m py_compile` on changed Python files and tests: passed.
+- `git diff --check`: passed.
+- A800 focused suite with repository `PYTHONPATH`: `67 passed in 1.50s`.
+- Tests cover K1 gripper failures at indices 0 and 15 remaining zero after a
+  second agreeing probe, per-kind summary accounting, nullable unobserved
+  full-K matches, and the flow-budget composition guard.
+
+### Decision
+
+Allowed to run a fresh **shadow-only** matched evaluation with the frozen
+`adaptive_k_distance_threshold=0.05`. Live fail certificates and relaxed pass
+thresholds are not approved. Promotion requires zero per-kind conflicts
+and material measured latency savings after a reviewed real-model live smoke.

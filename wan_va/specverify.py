@@ -47,6 +47,7 @@ def latent_prediction_error_stats(
     predicted: torch.Tensor,
     observed: torch.Tensor,
     *,
+    expected_frames: int,
     top_fraction: float = 0.1,
 ) -> dict:
     """Summarize an action-aligned predicted/observed video latent residual."""
@@ -57,14 +58,18 @@ def latent_prediction_error_stats(
         raise ValueError("predicted and observed latent spaces must match")
     if predicted.shape[0] != 1 or observed.shape[0] != 1:
         raise ValueError("delayed video error expects one rollout")
+    if expected_frames < 1:
+        raise ValueError("expected_frames must be positive")
+    if observed.shape[2] != expected_frames:
+        raise ValueError("observed latent frames must equal expected_frames")
+    if predicted.shape[2] < expected_frames:
+        raise ValueError("predicted latent does not cover expected_frames")
     if not 0 < top_fraction <= 1:
         raise ValueError("top_fraction must be in (0, 1]")
 
-    frames = min(predicted.shape[2], observed.shape[2])
-    if frames < 1:
-        raise ValueError("at least one aligned latent frame is required")
+    frames = int(expected_frames)
     predicted = predicted[:, :, :frames].float()
-    observed = observed[:, :, :frames].float()
+    observed = observed.float()
     residual = predicted - observed
     patch_rmse = residual.square().mean(dim=1).sqrt()
     flat_patch = patch_rmse.flatten()
@@ -77,6 +82,7 @@ def latent_prediction_error_stats(
     )[0]
 
     return {
+        "valid": True,
         "compared_latent_frames": frames,
         "latent_rmse": float(residual.square().mean().sqrt().item()),
         "latent_nrmse": float(
@@ -394,6 +400,38 @@ def normalized_l2_distances(
     return torch.linalg.vector_norm(diff, ord=2, dim=1) / math.sqrt(len(channels))
 
 
+def cross_tau_endpoint_distances(
+    reconstructed: torch.Tensor,
+    *,
+    continuous_channels=CONTINUOUS_CHANNELS,
+) -> torch.Tensor:
+    """Return normalized per-action disagreement for every endpoint pair."""
+
+    if reconstructed.ndim != 5 or reconstructed.shape[-1] != 1:
+        raise ValueError("reconstructed must have shape [K, C, F, N, 1]")
+    channels = tuple(int(channel) for channel in continuous_channels)
+    if not channels or len(set(channels)) != len(channels):
+        raise ValueError("continuous_channels must be non-empty and unique")
+    if min(channels) < 0 or max(channels) >= reconstructed.shape[1]:
+        raise ValueError("continuous channel index is outside the action tensor")
+    if reconstructed.shape[0] < 2:
+        return torch.empty(
+            (0, reconstructed.shape[2], reconstructed.shape[3]),
+            device=reconstructed.device,
+            dtype=torch.float32,
+        )
+
+    pairs = torch.combinations(
+        torch.arange(reconstructed.shape[0], device=reconstructed.device),
+        r=2,
+    )
+    left = reconstructed[pairs[:, 0]][:, channels, :, :, 0]
+    right = reconstructed[pairs[:, 1]][:, channels, :, :, 0]
+    return torch.linalg.vector_norm(
+        (left - right).float(), ord=2, dim=1
+    ) / math.sqrt(len(channels))
+
+
 def longest_prefix_min_over_k(
     distances: torch.Tensor,
     threshold: float,
@@ -489,8 +527,8 @@ def gripper_consensus_prefix(
         raise ValueError("actions must have shape [K, C, F, N, 1]")
     if draft.shape[0] != 1 or reconstructed.shape[1:] != draft.shape[1:]:
         raise ValueError("draft must contain one chunk matching every reconstruction")
-    if reconstructed.shape[0] < 2:
-        raise ValueError("cross-tau gripper consensus requires at least two probes")
+    if reconstructed.shape[0] < 1:
+        raise ValueError("gripper consensus requires at least one probe")
     channels = tuple(int(channel) for channel in gripper_channels)
     if not channels or min(channels) < 0 or max(channels) >= draft.shape[1]:
         raise ValueError("gripper channel index is outside the action tensor")

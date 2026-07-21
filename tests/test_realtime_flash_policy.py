@@ -1465,3 +1465,84 @@ def test_reset_clears_pending_updates_and_restores_first_full():
     assert policy.pending_gripper is not None
     assert response["action_source"] == "teacher_full"
     assert response["full_reason"] == "initial"
+
+
+def test_adaptive_k_shadow_is_forwarded_and_logged(tmp_path):
+    verify_result = {
+        "accepted_prefix": 32,
+        "requested_verify_k": 2,
+        "effective_verify_k": 2,
+        "primary_verify_forwards": 2,
+        "adaptive_k_mode": "shadow",
+        "adaptive_k_would_skip": True,
+        "adaptive_k_skipped": False,
+        "adaptive_k_audited": False,
+    }
+    events = []
+    teacher = _FakeModel("teacher", events, verify_results=(verify_result,))
+    log_path = tmp_path / "metrics.jsonl"
+    policy = RealtimeFlashPolicy(
+        _FakeModel("draft", events),
+        teacher,
+        pf_interval=20,
+        adaptive_k_mode="shadow",
+        adaptive_k_distance_threshold=0.05,
+        log_path=log_path,
+    )
+    policy.infer({"reset": True, "prompt": "test task"})
+    initial = policy.infer(_action_request())
+    policy.infer(_cache_request("anchor", initial["action"]))
+
+    response = policy.infer(_action_request())
+
+    verify_call = [call for call in teacher.calls if call["kind"] == "verify"][0]
+    record = json.loads(log_path.read_text().splitlines()[-1])
+    assert response["action_source"] == "draft_flash"
+    assert verify_call["request"]["adaptive_k_mode"] == "shadow"
+    assert verify_call["request"]["adaptive_k_distance_threshold"] == 0.05
+    assert verify_call["request"]["adaptive_k_force_full"] is False
+    assert record["adaptive_k_would_skip"] is True
+    assert record["primary_verify_forwards"] == 2
+
+
+def test_live_adaptive_k_forces_deterministic_audit_interval():
+    events = []
+    teacher = _FakeModel("teacher", events, verify_results=(32, 32))
+    policy = RealtimeFlashPolicy(
+        _FakeModel("draft", events),
+        teacher,
+        pf_interval=20,
+        adaptive_k_mode="live",
+        adaptive_k_audit_interval=2,
+    )
+    policy.infer({"reset": True, "prompt": "test task"})
+    initial = policy.infer(_action_request())
+    policy.infer(_cache_request("anchor", initial["action"]))
+
+    first = policy.infer(_action_request())
+    policy.infer(_cache_request("flash-1", first["action"]))
+    policy.infer(_action_request())
+
+    verify_calls = [call for call in teacher.calls if call["kind"] == "verify"]
+    assert verify_calls[0]["request"]["adaptive_k_force_full"] is False
+    assert verify_calls[1]["request"]["adaptive_k_force_full"] is True
+
+
+def test_live_adaptive_k_rejects_repair_composition():
+    with pytest.raises(ValueError, match="incompatible with action repair"):
+        RealtimeFlashPolicy(
+            _FakeModel("draft", []),
+            _FakeModel("teacher", []),
+            adaptive_k_mode="live",
+            zero_prefix_repair=True,
+        )
+
+
+def test_live_adaptive_k_rejects_flow_budget_composition():
+    with pytest.raises(ValueError, match="incompatible with flow-budget routing"):
+        RealtimeFlashPolicy(
+            _FakeModel("draft", []),
+            _FakeModel("teacher", []),
+            adaptive_k_mode="live",
+            flow_budget_threshold=0.2,
+        )

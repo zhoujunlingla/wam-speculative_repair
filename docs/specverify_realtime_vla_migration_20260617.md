@@ -22,10 +22,10 @@ the RobotWin client execution loop.
    The verifier needs exact tau levels such as 150 and 300, so
    `make_verify_scheduler()` always calls `set_timesteps(1000, training=True)`.
 
-2. Do not use `_repeat_input_for_cfg` for verifier batches.
+2. Preserve the teacher CFG cache contract for every verifier timestep.
 
-   `_repeat_input_for_cfg` assumes batch size 1. K parallel verifier timesteps
-   are packed by `build_verify_action_input()` with CFG disabled.
+   The teacher cache has one row per CFG condition. Each tau therefore runs as
+   its own complete CFG batch; tau rows must never be mapped onto CFG cache rows.
 
 3. Do not use scheduler vector APIs blindly for K-batch verification.
 

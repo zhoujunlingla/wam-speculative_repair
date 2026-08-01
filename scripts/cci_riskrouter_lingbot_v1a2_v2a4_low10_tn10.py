@@ -20,7 +20,7 @@ from pathlib import Path
 
 
 ROOT = Path("/mnt/afs/intern/manlichen/ivan/zhoujunl")
-CODE = ROOT / "Wam_Speed_up" / "lingbot-va-svdr-videorepair-20260702"
+CODE = Path(__file__).resolve().parents[1]
 ROBOTWIN_ROOT = ROOT / "Wam_Speed_up" / "RoboTwin"
 EXPERIMENT_ROOT = ROOT / "experiments" / "Wam_Speed_up"
 RESULT_ROOT = ROOT / "result" / "Wam_Speed_up"
@@ -33,6 +33,9 @@ CUDA_RUNTIME_LIB = Path("/usr/local/cuda-12.1/targets/x86_64-linux/lib")
 NVIDIA_550_ROOT = ROOT / "env" / "nvidia-550.90.07-jammy" / "extract"
 NVIDIA_550_LIB = NVIDIA_550_ROOT / "usr" / "lib" / "x86_64-linux-gnu"
 NVIDIA_550_ICD = NVIDIA_550_ROOT / "usr" / "share" / "vulkan" / "icd.d" / "nvidia_icd.json"
+NVIDIA_550_EGL_ICD = ROOT / "experiments" / "Wam_Speed_up" / "20260709_acp_eval_entrypoints" / "nvidia_icd_abs_egl.json"
+SAPIEN_VULKAN_LIBRARY = PYTHON_PKGS / "sapien" / "vulkan_library" / "libvulkan.so.1.3.224"
+SAPIEN_EGL_VENDOR = PYTHON_PKGS / "sapien" / "vulkan_library" / "10_nvidia.json"
 
 TASKS = [
     "hanging_mug",
@@ -74,14 +77,24 @@ def base_env(gpu: int, *, use_torch29: bool = True) -> dict[str, str]:
     python_paths = []
     if use_torch29:
         python_paths.append(str(TORCH29_CLEAN_PKGS))
-    python_paths.extend([str(PYTHON_PKGS), str(CUROBO_V1)])
+    python_paths.extend([str(CODE), str(ROBOTWIN_ROOT), str(CUROBO_V1), str(PYTHON_PKGS)])
     python_paths.append(env.get("PYTHONPATH", ""))
     env["PYTHONPATH"] = ":".join(p for p in python_paths if p)
     env["PATH"] = f"{NINJA_BIN}:/usr/local/cuda/bin:{env.get('PATH', '')}"
     env["TORCH_EXTENSIONS_DIR"] = os.environ.get("TORCH_EXTENSIONS_DIR", str(TORCH_EXTENSIONS))
     env["LIBRARY_PATH"] = f"{CUDA_RUNTIME_LIB}:{env.get('LIBRARY_PATH', '')}"
-    env["LD_LIBRARY_PATH"] = f"{NVIDIA_550_LIB}:{CUDA_RUNTIME_LIB}:{env.get('LD_LIBRARY_PATH', '')}"
-    env["VK_ICD_FILENAMES"] = str(NVIDIA_550_ICD)
+    env["LD_LIBRARY_PATH"] = (
+        f"{NVIDIA_550_LIB}:{CUDA_RUNTIME_LIB}:/usr/local/nvidia/lib:/usr/local/nvidia/lib64:"
+        f"{env.get('LD_LIBRARY_PATH', '')}"
+    )
+    # ponytail: ACP qworld needs the same EGL Vulkan stack as the known-good renderfix job.
+    env["VK_ICD_FILENAMES"] = str(NVIDIA_550_EGL_ICD)
+    env["__EGL_VENDOR_LIBRARY_FILENAMES"] = str(SAPIEN_EGL_VENDOR)
+    env["SAPIEN_VULKAN_LIBRARY_PATH"] = str(SAPIEN_VULKAN_LIBRARY)
+    env["NVIDIA_DRIVER_CAPABILITIES"] = "all"
+    env["MUJOCO_GL"] = "egl"
+    env["PYOPENGL_PLATFORM"] = "egl"
+    env["HF_ENDPOINT"] = "https://hf-mirror.com"
     env["TOKENIZERS_PARALLELISM"] = "false"
     env["DIFFUSERS_DISABLE_BITSANDBYTES"] = "1"
     env["PYTHONWARNINGS"] = "ignore::UserWarning"
@@ -371,6 +384,8 @@ def specverify_metrics(log_path: Path) -> dict[str, object]:
     source_latencies: dict[str, list[float]] = {}
     action_latencies: list[float] = []
     cache_latencies: list[float] = []
+    parsed_rows = 0
+    invalid_rows = 0
     if not log_path.exists():
         return {
             "counts": counts,
@@ -389,13 +404,16 @@ def specverify_metrics(log_path: Path) -> dict[str, object]:
                 "cache_updates": _latency_stats([]),
                 "by_source": {},
             },
+            "integrity": {"log_exists": False, "parsed_rows": 0, "invalid_rows": 0},
         }
     with log_path.open() as f:
         for line in f:
             try:
                 row = json.loads(line)
             except json.JSONDecodeError:
+                invalid_rows += 1
                 continue
+            parsed_rows += 1
             source = row.get("source")
             elapsed = row.get("elapsed_sec")
             if isinstance(source, str) and isinstance(elapsed, (int, float)):
@@ -420,6 +438,13 @@ def specverify_metrics(log_path: Path) -> dict[str, object]:
                 if isinstance(row.get("world_verify"), dict) or isinstance(verify.get("world_verify"), dict):
                     counts["world_verify"] += 1
                     counts["world_verify_accept"] += 1
+                if source in ("draft_repair_accept", "draft_svdr_repair_accept"):
+                    counts["repair_attempt"] += 1
+                    counts["repair_action_pass"] += 1
+                    counts["repair_accept"] += 1
+                    repair_verify = row.get("repair_verify") if isinstance(row.get("repair_verify"), dict) else {}
+                    if isinstance(repair_verify.get("world_verify"), dict):
+                        counts["repair_world_pass"] += 1
             elif source == "teacher_full":
                 counts["teacher_full"] += 1
             elif source == "teacher_fallback":
@@ -447,11 +472,16 @@ def specverify_metrics(log_path: Path) -> dict[str, object]:
                 counts["teacher_repair_world_reject"] += 1
                 counts["world_verify"] += 1
                 counts["world_verify_reject"] += 1
+                counts["repair_attempt"] += 1
+                counts["repair_action_pass"] += 1
+                counts["repair_fail_world"] += 1
                 verify = row.get("repair_verify") if isinstance(row.get("repair_verify"), dict) else {}
             elif source in ("teacher_repair_reject", "teacher_svdr_repair_reject"):
                 counts["teacher_fallback"] += 1
                 counts[source] += 1
                 counts["verify_reject"] += 1
+                counts["repair_attempt"] += 1
+                counts["repair_fail_action"] += 1
                 verify = row.get("repair_verify") if isinstance(row.get("repair_verify"), dict) else {}
             elif source == "teacher_verify_reject":
                 counts["teacher_fallback"] += 1
@@ -498,6 +528,7 @@ def specverify_metrics(log_path: Path) -> dict[str, object]:
             "cache_updates": _latency_stats(cache_latencies),
             "by_source": {source: _latency_stats(values) for source, values in sorted(source_latencies.items())},
         },
+        "integrity": {"log_exists": True, "parsed_rows": parsed_rows, "invalid_rows": invalid_rows},
     }
 
 
@@ -524,6 +555,7 @@ def summarize(
     counts = metrics["counts"]
     rates = metrics["rates"]
     latency = metrics["latency"]
+    integrity = metrics["integrity"]
     summary = {
         "run_root": str(run_root),
         "result_root": str(result_root),
@@ -540,6 +572,7 @@ def summarize(
         "specverify_counts": counts,
         "specverify_rates": rates,
         "latency_summary": latency,
+        "metrics_integrity": integrity,
         "updated_at": datetime.now().isoformat(timespec="seconds"),
         "rows": rows,
     }
@@ -562,7 +595,7 @@ def summarize(
             writer.writeheader()
             writer.writerows(rows)
         lines = [
-            "# LingBot-VA Risk Router Low10 TN10",
+            f"# LingBot-VA Risk Router Low10 TN{test_num}",
             "",
             f"- Start: {start_time}",
             f"- End: {end_time or 'RUNNING'}",
@@ -580,6 +613,7 @@ def summarize(
             f"- SpecVerify rates: `{rates}`",
             f"- Action latency: `{latency['action_rounds']}`",
             f"- Cache/update latency: `{latency['cache_updates']}`",
+            f"- Metrics integrity: `{integrity}`",
             "",
             "| Task | Success | Total | Rate | Teacher Clean | Delta | Status |",
             "| --- | ---: | ---: | ---: | ---: | ---: | --- |",
@@ -643,6 +677,7 @@ def run_task(
 ) -> tuple[int, str]:
     log_path = run_root / "logs" / f"client_{task}.log"
     result_task_log = result_root / "logs" / f"client_{task}.log"
+    run_label = run_root.parent.parent.name if run_root.parent.name == "shards" else run_root.name
     # Keep the RobotWin client on the same system-torch/cuRobo environment used
     # by the successful Flash-WAM reproduction run. The torch 2.9 overlay is
     # only required by the LingBot/FlashWAM server code path.
@@ -729,7 +764,7 @@ def run_task(
         "--model_name",
         "0",
         "--ckpt_setting",
-        "WAM-SpecRepair-official-step3000-v1a2-draft-v2a4-teacher",
+        f"WAM-SpecRepair-{run_label}",
         "--seed",
         "0",
         "--policy_name",

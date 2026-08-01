@@ -10,6 +10,21 @@ import torch
 from utils import FlowMatchScheduler
 
 
+def sample_verify_noise_like(clean: torch.Tensor, seed=None) -> torch.Tensor:
+    """Sample one verifier probe, optionally reproducible for repair reverify."""
+
+    if seed is None:
+        return torch.randn_like(clean)
+    generator = torch.Generator(device=clean.device)
+    generator.manual_seed(int(seed))
+    return torch.randn(
+        clean.shape,
+        dtype=clean.dtype,
+        device=clean.device,
+        generator=generator,
+    )
+
+
 def make_verify_scheduler(action_snr_shift: float) -> FlowMatchScheduler:
     """Build an action verifier scheduler that is independent of inference.
 
@@ -50,55 +65,6 @@ def quantize_prefix_to_frame_boundary(
     max_len = action_per_frame * frame_chunk_size
     prefix_len = max(0, min(int(prefix_len), max_len))
     return (prefix_len // action_per_frame) * action_per_frame
-
-
-def build_verify_action_input(
-    *,
-    noisy_action: torch.Tensor,
-    prompt_embeds: torch.Tensor,
-    grid_id: torch.Tensor,
-    timesteps: torch.Tensor,
-    dtype: torch.dtype,
-    conditioned_frame_count: int = 0,
-) -> dict:
-    """Pack a K-batch action verifier input without classifier-free guidance.
-
-    ``wan_va_server._repeat_input_for_cfg`` assumes batch size 1 and is unsafe
-    for K parallel verification timesteps. This helper repeats only the prompt,
-    grid, and per-row timestep metadata needed by the action branch.
-    """
-
-    if noisy_action.ndim != 5:
-        raise ValueError("noisy_action must have shape [K, C, F, N, 1]")
-    batch_size = noisy_action.shape[0]
-    frame_count = noisy_action.shape[2]
-    timesteps = timesteps.to(device=noisy_action.device, dtype=torch.float32).flatten()
-    if timesteps.numel() != batch_size:
-        raise ValueError("timesteps must contain one value per verifier batch")
-
-    text_emb = prompt_embeds.to(device=noisy_action.device, dtype=dtype)
-    if text_emb.shape[0] == 1:
-        text_emb = text_emb.repeat(batch_size, 1, 1)
-    elif text_emb.shape[0] != batch_size:
-        raise ValueError("prompt_embeds batch must be 1 or match noisy_action batch")
-
-    if grid_id.ndim == 2:
-        grid_id = grid_id.to(noisy_action.device)[None].repeat(batch_size, 1, 1)
-    elif grid_id.ndim == 3 and grid_id.shape[0] == batch_size:
-        grid_id = grid_id.to(noisy_action.device)
-    else:
-        raise ValueError("grid_id must have shape [tokens, 3] or [K, tokens, 3]")
-
-    timestep_rows = timesteps[:, None].repeat(1, frame_count)
-    if conditioned_frame_count:
-        timestep_rows[:, :conditioned_frame_count] = 0
-
-    return {
-        "noisy_latents": noisy_action,
-        "text_emb": text_emb,
-        "grid_id": grid_id,
-        "timesteps": timestep_rows,
-    }
 
 
 def scheduler_add_noise_batched(

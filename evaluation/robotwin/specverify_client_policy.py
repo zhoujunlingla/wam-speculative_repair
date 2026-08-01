@@ -895,6 +895,7 @@ class RiskRouterClientPolicy:
             verify_threshold = self.threshold * self.phase_threshold_scale
 
         want_repair = self.repair_enable or self.svdr_repair_enable
+        verify_seed = int(np.random.randint(0, 2**31 - 1))
         shortcut_verify = self.verify_shortcut_enable and (
             high_risk or not self.verify_shortcut_high_risk_only
         )
@@ -915,6 +916,7 @@ class RiskRouterClientPolicy:
             "dynamics_jerk_ref": self.risk_jerk_ref,
             "dynamics_phase_weight": self.risk_phase_weight,
             "return_step_mask": self.repair_step_mask_enable,
+            "verify_seed": verify_seed,
         })
         verify_ret["phase_switch"] = phase_switch
         verify_ret["phase_mode"] = "tighten" if phase_switch else "normal"
@@ -939,6 +941,7 @@ class RiskRouterClientPolicy:
         if accepted_prefix <= 0:
             repair_action = verify_ret.get("repair_action")
             repair_action_latent = verify_ret.get("repair_action_latent")
+            repair_verify_ret = None
             svdr_meta = None
             repair_mask_meta = None
             if want_repair and repair_action is not None and repair_action_latent is not None:
@@ -1000,6 +1003,7 @@ class RiskRouterClientPolicy:
                     "dynamics_jerk_ref": self.risk_jerk_ref,
                     "dynamics_phase_weight": self.risk_phase_weight,
                     "return_step_mask": self.repair_step_mask_enable,
+                    "verify_seed": verify_seed,
                 })
                 repair_verify_ret["phase_switch"] = phase_switch
                 repair_verify_ret["phase_mode"] = "repair_tighten" if phase_switch else "repair"
@@ -1110,7 +1114,9 @@ class RiskRouterClientPolicy:
             return self._teacher_action(obs, fallback_source, {
                 "risk": risk,
                 "verify": verify_log,
+                "repair_verify": repair_verify_ret,
                 "svdr": svdr_meta,
+                "repair_mask": repair_mask_meta,
                 "accepted_prefix": accepted_prefix,
                 "elapsed_sec": elapsed,
                 "pending_teacher_cache_updates": len(self.pending_teacher_cache_obs),

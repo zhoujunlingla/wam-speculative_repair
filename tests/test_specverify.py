@@ -1,5 +1,6 @@
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import torch
 
@@ -7,12 +8,72 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "wan_va"))
 
 from specverify import (
     action_verify_frame_start,
-    build_verify_action_input,
     make_verify_scheduler,
     quantize_prefix_to_frame_boundary,
+    sample_verify_noise_like,
     scheduler_add_noise_batched,
     scheduler_step_to_final_batched,
 )
+
+
+def test_verify_noise_seed_is_reproducible():
+    clean = torch.zeros(1, 3, 2, 4, 1)
+    first = sample_verify_noise_like(clean, seed=1234)
+    second = sample_verify_noise_like(clean, seed=1234)
+    other = sample_verify_noise_like(clean, seed=1235)
+
+    assert torch.equal(first, second)
+    assert not torch.equal(first, other)
+
+
+def test_action_verify_runs_each_tau_as_a_complete_cfg_batch():
+    from wan_va_server import VA_Server
+
+    calls = []
+
+    def prepare(_, action, _latent_t, action_t, _latent_cond, _action_cond, frame_st_id):
+        frame_count, action_count = action.shape[2:4]
+        return {"action_res_lst": {
+            "noisy_latents": action,
+            "timesteps": torch.full((frame_count,), float(action_t)),
+            "grid_id": torch.zeros(frame_count * action_count, 3),
+            "text_emb": torch.zeros(1, 1, 1),
+        }}
+
+    def repeat_cfg(data):
+        data = dict(data)
+        data["noisy_latents"] = data["noisy_latents"].repeat(2, 1, 1, 1, 1)
+        data["timesteps"] = data["timesteps"][None].repeat(2, 1)
+        data["grid_id"] = data["grid_id"][None].repeat(2, 1, 1)
+        data["text_emb"] = torch.zeros(2, 1, 1)
+        return data
+
+    def transformer(data, **_kwargs):
+        batch, channels, frames, actions, _ = data["noisy_latents"].shape
+        calls.append((batch, data["timesteps"][:, 0].tolist()))
+        return torch.zeros(batch, frames * actions, channels)
+
+    fake = SimpleNamespace(
+        prompt_embeds=torch.zeros(1, 1, 1),
+        device=torch.device("cpu"),
+        dtype=torch.float32,
+        cache_name="test",
+        action_mask=torch.ones(3, dtype=torch.bool),
+        action_per_frame=4,
+        job_config=SimpleNamespace(action_dim=3, action_guidance_scale=1.0),
+        _prepare_latent_input=prepare,
+        _repeat_input_for_cfg=repeat_cfg,
+        transformer=transformer,
+    )
+    output = VA_Server.forward_action_only_verify(
+        fake,
+        torch.zeros(2, 3, 2, 4, 1),
+        torch.tensor([150.0, 300.0]),
+        frame_st_id=2,
+    )
+
+    assert output.shape == (2, 3, 2, 4, 1)
+    assert calls == [(2, [150.0, 150.0]), (2, [300.0, 300.0])]
 
 
 def test_verify_scheduler_keeps_full_resolution_after_teacher_scheduler_is_coarse():
@@ -21,28 +82,6 @@ def test_verify_scheduler_keeps_full_resolution_after_teacher_scheduler_is_coars
     for timestep in (150.0, 300.0):
         closest = torch.min(torch.abs(scheduler.timesteps - timestep)).item()
         assert closest < 1e-4
-
-
-def test_build_verify_action_input_batches_k_without_cfg_repeat():
-    noisy_action = torch.zeros(2, 30, 2, 16, 1)
-    prompt_embeds = torch.randn(1, 8, 4)
-    grid_id = torch.arange(2 * 16 * 3).view(2 * 16, 3)
-    timesteps = torch.tensor([150.0, 300.0])
-
-    packed = build_verify_action_input(
-        noisy_action=noisy_action,
-        prompt_embeds=prompt_embeds,
-        grid_id=grid_id,
-        timesteps=timesteps,
-        dtype=torch.float32,
-    )
-
-    assert packed["noisy_latents"].shape[0] == 2
-    assert packed["text_emb"].shape[0] == 2
-    assert packed["grid_id"].shape[0] == 2
-    assert packed["timesteps"].shape == (2, 2)
-    assert torch.equal(packed["timesteps"][0], torch.tensor([150.0, 150.0]))
-    assert torch.equal(packed["timesteps"][1], torch.tensor([300.0, 300.0]))
 
 
 def test_chunk_zero_excludes_conditioned_first_action_frame():

@@ -1,5 +1,30 @@
 # V6 World-Latent Flow Consistency Verifier
 
+## V16 Deterministic Repair Reverification
+
+### Goal
+
+Make repair attribution valid: the original action verify and the repaired-action
+reverify must use the same Gaussian probe. Repair remains reject-only and still
+falls back to full teacher inference when the repaired candidate fails.
+
+### Scope
+
+- Run every verifier tau through its own complete CFG batch, matching normal
+  LingBot action inference instead of mapping tau rows onto CFG cache rows.
+- Generate one verifier seed per routed action round.
+- Reuse that seed for the initial verify and the single repair reverify.
+- Keep the existing tau set, thresholds, Verify++, cache policy, models, and
+  endpoint-residual repair unchanged.
+- Add regression checks for shared seed, repair acceptance, and repair rejection
+  followed by teacher fallback.
+
+### Gate
+
+The focused verifier tests must pass. Then run two otherwise identical low10
+TN=20 evaluations on four A800 GPUs each: no-repair and reject-only repair.
+Compare success, teacher action-source rate, repair attempts/accepts, and latency.
+
 ## Goal
 
 Validate whether LingBot-VA's video/world latent flow can improve speculative action acceptance beyond action-only verification.

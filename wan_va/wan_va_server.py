@@ -38,9 +38,9 @@ from utils import (
 )
 from specverify import (
     action_verify_frame_start,
-    build_verify_action_input,
     make_verify_scheduler,
     quantize_prefix_to_frame_boundary,
+    sample_verify_noise_like,
     scheduler_add_noise_batched,
     scheduler_step_to_final_batched,
     scheduler_step_to_timestep_batched,
@@ -384,7 +384,7 @@ class VA_Server:
                                    action_timesteps,
                                    frame_st_id=0,
                                    cache_name=None):
-        """Run the action branch for verifier timesteps without CFG repeat."""
+        """Run each verifier timestep through the teacher's full CFG batch."""
         if self.prompt_embeds is None:
             raise RuntimeError("forward_action_only_verify requires a prompt cache")
         if noisy_actions.ndim != 5:
@@ -403,64 +403,46 @@ class VA_Server:
         if timesteps.numel() != batch_size:
             raise ValueError("action_timesteps must be scalar or length K")
 
-        # The transformer KV cache batch is allocated from CFG state. For the
-        # LingBot teacher it is usually 2, so K=2 used to work by accident while
-        # K=3 crashed during temporary cache writes. Keep the fast path when K
-        # matches the cache batch; otherwise run verifier chunks with padding.
-        verify_batch_size = 2 if self.use_cfg else 1
-        if batch_size != verify_batch_size:
-            outputs = []
-            for start in range(0, batch_size, verify_batch_size):
-                end = min(start + verify_batch_size, batch_size)
-                real_size = end - start
-                action_chunk = noisy_actions[start:end]
-                timestep_chunk = timesteps[start:end]
-                if real_size < verify_batch_size:
-                    pad = verify_batch_size - real_size
-                    action_chunk = torch.cat([
-                        action_chunk,
-                        action_chunk[-1:].repeat(pad, 1, 1, 1, 1),
-                    ], dim=0)
-                    timestep_chunk = torch.cat([
-                        timestep_chunk,
-                        timestep_chunk[-1:].repeat(pad),
-                    ], dim=0)
-                chunk_out = self.forward_action_only_verify(
-                    action_chunk,
-                    timestep_chunk,
-                    frame_st_id=frame_st_id,
-                    cache_name=cache_name,
-                )[:real_size]
-                outputs.append(chunk_out)
-            return torch.cat(outputs, dim=0)
-
         conditioned_frame_count = action_verify_frame_start(frame_st_id)
         if conditioned_frame_count:
             noisy_actions[:, :, :conditioned_frame_count] = 0
         noisy_actions[:, ~self.action_mask] *= 0
 
-        grid_id = get_mesh_id(noisy_actions.shape[-3],
-                              noisy_actions.shape[-2],
-                              noisy_actions.shape[-1],
-                              1,
-                              1,
-                              frame_st_id,
-                              action=True).to(self.device)
-        input_dict = build_verify_action_input(
-            noisy_action=noisy_actions,
-            prompt_embeds=self.prompt_embeds,
-            grid_id=grid_id,
-            timesteps=timesteps,
-            dtype=self.dtype,
-            conditioned_frame_count=conditioned_frame_count,
-        )
-        action_noise_pred = self.transformer(input_dict,
-                                             update_cache=0,
-                                             cache_name=cache_name,
-                                             action_mode=True)
-        return rearrange(action_noise_pred,
-                         'b (f n) c -> b c f n 1',
-                         f=frame_chunk_size)
+        outputs = []
+        for row, timestep in enumerate(timesteps):
+            action_cond = torch.zeros(
+                [1, self.job_config.action_dim, 1, self.action_per_frame, 1],
+                device=self.device,
+                dtype=self.dtype,
+            ) if conditioned_frame_count else None
+            input_dict = self._prepare_latent_input(
+                None,
+                noisy_actions[row:row + 1],
+                timestep,
+                timestep,
+                None,
+                action_cond,
+                frame_st_id=frame_st_id,
+            )
+            action_noise_pred = self.transformer(
+                self._repeat_input_for_cfg(input_dict['action_res_lst']),
+                update_cache=0,
+                cache_name=cache_name,
+                action_mode=True,
+            )
+            action_noise_pred = rearrange(
+                action_noise_pred,
+                'b (f n) c -> b c f n 1',
+                f=frame_chunk_size,
+            )
+            if self.job_config.action_guidance_scale > 1:
+                action_noise_pred = action_noise_pred[1:] + self.job_config.action_guidance_scale * (
+                    action_noise_pred[:1] - action_noise_pred[1:]
+                )
+            else:
+                action_noise_pred = action_noise_pred[:1]
+            outputs.append(action_noise_pred)
+        return torch.cat(outputs, dim=0)
 
     def forward_video_only_verify(self,
                                   noisy_latents,
@@ -594,7 +576,8 @@ class VA_Server:
                             dynamics_delta_ref=0.25,
                             dynamics_jerk_ref=0.18,
                             dynamics_phase_weight=0.25,
-                            return_step_mask=False):
+                            return_step_mask=False,
+                            verify_seed=None):
         """Verify a normalized draft action chunk against the teacher flow."""
         if draft_actions.ndim != 5 or draft_actions.shape[0] != 1:
             raise ValueError("draft_actions must have shape [1, C, F, N, 1]")
@@ -608,7 +591,7 @@ class VA_Server:
         draft = draft_actions.to(device=self.device, dtype=self.dtype).clone()
         batch_size = tau_timesteps.numel()
         draft_batch = draft.repeat(batch_size, 1, 1, 1, 1)
-        noise = torch.randn_like(draft).repeat(batch_size, 1, 1, 1, 1)
+        noise = sample_verify_noise_like(draft, verify_seed).repeat(batch_size, 1, 1, 1, 1)
 
         conditioned_frame_count = action_verify_frame_start(frame_st_id)
         if conditioned_frame_count:
@@ -734,6 +717,7 @@ class VA_Server:
             "dynamics_score": dynamics_score.detach().float().cpu().numpy().tolist(),
             "alpha_cross_tau": float(alpha_cross_tau),
             "alpha_shortcut": float(alpha_shortcut),
+            "verify_seed": int(verify_seed) if verify_seed is not None else None,
         }
         if return_repair:
             repair_lambda = max(0.0, min(1.0, float(repair_lambda)))
@@ -1083,6 +1067,7 @@ class VA_Server:
                 dynamics_jerk_ref=float(obs.get("dynamics_jerk_ref", 0.18)),
                 dynamics_phase_weight=float(obs.get("dynamics_phase_weight", 0.25)),
                 return_step_mask=bool(obs.get("return_step_mask", False)),
+                verify_seed=obs.get("verify_seed"),
             )
             distances = verify_result.pop("distances")
             tau_timesteps = verify_result.pop("tau_timesteps")

@@ -351,6 +351,7 @@ def test_risk_router_repairs_action_reject_before_teacher_fallback(tmp_path):
     teacher_verify_calls = [call for call in clients[1].calls if call.get("verify_action")]
     assert len(teacher_verify_calls) == 2
     assert teacher_verify_calls[0]["return_repair"] is True
+    assert teacher_verify_calls[0]["verify_seed"] == teacher_verify_calls[1]["verify_seed"]
     np.testing.assert_array_equal(
         teacher_verify_calls[1]["action_latent"],
         np.full((1, 30, 2, 16, 1), 0.25, dtype=np.float32),
@@ -408,6 +409,7 @@ def test_risk_router_repair_instrument_only_does_not_execute_repair(tmp_path):
         log_path=str(log_path),
         client_factory=factory,
     )
+
     policy.frame_st_id = 2
 
     ret = policy.infer({"obs": ["x"], "state": np.zeros((16, 2, 16), dtype=np.float32)})
@@ -462,6 +464,35 @@ def test_risk_router_falls_back_when_repaired_action_still_rejects(tmp_path):
         log_path=str(log_path),
         client_factory=factory,
     )
+
+    policy.frame_st_id = 2
+    ret = policy.infer({"obs": ["x"], "state": np.zeros((16, 2, 16), dtype=np.float32)})
+
+    assert np.all(ret["action"] == 3.0)
+    teacher_verify_calls = [call for call in clients[1].calls if call.get("verify_action")]
+    assert len(teacher_verify_calls) == 2
+    assert teacher_verify_calls[0]["verify_seed"] == teacher_verify_calls[1]["verify_seed"]
+    records = [json.loads(line) for line in log_path.read_text().splitlines()]
+    assert records[-1]["source"] == "teacher_repair_reject"
+
+
+def test_repair_execution_metrics_are_counted(tmp_path):
+    from scripts.cci_riskrouter_lingbot_v1a2_v2a4_low10_tn10 import specverify_metrics
+
+    log_path = tmp_path / "metrics.jsonl"
+    rows = [
+        {"source": "draft_repair_accept", "elapsed_sec": 0.2, "repair_verify": {"accepted_prefix": 32}},
+        {"source": "teacher_repair_reject", "elapsed_sec": 0.4, "repair_verify": {"accepted_prefix": 0}},
+    ]
+    log_path.write_text("\n".join([*(json.dumps(row) for row in rows), "{bad-json"]) + "\n")
+
+    metrics = specverify_metrics(log_path)
+    counts = metrics["counts"]
+    assert counts["repair_attempt"] == 2
+    assert counts["repair_accept"] == 1
+    assert counts["repair_action_pass"] == 1
+    assert counts["repair_fail_action"] == 1
+    assert metrics["integrity"] == {"log_exists": True, "parsed_rows": 2, "invalid_rows": 1}
 
 
 def test_video_guided_blend_repairs_high_motion_frames_more_than_low_motion_frames():

@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__local__run_command",
+      "Bash",
+      "Read",
+      "Edit",
+      "Write",
+      "WebFetch",
+      "WebSearch"
+    ]
+  }
+}

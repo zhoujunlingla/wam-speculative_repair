@@ -266,3 +266,48 @@ When enabled, the launcher starts `wan_va/wan_va_single_spec_server.py` on the d
 
 2026-07-05T10:38:38
 
+
+## V12 Fovea Resolution-Sensitivity Probe (training-free gate)
+
+### Goal
+
+Decide, before training any foveated future-prediction module, whether LingBot-VA's RoboTwin success actually depends on fine spatial detail during precision-demanding chunks, and which camera stream carries that detail.
+
+### Motivation
+
+Literature read for this step (reports under `~/research/papers/<id>/report.md` on the user's Mac):
+
+- AtVLA (2608.02197): uncertainty-gated high-resolution crops help a VLA (pi0) on LIBERO and real robot, but only for perception, not future prediction.
+- Foveated Compression (2610.07729): at a fixed visual-token budget a learned single-region fovea (69.61) loses to uniform downsampling (70.99), while a region-choice oracle reaches 82.73. Localized fidelity is not automatically better than uniform resolution.
+- GapSight (2608.21762): "when/where to look again" is best supervised by the target model's own loss gap.
+- Starve to Perceive (2605.18603): models ignore extra visual detail unless training makes them depend on it.
+- AnyStep-WAM (2609.33748): adaptive denoising steps on LingBot-VA/RoboTwin keep 92.22% success with 3.68 mean steps; it saves compute but never measures precision.
+
+If degrading detail in fine chunks does not hurt LingBot-VA, adding a high-resolution fovea stream is unlikely to help without changing training.
+
+### Single New Feature
+
+`evaluation/robotwin/fovea_probe.py` wraps the client policy and degrades selected views (down-then-up resize, shape preserved) in the frames the server consumes:
+
+- `--fovea_probe_view {head,wrist,all}`: global view vs the two wrist views (LingBot-VA's existing local views).
+- `--fovea_probe_phase {all,fine,coarse}`: degrade only key frames whose executed chunk is fine (gripper switch or slow EE motion) or coarse.
+- `--fovea_probe_factor N`: resolution reduction; `1` is the logged no-degradation baseline.
+- `--fovea_probe_rule {gripper,speed,either}`, `--fovea_probe_speed_thresh`: phase rule. The executed chunk t is the phase proxy for predicting chunk t+1.
+- `--fovea_probe_log`: per-chunk phase records and per-episode success with seed.
+
+`scripts/launch_fovea_probe_sweep.sh` runs the condition grid against a running LingBot-VA server; `scripts/analyze_fovea_probe.py` reports success, Wilson CI, and paired (same seed) deltas with exact McNemar p-values against the factor-1 baseline.
+
+### Fixed Controls
+
+Server checkpoint, guidance scales, test_num, start seed, and task config are identical across conditions; only the probe flags change.
+
+### Pre-registered Reading
+
+- Calibrate `--fovea_probe_speed_thresh` from the baseline run's `speed_p25`/`speed_p50` before reading phase-specific rows.
+- Precision signal: `wrist-fine-x4` drops success clearly more than `wrist-coarse-x4` even though fine chunks are the minority (check `degraded_frac`).
+- Local vs global: compare `wrist-fine` against `head-fine`.
+- Stop condition: if `all-all-x4` is within CI of baseline, the policy does not use detail at this resolution and a fovea stream needs training-side pressure (Starve-to-Perceive style), not just more pixels.
+
+### Next Step If The Gate Passes
+
+Oracle fovea: fine-tune LingBot-VA with an extra contact-region view rendered at higher native resolution (RoboTwin re-collection with a higher-resolution camera), then compare 2x2: fovea in observation x fovea in predicted future, at matched token-steps against AnyStep-WAM and uniform resolution increase.

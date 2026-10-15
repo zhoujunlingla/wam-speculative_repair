@@ -449,6 +449,18 @@ def main(usr_args):
     else:
         model = WebsocketClientPolicy(port=usr_args['port'])
 
+    if usr_args.get("fovea_probe_view", "none") != "none":
+        from evaluation.robotwin.fovea_probe import FoveaProbeClientPolicy
+        model = FoveaProbeClientPolicy(
+            model,
+            view=usr_args["fovea_probe_view"],
+            phase=usr_args.get("fovea_probe_phase", "fine"),
+            factor=int(usr_args.get("fovea_probe_factor", 4)),
+            rule=usr_args.get("fovea_probe_rule", "either"),
+            speed_thresh=float(usr_args.get("fovea_probe_speed_thresh", 0.003)),
+            log_path=usr_args.get("fovea_probe_log"),
+        )
+
     st_seed, suc_num = eval_policy(task_name,
                                    TASK_ENV,
                                    args,
@@ -676,6 +688,9 @@ def eval_policy(task_name,
         if TASK_ENV.eval_video_path is not None:
             TASK_ENV._del_eval_video_ffmpeg()
 
+        if hasattr(model, "end_episode"):
+            model.end_episode(succ, seed=now_seed)
+
         if succ:
             TASK_ENV.suc += 1
             print("\033[92mSuccess!\033[0m")
@@ -771,6 +786,13 @@ def parse_args_and_config():
     parser.add_argument("--svdr_motion_ref", type=float, default=3.0)
     parser.add_argument("--svdr_topk_frac", type=float, default=0.10)
     parser.add_argument("--svdr_temperature", type=float, default=1.0)
+    parser.add_argument("--fovea_probe_view", choices=["none", "head", "wrist", "all"], default="none",
+                        help="Resolution-sensitivity probe: which camera views to degrade.")
+    parser.add_argument("--fovea_probe_phase", choices=["all", "fine", "coarse"], default="fine")
+    parser.add_argument("--fovea_probe_factor", type=int, default=4)
+    parser.add_argument("--fovea_probe_rule", choices=["gripper", "speed", "either"], default="either")
+    parser.add_argument("--fovea_probe_speed_thresh", type=float, default=0.003)
+    parser.add_argument("--fovea_probe_log", type=str, default=None)
     args = parser.parse_args()
 
     with open(args.config, "r", encoding="utf-8") as f:
@@ -831,6 +853,12 @@ def parse_args_and_config():
         "svdr_motion_ref": args.svdr_motion_ref,
         "svdr_topk_frac": args.svdr_topk_frac,
         "svdr_temperature": args.svdr_temperature,
+        "fovea_probe_view": args.fovea_probe_view,
+        "fovea_probe_phase": args.fovea_probe_phase,
+        "fovea_probe_factor": args.fovea_probe_factor,
+        "fovea_probe_rule": args.fovea_probe_rule,
+        "fovea_probe_speed_thresh": args.fovea_probe_speed_thresh,
+        "fovea_probe_log": args.fovea_probe_log,
     }
     argv_before_overrides = sys.argv[1:]
     if "--overrides" in argv_before_overrides:
@@ -874,6 +902,12 @@ def parse_args_and_config():
         "svdr_motion_ref": "--svdr_motion_ref",
         "svdr_topk_frac": "--svdr_topk_frac",
         "svdr_temperature": "--svdr_temperature",
+        "fovea_probe_view": "--fovea_probe_view",
+        "fovea_probe_phase": "--fovea_probe_phase",
+        "fovea_probe_factor": "--fovea_probe_factor",
+        "fovea_probe_rule": "--fovea_probe_rule",
+        "fovea_probe_speed_thresh": "--fovea_probe_speed_thresh",
+        "fovea_probe_log": "--fovea_probe_log",
     }
     for key, value in parser_updates.items():
         if flag_for_key[key] in explicit_flags or key not in config:

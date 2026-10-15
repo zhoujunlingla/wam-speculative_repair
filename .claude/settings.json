@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__local",
+      "mcp__local__run_command"
+    ]
+  }
+}
